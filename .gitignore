@@ -1,0 +1,31 @@
+# secrets. `.env*` covers .env, .env.local, .env.production and friends;
+# `*.env` catches prod.env-style names too. Negation must come AFTER the
+# broad patterns or git ignores it: env.example is a placeholder-only
+# template and IS committed on purpose.
+.env*
+*.env
+!env.example
+
+# Anything a tool might drop a real credential into.
+*.pem
+*.key
+secrets/
+.envrc
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# node / next
+node_modules/
+.next/
+out/
+.vercel/
+
+# misc
+.DS_Store
+*.log
+.playwright-mcp/

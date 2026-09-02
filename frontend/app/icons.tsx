@@ -1,0 +1,146 @@
+/**
+ * Inline SVG icons, stroked, 1.6px, currentColor.
+ *
+ * Hand-rolled rather than an icon package: we need eleven glyphs, and a
+ * dependency would ship hundreds. Deliberately no emoji — they render
+ * differently per platform and read as informal.
+ */
+
+type Props = { className?: string };
+
+function Svg({
+  children,
+  className = "h-4 w-4",
+}: Props & { children: React.ReactNode }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.6}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      {children}
+    </svg>
+  );
+}
+
+export const IconChat = (p: Props) => (
+  <Svg {...p}>
+    <path d="M21 12a8 8 0 0 1-8 8H8l-4 3v-5.5A8 8 0 0 1 12 4h1a8 8 0 0 1 8 8Z" />
+  </Svg>
+);
+
+export const IconLibrary = (p: Props) => (
+  <Svg {...p}>
+    <path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H9v16H5.5A1.5 1.5 0 0 1 4 18.5Z" />
+    <path d="M9 4h4.5A1.5 1.5 0 0 1 15 5.5v13A1.5 1.5 0 0 1 13.5 20H9" />
+    <path d="m17 5.6 2.6 12.1" />
+  </Svg>
+);
+
+export const IconLab = (p: Props) => (
+  <Svg {...p}>
+    <path d="M9 3h6M10 3v5.5L5.5 17A3 3 0 0 0 8 21h8a3 3 0 0 0 2.5-4L14 8.5V3" />
+    <path d="M7.5 14h9" />
+  </Svg>
+);
+
+export const IconPlus = (p: Props) => (
+  <Svg {...p}>
+    <path d="M12 5v14M5 12h14" />
+  </Svg>
+);
+
+export const IconClose = (p: Props) => (
+  <Svg {...p}>
+    <path d="M6 6l12 12M18 6 6 18" />
+  </Svg>
+);
+
+export const IconMenu = (p: Props) => (
+  <Svg {...p}>
+    <path d="M4 7h16M4 12h16M4 17h16" />
+  </Svg>
+);
+
+export const IconChevron = ({
+  className = "h-4 w-4",
+  open = false,
+}: Props & { open?: boolean }) => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={1.8}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={`${className} transition-transform ${open ? "rotate-90" : ""}`}
+    aria-hidden="true"
+  >
+    <path d="m9 6 6 6-6 6" />
+  </svg>
+);
+
+export const IconSearch = (p: Props) => (
+  <Svg {...p}>
+    <circle cx="11" cy="11" r="6.5" />
+    <path d="m16 16 4 4" />
+  </Svg>
+);
+
+export const IconTrash = (p: Props) => (
+  <Svg {...p}>
+    <path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13" />
+  </Svg>
+);
+
+export const IconCheck = (p: Props) => (
+  <Svg {...p}>
+    <path d="m5 13 4.5 4.5L19 7" />
+  </Svg>
+);
+
+export const IconUpload = (p: Props) => (
+  <Svg {...p}>
+    <path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5" />
+    <path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" />
+  </Svg>
+);
+
+export const IconDocument = (p: Props) => (
+  <Svg {...p}>
+    <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8Z" />
+    <path d="M14 3v5h5" />
+  </Svg>
+);
+
+export const IconQuote = (p: Props) => (
+  <Svg {...p}>
+    <path d="M6 7h5v5a4 4 0 0 1-4 4H6M14 7h5v5a4 4 0 0 1-4 4h-1" />
+  </Svg>
+);
+
+export const IconSignOut = (p: Props) => (
+  <Svg {...p}>
+    <path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3" />
+    <path d="M10 8l-4 4 4 4M6 12h9" />
+  </Svg>
+);
+
+export const IconSpinner = ({ className = "h-4 w-4" }: Props) => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={2}
+    strokeLinecap="round"
+    className={`${className} animate-spin`}
+    aria-hidden="true"
+  >
+    <path d="M12 3a9 9 0 1 0 9 9" />
+  </svg>
+);

@@ -1,0 +1,160 @@
+"""Recursive character chunking, hand-rolled.
+
+Written out rather than pulled from langchain-text-splitters because chunking
+is the single biggest lever on retrieval quality, and it's worth being able to
+see and tune the algorithm.
+
+The idea: try to split on the most semantically meaningful boundary that yields
+pieces under the size limit -- paragraphs first, then lines, then sentences,
+then words, and only mid-word as a last resort. Splitting mid-sentence strands
+the subject of a claim in one chunk and its number in another, which is exactly
+the failure that makes a RAG answer confidently wrong.
+"""
+
+import re
+from dataclasses import dataclass
+
+from app.services.parsing import Page
+
+SEPARATORS = ["\n\n", "\n", ". ", "; ", ", ", " ", ""]
+
+HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
+
+
+@dataclass(slots=True)
+class TextChunk:
+    index: int
+    page: int | None
+    text: str
+    heading: str | None = None
+
+
+def chunk_pages(pages: list[Page], *, size: int, overlap: int) -> list[TextChunk]:
+    """Chunk each page independently so a chunk never straddles two pages.
+
+    That costs a little efficiency at page boundaries but keeps every chunk
+    attributable to exactly one page, which is what makes citations honest.
+
+    Within a page, markdown headings are treated as HARD boundaries. Without
+    this, a 900-char window happily swallows the tail of one section plus the
+    head of the next, and the blended embedding sits between both topics --
+    near neither. Measured on the test report: asking for "main risks"
+    returned the headcount section until sections were split here.
+    """
+    if overlap >= size:
+        raise ValueError("chunk_overlap must be smaller than chunk_size")
+
+    chunks: list[TextChunk] = []
+    for page in pages:
+        for heading, body in _split_sections(page.text):
+            for piece in _split(body, size, overlap):
+                # Prepend the heading so an isolated chunk still states its own
+                # context. Retrieval sees "## Risks" next to the risk text,
+                # which measurably sharpens the match.
+                already_prefixed = heading is None or piece.startswith(heading)
+                text = piece if already_prefixed else f"{heading}\n{piece}"
+                chunks.append(
+                    TextChunk(
+                        index=len(chunks),
+                        page=page.number,
+                        text=text,
+                        heading=heading,
+                    )
+                )
+    return chunks
+
+
+def _split_sections(text: str) -> list[tuple[str | None, str]]:
+    """Split markdown into (heading, body) sections.
+
+    Text with no headings -- most PDF extractions -- comes back as a single
+    (None, text) section, so behaviour there is unchanged.
+    """
+    matches = list(HEADING_RE.finditer(text))
+    if not matches:
+        return [(None, text)]
+
+    sections: list[tuple[str | None, str]] = []
+
+    preamble = text[: matches[0].start()].strip()
+    if preamble:
+        sections.append((None, preamble))
+
+    for i, match in enumerate(matches):
+        heading_line = match.group(0).strip()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        body = text[match.end() : end].strip()
+        if body:
+            sections.append((heading_line, body))
+        else:
+            # A heading with no body of its own (e.g. an H1 title immediately
+            # followed by an H2). Keep it so its text is still searchable.
+            sections.append((heading_line, heading_line))
+    return sections
+
+
+def _split(text: str, size: int, overlap: int) -> list[str]:
+    pieces = _recursive_split(text, size, SEPARATORS)
+    return _merge_with_overlap(pieces, size, overlap)
+
+
+def _recursive_split(text: str, size: int, separators: list[str]) -> list[str]:
+    """Break text into fragments that are each <= size, or unsplittable."""
+    if len(text) <= size:
+        return [text] if text.strip() else []
+
+    separator = separators[0]
+    remaining = separators[1:]
+
+    if separator == "":
+        # Last resort: hard cut. Only reached by things like a single
+        # enormous unbroken token (base64 blob, minified data).
+        return [text[i : i + size] for i in range(0, len(text), size)]
+
+    parts = text.split(separator)
+    out: list[str] = []
+    for i, part in enumerate(parts):
+        # Put the separator back, except after the final part, so the text
+        # round-trips and sentence punctuation survives.
+        restored = part + separator if i < len(parts) - 1 else part
+        if len(restored) <= size:
+            if restored.strip():
+                out.append(restored)
+        else:
+            out.extend(_recursive_split(restored, size, remaining))
+    return out
+
+
+def _merge_with_overlap(pieces: list[str], size: int, overlap: int) -> list[str]:
+    """Greedily pack fragments up to `size`, repeating a tail as the overlap.
+
+    Overlap matters because a claim can span a boundary; repeating the tail of
+    the previous chunk gives the next chunk enough context to stand alone.
+    """
+    chunks: list[str] = []
+    current = ""
+
+    for piece in pieces:
+        if not current:
+            current = piece
+            continue
+        if len(current) + len(piece) <= size:
+            current += piece
+            continue
+
+        chunks.append(current.strip())
+        tail = _tail(current, overlap)
+        current = tail + piece if len(tail) + len(piece) <= size else piece
+
+    if current.strip():
+        chunks.append(current.strip())
+    return [c for c in chunks if c]
+
+
+def _tail(text: str, overlap: int) -> str:
+    """Last ~overlap chars, snapped forward to a word boundary."""
+    if overlap <= 0 or len(text) <= overlap:
+        return text if overlap > 0 else ""
+    tail = text[-overlap:]
+    space = tail.find(" ")
+    return tail[space + 1 :] if space != -1 else tail

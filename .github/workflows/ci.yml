@@ -1,0 +1,121 @@
+name: CI
+
+# Deploys are NOT done here. Vercel and Render both watch the repo directly and
+# build on push, so duplicating that in Actions would mean maintaining two
+# build paths that can disagree. This workflow only answers "should that deploy
+# be allowed to happen" -- lint, types, and a real production build.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A second push to the same branch cancels the first run still in flight.
+# Without this, pushing three fixes in a row burns three full runs and you wait
+# on the answer to the oldest one.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v5
+
+      # uv, not pip: pyproject.toml uses [dependency-groups] (PEP 735) for the
+      # dev group, which older pip cannot read at all. The Dockerfile already
+      # uses uv, so this keeps CI and the image on one resolver.
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      # --frozen: install exactly uv.lock and fail if it disagrees with
+      # pyproject.toml. This is the Python-side equivalent of `npm ci`, and the
+      # reason CI can be trusted to reproduce what Render will build.
+      - run: uv sync --frozen --no-install-project --group dev
+
+      - name: Ruff lint
+        run: uv run ruff check app
+
+      # No `ruff format --check` step on purpose. This codebase is hand-wrapped
+      # at 100 cols with prose comments sized to match the code they explain;
+      # the formatter wants to rejoin those into single long lines, so gating on
+      # it would mean one large mechanical reflow that changes no behaviour and
+      # damages the comments. `ruff check` (above) catches the real problems --
+      # unused imports, shadowing, bad async, import order. Formatting here is a
+      # style preference, not a defect class.
+
+      - name: Pytest
+        # Exit code 5 means "no tests collected", which is the honest current
+        # state of this repo -- there are no tests yet. Tolerating only 5 keeps
+        # the step green today and starts failing on real failures the moment
+        # the first test lands, without anyone remembering to re-enable it.
+        run: |
+          uv run pytest -q; code=$?
+          if [ $code -eq 5 ]; then echo "::warning::no tests collected"; exit 0; fi
+          exit $code
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          # 22, not 20: @supabase/supabase-js already warns on every build that
+          # Node 20 and below are deprecated and will be dropped. Keep this in
+          # step with frontend/Dockerfile.
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # `ci` not `install`: it installs exactly the lockfile and fails loudly if
+      # package.json and the lock have drifted. That drift has already broken
+      # the Docker build here once, so let CI be where it surfaces.
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # No frontend lint step. Next 16 REMOVED the `next lint` command (it was
+      # deprecated in 15), and it does not fail loudly -- it treats "lint" as a
+      # directory name and dies with "no such directory: ./lint", which reads
+      # like a broken checkout rather than a removed feature. ESLint is not
+      # installed here either, so there is nothing to run. `tsc --noEmit` above
+      # is doing the real work. Adding flat-config ESLint is a separate task.
+
+      - name: Build
+        # Supabase values are read at build time by the browser bundle. These
+        # are throwaway placeholders that only need to satisfy the client
+        # constructor's URL parsing -- the build makes no network calls, and no
+        # real credential should ever be needed to prove the app compiles.
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: sb_publishable_placeholder
+          NEXT_PUBLIC_API_URL: http://localhost:8000
+        run: npm run build
+
+  # Proves the image Render will actually build still builds. Cheap insurance:
+  # the prod target COPYs source that the dev target bind-mounts instead, so a
+  # missing file breaks prod while local dev stays perfectly green.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - name: Build backend prod image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          target: prod
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

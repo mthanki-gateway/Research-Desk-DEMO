@@ -1,0 +1,125 @@
+name: research-desk
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: rd
+      POSTGRES_PASSWORD: rd_local_dev
+      POSTGRES_DB: research_desk
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rd -d research_desk"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  qdrant:
+    # Keep this major.minor aligned with the qdrant-client version in
+    # backend/pyproject.toml -- the client warns and may misbehave if the
+    # server differs by more than one minor version.
+    image: qdrant/qdrant:v1.19.0
+    ports:
+      - "6333:6333"   # REST + web dashboard at http://localhost:6333/dashboard
+      - "6334:6334"   # gRPC
+    volumes:
+      - qdrantdata:/qdrant/storage
+    restart: unless-stopped
+    healthcheck:
+      # the qdrant image is distroless-ish; bash/curl are absent, so probe with
+      # the one thing that is guaranteed present: the qdrant binary itself.
+      test: ["CMD", "/qdrant/qdrant", "--version"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: ./backend
+      target: dev
+    env_file: .env
+    environment:
+      # Local development. This is what enables /docs, /redoc and
+      # /openapi.json -- config.py defaults APP_ENV to "prod" so that a
+      # deployment which forgets to set it gets the restrictive behaviour.
+      APP_ENV: dev
+      DATABASE_URL: postgresql+asyncpg://rd:rd_local_dev@postgres:5432/research_desk
+      QDRANT_URL: http://qdrant:6333
+      CORS_ORIGINS: http://localhost:3000
+      # Passed through from .env. Empty = auth disabled, and the app behaves
+      # exactly as it did before auth existed (one anonymous user, no
+      # filtering). The backend needs only the project URL: token verification
+      # uses the public JWKS endpoint, never a secret.
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      # One-time migration switch; see config.py. The pre-auth corpus has
+      # already been adopted, so this stays off.
+      ALLOW_CLAIM_UNOWNED: ${ALLOW_CLAIM_UNOWNED:-false}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/app:/app/app          # hot reload
+      # Read-only so ruff/pytest config edits apply without an image rebuild.
+      # Dependency changes still need `docker compose up -d --build api`.
+      - ./backend/pyproject.toml:/app/pyproject.toml:ro
+      - hfcache:/root/.cache/huggingface # persist fastembed model download
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ./frontend
+      target: dev
+    environment:
+      # server-side calls go container-to-container; browser calls go to localhost
+      API_URL_INTERNAL: http://api:8000
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      WATCHPACK_POLLING: "true"
+      # NEXT_PUBLIC_ so the browser bundle can read them. The anon key is
+      # designed to be public; it is not a secret.
+      NEXT_PUBLIC_SUPABASE_URL: ${SUPABASE_URL:-}
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend/app:/app/app
+      - ./frontend/lib:/app/lib
+    restart: unless-stopped
+    depends_on:
+      - api
+
+  # Optional DB browser:  docker compose --profile tools up -d pgweb
+  # Then http://localhost:8081 -- NO LOGIN, NO CREDENTIALS. It connects using
+  # DATABASE_URL below and opens straight onto the schema.
+  #
+  # Chosen over Adminer and pgAdmin for exactly that reason: both present a
+  # login form, and Adminer additionally defaults its System dropdown to
+  # MySQL, so the correct credentials still fail until you change it.
+  pgweb:
+    image: sosedoff/pgweb:latest
+    profiles: ["tools"]
+    environment:
+      # pgweb speaks libpq, so this is the plain URL -- no +asyncpg driver part.
+      DATABASE_URL: postgres://rd:rd_local_dev@postgres:5432/research_desk?sslmode=disable
+    # --lock-session pins the UI to DATABASE_URL and removes the Connect /
+    # Disconnect controls. Without it, clicking Disconnect drops you on a
+    # connection form whose SSL Mode defaults to "require", which cannot
+    # connect to local Postgres -- so a stray click looks like a broken tool.
+    command: ["--lock-session", "--bind", "0.0.0.0", "--listen", "8081"]
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  qdrantdata:
+  hfcache:

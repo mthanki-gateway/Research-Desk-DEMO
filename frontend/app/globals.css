@@ -1,0 +1,697 @@
+@import "tailwindcss";
+@import "./theme.css";
+
+/* Roboto is imported from layout.tsx, not here: Tailwind v4's PostCSS plugin
+   handles @import itself and cannot resolve a bare package specifier like
+   "@fontsource/roboto/400.css". A JS import lets webpack resolve it. */
+
+/* ===========================================================================
+   Material Design 3.
+
+   Colour roles are generated from a source colour by scripts/gen-theme.mjs and
+   live in theme.css. Everything below is the rest of the M3 system: type
+   scale, shape scale, elevation, state layers, motion.
+
+   The one deliberate departure from the spec: the navigation drawer stays
+   navy. Stock M3 makes it a light surface, but the dark chrome is the app's
+   identity, so it gets its own fixed --md-nav-* roles.
+   =========================================================================== */
+
+:root {
+  /* --- shape scale ------------------------------------------------------- */
+  --md-shape-none: 0;
+  --md-shape-xs: 4px;
+  --md-shape-sm: 8px;
+  --md-shape-md: 12px;
+  --md-shape-lg: 16px;
+  --md-shape-xl: 28px;
+  --md-shape-full: 9999px;
+
+  /* --- state layer opacities -------------------------------------------- */
+  /* The mechanism that makes Material feel tactile: an overlay of the
+     matching on-colour at a fixed opacity per state. */
+  --md-state-hover: 0.08;
+  --md-state-focus: 0.10;
+  --md-state-press: 0.10;
+  --md-state-drag: 0.16;
+
+  /* --- motion ----------------------------------------------------------- */
+  --md-ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --md-ease-emphasized: cubic-bezier(0.2, 0, 0, 1);
+  --md-ease-emphasized-decelerate: cubic-bezier(0.05, 0.7, 0.1, 1);
+  --md-ease-emphasized-accelerate: cubic-bezier(0.3, 0, 0.8, 0.15);
+  --md-dur-short: 150ms;
+  --md-dur-medium: 300ms;
+  --md-dur-long: 450ms;
+
+  /* --- elevation --------------------------------------------------------
+     M3 elevation is a shadow PLUS a surface tint (primary blended into the
+     surface). The tint is what stops dark-mode cards from disappearing, since
+     shadows are nearly invisible on dark surfaces. */
+  --md-elev-1: 0 1px 2px rgba(0, 0, 0, 0.30), 0 1px 3px 1px rgba(0, 0, 0, 0.15);
+  --md-elev-2: 0 1px 2px rgba(0, 0, 0, 0.30), 0 2px 6px 2px rgba(0, 0, 0, 0.15);
+  --md-elev-3: 0 4px 8px 3px rgba(0, 0, 0, 0.15), 0 1px 3px rgba(0, 0, 0, 0.30);
+  --md-elev-4: 0 6px 10px 4px rgba(0, 0, 0, 0.15), 0 2px 3px rgba(0, 0, 0, 0.30);
+  --md-elev-5: 0 8px 12px 6px rgba(0, 0, 0, 0.15), 0 4px 4px rgba(0, 0, 0, 0.30);
+
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    /* Shadows read as heavier on dark surfaces; M3 leans on tint instead. */
+    --md-elev-1: 0 1px 3px rgba(0, 0, 0, 0.55);
+    --md-elev-2: 0 2px 6px rgba(0, 0, 0, 0.55);
+    --md-elev-3: 0 4px 10px rgba(0, 0, 0, 0.55);
+  }
+}
+
+/* Must live in @layer base. Unlayered CSS outranks every layer regardless of
+   specificity, so as a bare `*` rule this silently defeated the border-color
+   of every component -- the focused text field kept the default outline colour
+   instead of turning primary, and hover states on chips and outlined buttons
+   never changed. Layered, `@layer components` wins as intended. */
+@layer base {
+  * {
+    border-color: var(--md-outline-variant);
+  }
+}
+
+/* The sidebar and rail are fixed elements parked off-canvas with translate-x.
+   A transformed fixed element still extends the scrollable area, which caused
+   a horizontal scrollbar and let the layout drift sideways. */
+html,
+body {
+  overflow-x: hidden;
+  max-width: 100%;
+}
+
+body {
+  background: var(--md-surface-container-low);
+  color: var(--md-on-surface);
+  font-family: Roboto, system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: var(--md-primary-container);
+  color: var(--md-on-primary-container);
+}
+
+/* M3 focus indicator: a 3px ring in the primary colour, keyboard only. */
+:focus-visible {
+  outline: 3px solid var(--md-primary);
+  outline-offset: 2px;
+  border-radius: var(--md-shape-xs);
+}
+
+/* Text inputs opt out. They already signal focus in their own way -- an M3
+   text field thickens its outline to 2px primary, and a bare search input has
+   a blinking caret -- so the ring is redundant and reads as a heavy blue box.
+   Higher specificity than the rule above, which is why Tailwind's
+   `outline-none` utility could not win: utilities live in a lower-priority
+   layer than this unlayered CSS. */
+input:focus-visible,
+textarea:focus-visible {
+  outline: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@layer components {
+  /* =========================================================================
+     Type scale. M3 defines 15 roles; these are the ones this app uses.
+     ========================================================================= */
+  .md-display-small { font-size: 2.25rem; line-height: 2.75rem; font-weight: 400; letter-spacing: 0; }
+  .md-headline-small { font-size: 1.5rem; line-height: 2rem; font-weight: 400; letter-spacing: 0; }
+  .md-title-large { font-size: 1.375rem; line-height: 1.75rem; font-weight: 400; letter-spacing: 0; }
+  .md-title-medium { font-size: 1rem; line-height: 1.5rem; font-weight: 500; letter-spacing: 0.009375em; }
+  .md-title-small { font-size: 0.875rem; line-height: 1.25rem; font-weight: 500; letter-spacing: 0.00714em; }
+  .md-body-large { font-size: 1rem; line-height: 1.5rem; font-weight: 400; letter-spacing: 0.03125em; }
+  .md-body-medium { font-size: 0.875rem; line-height: 1.25rem; font-weight: 400; letter-spacing: 0.01786em; }
+  .md-body-small { font-size: 0.75rem; line-height: 1rem; font-weight: 400; letter-spacing: 0.03333em; }
+  .md-label-large { font-size: 0.875rem; line-height: 1.25rem; font-weight: 500; letter-spacing: 0.00714em; }
+  .md-label-medium { font-size: 0.75rem; line-height: 1rem; font-weight: 500; letter-spacing: 0.04167em; }
+  .md-label-small { font-size: 0.6875rem; line-height: 1rem; font-weight: 500; letter-spacing: 0.04545em; }
+
+  /* =========================================================================
+     State layer. Applied via ::before so it tints without touching content.
+     Any interactive surface gets `.md-state` plus a --md-state-color.
+     ========================================================================= */
+  .md-state {
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
+  }
+  .md-state::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: var(--md-state-color, var(--md-on-surface));
+    opacity: 0;
+    transition: opacity var(--md-dur-short) var(--md-ease-standard);
+    pointer-events: none;
+    z-index: 0;
+  }
+  .md-state:hover:not(:disabled)::before { opacity: var(--md-state-hover); }
+  .md-state:focus-visible:not(:disabled)::before { opacity: var(--md-state-focus); }
+  .md-state:active:not(:disabled)::before { opacity: var(--md-state-press); }
+  .md-state > * { position: relative; z-index: 1; }
+
+  /* =========================================================================
+     Buttons. M3 buttons are PILLS - 40px tall, fully rounded. Five variants.
+     ========================================================================= */
+  .md-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    height: 40px;
+    padding: 0 1.5rem;
+    border: none;
+    border-radius: var(--md-shape-full);
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+    transition:
+      background-color var(--md-dur-short) var(--md-ease-standard),
+      box-shadow var(--md-dur-short) var(--md-ease-standard);
+    /* .md-label-large */
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    font-weight: 500;
+    letter-spacing: 0.00714em;
+  }
+  .md-btn:disabled {
+    cursor: not-allowed;
+    background: color-mix(in srgb, var(--md-on-surface) 12%, transparent);
+    color: color-mix(in srgb, var(--md-on-surface) 38%, transparent);
+    box-shadow: none;
+  }
+  /* Icon-leading buttons get tighter leading padding per spec. */
+  .md-btn:has(> svg:first-child) { padding-left: 1rem; }
+
+  .md-btn-filled {
+    background: var(--md-primary);
+    color: var(--md-on-primary);
+    --md-state-color: var(--md-on-primary);
+  }
+  .md-btn-filled:hover:not(:disabled) { box-shadow: var(--md-elev-1); }
+
+  .md-btn-tonal {
+    background: var(--md-secondary-container);
+    color: var(--md-on-secondary-container);
+    --md-state-color: var(--md-on-secondary-container);
+  }
+  .md-btn-tonal:hover:not(:disabled) { box-shadow: var(--md-elev-1); }
+
+  .md-btn-outlined {
+    background: transparent;
+    color: var(--md-primary);
+    border: 1px solid var(--md-outline);
+    --md-state-color: var(--md-primary);
+  }
+
+  .md-btn-text {
+    background: transparent;
+    color: var(--md-primary);
+    padding: 0 0.75rem;
+    --md-state-color: var(--md-primary);
+  }
+
+  .md-btn-error {
+    background: var(--md-error);
+    color: var(--md-on-error);
+    --md-state-color: var(--md-on-error);
+  }
+  .md-btn-error-text {
+    background: transparent;
+    color: var(--md-error);
+    padding: 0 0.75rem;
+    --md-state-color: var(--md-error);
+  }
+
+  /* Small variant for dense rows. Not in the spec, but the alternative is
+     40px controls inside 32px list rows. */
+  .md-btn-sm {
+    height: 32px;
+    padding: 0 0.875rem;
+    font-size: 0.75rem;
+    letter-spacing: 0.04167em;
+  }
+  .md-btn-sm:has(> svg:first-child) { padding-left: 0.625rem; }
+
+  /* =========================================================================
+     Icon button. 40px circular target, standard / filled / tonal.
+     ========================================================================= */
+  .md-icon-btn {
+    display: inline-grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    border: none;
+    border-radius: var(--md-shape-full);
+    background: transparent;
+    color: var(--md-on-surface-variant);
+    cursor: pointer;
+    --md-state-color: var(--md-on-surface-variant);
+    transition: background-color var(--md-dur-short) var(--md-ease-standard);
+  }
+  .md-icon-btn:disabled {
+    cursor: not-allowed;
+    color: color-mix(in srgb, var(--md-on-surface) 38%, transparent);
+  }
+  .md-icon-btn-sm { width: 32px; height: 32px; }
+  .md-icon-btn-filled {
+    background: var(--md-primary);
+    color: var(--md-on-primary);
+    --md-state-color: var(--md-on-primary);
+  }
+  .md-icon-btn-error { color: var(--md-error); --md-state-color: var(--md-error); }
+
+  /* =========================================================================
+     FAB - used for the composer's send action.
+     ========================================================================= */
+  .md-fab {
+    display: inline-grid;
+    place-items: center;
+    width: 56px;
+    height: 56px;
+    border: none;
+    border-radius: var(--md-shape-lg);
+    background: var(--md-primary-container);
+    color: var(--md-on-primary-container);
+    box-shadow: var(--md-elev-3);
+    cursor: pointer;
+    --md-state-color: var(--md-on-primary-container);
+    transition: box-shadow var(--md-dur-short) var(--md-ease-standard);
+  }
+  .md-fab:hover:not(:disabled) { box-shadow: var(--md-elev-4); }
+  .md-fab:disabled {
+    cursor: not-allowed;
+    box-shadow: none;
+    background: color-mix(in srgb, var(--md-on-surface) 12%, transparent);
+    color: color-mix(in srgb, var(--md-on-surface) 38%, transparent);
+  }
+  .md-fab-sm { width: 40px; height: 40px; border-radius: var(--md-shape-md); }
+
+  /* =========================================================================
+     Cards. Elevated / filled / outlined, all 12px.
+     ========================================================================= */
+  .md-card {
+    border-radius: var(--md-shape-md);
+    background: var(--md-surface-container-low);
+    color: var(--md-on-surface);
+  }
+  .md-card-elevated {
+    background: var(--md-surface-container-low);
+    box-shadow: var(--md-elev-1);
+  }
+  .md-card-filled { background: var(--md-surface-container-highest); }
+  .md-card-outlined {
+    background: var(--md-surface);
+    border: 1px solid var(--md-outline-variant);
+  }
+  .md-card-interactive {
+    cursor: pointer;
+    --md-state-color: var(--md-on-surface);
+    transition: box-shadow var(--md-dur-short) var(--md-ease-standard);
+  }
+  .md-card-interactive:hover { box-shadow: var(--md-elev-2); }
+
+  /* =========================================================================
+     Outlined text field. The label floats into the border notch when the
+     field is focused or filled - the most recognisable M3 form element, and
+     the only one needing real DOM structure (see TextField in md.tsx).
+     ========================================================================= */
+  .md-field {
+    position: relative;
+    display: block;
+  }
+  .md-field-input {
+    width: 100%;
+    height: 56px;
+    padding: 1rem;
+    background: transparent;
+    color: var(--md-on-surface);
+    border: 1px solid var(--md-outline);
+    border-radius: var(--md-shape-xs);
+    outline: none;
+    transition: border-color var(--md-dur-short) var(--md-ease-standard);
+    font-size: 1rem;
+    line-height: 1.5rem;
+    letter-spacing: 0.03125em;
+  }
+  .md-field-input:hover:not(:disabled) { border-color: var(--md-on-surface); }
+  .md-field-input:focus {
+    border-color: var(--md-primary);
+    border-width: 2px;
+    padding: calc(1rem - 1px);
+  }
+  .md-field-input:disabled {
+    color: color-mix(in srgb, var(--md-on-surface) 38%, transparent);
+    border-color: color-mix(in srgb, var(--md-on-surface) 12%, transparent);
+    cursor: not-allowed;
+  }
+  .md-field-input::placeholder { color: var(--md-on-surface-variant); }
+  /* Floating label. Sits on the border, with a background matching the field's
+     surface so the outline appears notched. */
+  .md-field-label {
+    position: absolute;
+    left: 0.75rem;
+    top: 1rem;
+    padding: 0 0.25rem;
+    color: var(--md-on-surface-variant);
+    pointer-events: none;
+    background: var(--md-field-bg, var(--md-surface-container-low));
+    transition:
+      top var(--md-dur-short) var(--md-ease-standard),
+      font-size var(--md-dur-short) var(--md-ease-standard),
+      color var(--md-dur-short) var(--md-ease-standard);
+    font-size: 1rem;
+    line-height: 1.5rem;
+  }
+  .md-field-input:focus ~ .md-field-label,
+  .md-field-input:not(:placeholder-shown) ~ .md-field-label {
+    top: -0.5rem;
+    font-size: 0.75rem;
+    line-height: 1rem;
+    letter-spacing: 0.03333em;
+  }
+  .md-field-input:focus ~ .md-field-label { color: var(--md-primary); }
+
+  /* =========================================================================
+     Chips. 32px, 8px radius. Assist / filter variants.
+     ========================================================================= */
+  .md-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    height: 32px;
+    padding: 0 1rem;
+    border-radius: var(--md-shape-sm);
+    border: 1px solid var(--md-outline);
+    background: transparent;
+    color: var(--md-on-surface-variant);
+    cursor: pointer;
+    user-select: none;
+    --md-state-color: var(--md-on-surface-variant);
+    transition:
+      background-color var(--md-dur-short) var(--md-ease-standard),
+      border-color var(--md-dur-short) var(--md-ease-standard);
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    font-weight: 500;
+    letter-spacing: 0.00714em;
+  }
+  .md-chip:has(> svg:first-child) { padding-left: 0.5rem; }
+  .md-chip-selected {
+    background: var(--md-secondary-container);
+    border-color: transparent;
+    color: var(--md-on-secondary-container);
+    --md-state-color: var(--md-on-secondary-container);
+  }
+  .md-chip-sm { height: 26px; padding: 0 0.625rem; font-size: 0.75rem; }
+
+  /* =========================================================================
+     Badge / label containers. Not interactive.
+     ========================================================================= */
+  .md-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.125rem 0.5rem;
+    border-radius: var(--md-shape-xs);
+    background: var(--md-surface-container-highest);
+    color: var(--md-on-surface-variant);
+    font-size: 0.6875rem;
+    line-height: 1rem;
+    font-weight: 500;
+    letter-spacing: 0.04545em;
+    text-transform: uppercase;
+  }
+  .md-badge-primary { background: var(--md-primary-container); color: var(--md-on-primary-container); }
+  .md-badge-tertiary { background: var(--md-tertiary-container); color: var(--md-on-tertiary-container); }
+  .md-badge-error { background: var(--md-error-container); color: var(--md-on-error-container); }
+
+  /* =========================================================================
+     Switch. 52x32 track, 24px handle when on (16px when off) - the size
+     change on toggle is part of the spec, not decoration.
+     ========================================================================= */
+  .md-switch {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    width: 52px;
+    height: 32px;
+    border-radius: var(--md-shape-full);
+    border: 2px solid var(--md-outline);
+    background: var(--md-surface-container-highest);
+    cursor: pointer;
+    transition:
+      background-color var(--md-dur-short) var(--md-ease-standard),
+      border-color var(--md-dur-short) var(--md-ease-standard);
+  }
+  .md-switch[data-on="true"] {
+    background: var(--md-primary);
+    border-color: var(--md-primary);
+  }
+  .md-switch::after {
+    content: "";
+    position: absolute;
+    left: 4px;
+    width: 16px;
+    height: 16px;
+    border-radius: var(--md-shape-full);
+    background: var(--md-outline);
+    transition:
+      transform var(--md-dur-short) var(--md-ease-emphasized),
+      width var(--md-dur-short) var(--md-ease-emphasized),
+      height var(--md-dur-short) var(--md-ease-emphasized),
+      background-color var(--md-dur-short) var(--md-ease-standard);
+  }
+  .md-switch[data-on="true"]::after {
+    width: 24px;
+    height: 24px;
+    left: 0;
+    transform: translateX(24px);
+    background: var(--md-on-primary);
+  }
+
+  /* =========================================================================
+     Checkbox. 18px box, 2px radius, inside a 40px state-layer target.
+     ========================================================================= */
+  .md-checkbox {
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    width: 18px;
+    height: 18px;
+    border: 2px solid var(--md-on-surface-variant);
+    border-radius: 2px;
+    background: transparent;
+    color: var(--md-on-primary);
+    cursor: pointer;
+    transition:
+      background-color var(--md-dur-short) var(--md-ease-standard),
+      border-color var(--md-dur-short) var(--md-ease-standard);
+  }
+  .md-checkbox[data-on="true"] {
+    background: var(--md-primary);
+    border-color: var(--md-primary);
+  }
+
+  /* =========================================================================
+     Segmented button - an actual M3 component, unlike the old .segmented.
+     ========================================================================= */
+  .md-segmented {
+    display: inline-flex;
+    height: 40px;
+    border-radius: var(--md-shape-full);
+    border: 1px solid var(--md-outline);
+    overflow: hidden;
+  }
+  .md-segmented > button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0 0.875rem;
+    border: none;
+    background: transparent;
+    color: var(--md-on-surface);
+    cursor: pointer;
+    --md-state-color: var(--md-on-surface);
+    transition: background-color var(--md-dur-short) var(--md-ease-standard);
+    font-size: 0.875rem;
+    font-weight: 500;
+    letter-spacing: 0.00714em;
+  }
+  .md-segmented > button + button { border-left: 1px solid var(--md-outline); }
+  .md-segmented > button[data-active="true"] {
+    background: var(--md-secondary-container);
+    color: var(--md-on-secondary-container);
+    --md-state-color: var(--md-on-secondary-container);
+  }
+
+  /* =========================================================================
+     Tabs. Primary tabs with an animated active indicator.
+     ========================================================================= */
+  .md-tabs {
+    display: flex;
+    border-bottom: 1px solid var(--md-outline-variant);
+  }
+  .md-tab {
+    position: relative;
+    /* Explicit centering: these are rendered as buttons, but a div would not
+       centre its text and neither centres vertically without this. */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.375rem;
+    flex: 1;
+    height: 48px;
+    padding: 0 1rem;
+    border: none;
+    background: transparent;
+    color: var(--md-on-surface-variant);
+    cursor: pointer;
+    --md-state-color: var(--md-on-surface);
+    transition: color var(--md-dur-short) var(--md-ease-standard);
+    font-size: 0.875rem;
+    font-weight: 500;
+    letter-spacing: 0.00714em;
+  }
+  .md-tab[data-active="true"] { color: var(--md-primary); }
+  .md-tab::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    right: 50%;
+    bottom: 0;
+    height: 3px;
+    border-radius: 3px 3px 0 0;
+    background: var(--md-primary);
+    opacity: 0;
+    transition:
+      left var(--md-dur-medium) var(--md-ease-emphasized),
+      right var(--md-dur-medium) var(--md-ease-emphasized),
+      opacity var(--md-dur-short) var(--md-ease-standard);
+  }
+  .md-tab[data-active="true"]::after { left: 0; right: 0; opacity: 1; }
+
+  /* =========================================================================
+     Progress indicators.
+     ========================================================================= */
+  .md-linear-progress {
+    height: 4px;
+    border-radius: var(--md-shape-full);
+    background: var(--md-secondary-container);
+    overflow: hidden;
+  }
+  .md-linear-progress > div {
+    height: 100%;
+    border-radius: var(--md-shape-full);
+    background: var(--md-primary);
+    transition: width var(--md-dur-long) var(--md-ease-emphasized-decelerate);
+  }
+
+  /* =========================================================================
+     Navigation drawer - the navy departure. Active item is a pill.
+     ========================================================================= */
+  .md-nav-item {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    height: 56px;
+    padding: 0 1rem;
+    border-radius: var(--md-shape-full);
+    color: var(--md-nav-on-surface-variant);
+    cursor: pointer;
+    --md-state-color: var(--md-nav-on-surface);
+    transition:
+      background-color var(--md-dur-short) var(--md-ease-standard),
+      color var(--md-dur-short) var(--md-ease-standard);
+    font-size: 0.875rem;
+    font-weight: 500;
+    letter-spacing: 0.00714em;
+  }
+  .md-nav-item[data-active="true"] {
+    background: var(--md-primary);
+    color: var(--md-on-primary);
+    --md-state-color: var(--md-on-primary);
+  }
+  /* Dense variant for the session list, which can be long. */
+  .md-nav-item-dense { height: 40px; font-size: 0.8125rem; }
+
+  /* =========================================================================
+     Dialog. 28px radius, elevation 3, scrim.
+     ========================================================================= */
+  .md-dialog {
+    border-radius: var(--md-shape-xl);
+    background: var(--md-surface-container-high);
+    color: var(--md-on-surface);
+    box-shadow: var(--md-elev-3);
+    padding: 1.5rem;
+    max-width: 22rem;
+    width: 100%;
+  }
+  .md-scrim {
+    position: fixed;
+    inset: 0;
+    background: var(--md-scrim);
+    opacity: 0.32;
+  }
+
+  /* =========================================================================
+     Misc
+     ========================================================================= */
+  .md-divider { height: 1px; background: var(--md-outline-variant); border: 0; }
+
+  .md-skeleton {
+    border-radius: var(--md-shape-xs);
+    background: color-mix(in srgb, var(--md-on-surface) 9%, transparent);
+    animation: md-pulse 1.6s var(--md-ease-standard) infinite;
+  }
+  @keyframes md-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.45; }
+  }
+
+  .md-link {
+    color: var(--md-primary);
+    cursor: pointer;
+    text-underline-offset: 2px;
+  }
+  .md-link:hover { text-decoration: underline; }
+
+  .scroll-thin {
+    scrollbar-width: thin;
+    scrollbar-color: var(--md-outline-variant) transparent;
+  }
+}
+
+/* Ripple. Expands from the pointer position and fades; the state layer handles
+   hover/focus, this handles the press. */
+@keyframes md-ripple {
+  from { transform: scale(0); opacity: 0.36; }
+  to { transform: scale(1); opacity: 0; }
+}
+.md-ripple-span {
+  position: absolute;
+  border-radius: 50%;
+  background: currentColor;
+  pointer-events: none;
+  animation: md-ripple var(--md-dur-long) var(--md-ease-standard) forwards;
+  z-index: 0;
+}
