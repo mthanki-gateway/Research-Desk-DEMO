@@ -193,7 +193,11 @@ export default function Shell({ children }: { children: React.ReactNode }) {
                 role="link"
                 tabIndex={0}
               >
-                <Icon className="h-6 w-6 shrink-0" />
+                {/* The icon gets its own container so it can carry the hover
+                    treatment independently of the row. See .md-nav-icon. */}
+                <span className="md-nav-icon">
+                  <Icon className="h-6 w-6" />
+                </span>
                 {label}
               </Ripplable>
             );

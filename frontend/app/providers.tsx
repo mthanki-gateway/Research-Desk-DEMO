@@ -6,6 +6,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import {
@@ -38,6 +39,8 @@ type AppData = {
   ingesting: boolean;
   /** Citation drill-down: the chunk shown in the side panel, if any. */
   openChunk: Chunk | null;
+  /** chunk_id currently being fetched, so the rail can show it is working. */
+  chunkLoading: string | null;
   showChunk: (chunkId: string) => Promise<void>;
   closeChunk: () => void;
   /**
@@ -85,6 +88,13 @@ export function Providers({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [openChunk, setOpenChunk] = useState<Chunk | null>(null);
+  const [chunkLoading, setChunkLoading] = useState<string | null>(null);
+  /**
+   * Chunk text is immutable after ingestion, so this never needs invalidating.
+   * A ref, not state: writing to it must not re-render, and every read is
+   * followed by a setState that does.
+   */
+  const chunkCache = useRef(new Map<string, Chunk>());
   const [railActive, setRailActive] = useState(false);
   const [railCollapsed, setRailCollapsedState] = useState(false);
   const [railReady, setRailReady] = useState(false);
@@ -186,11 +196,34 @@ export function Providers({ children }: { children: React.ReactNode }) {
     return () => clearInterval(timer);
   }, [ingesting, refreshDocuments]);
 
+  /**
+   * Citation drill-down.
+   *
+   * Every click used to be a full round-trip with no cache and no feedback, so
+   * clicking between three citations meant three waits staring at the previous
+   * passage -- and against a cold backend that is seconds each. Chunk text is
+   * immutable once ingested, so it caches indefinitely and re-opening a passage
+   * is now instant.
+   *
+   * `chunkLoading` exists because a cache miss still takes a moment, and
+   * without it the rail showed the *previous* chunk during the fetch, which
+   * reads as the click having selected the wrong source.
+   */
   const showChunk = useCallback(async (chunkId: string) => {
+    const cached = chunkCache.current.get(chunkId);
+    if (cached) {
+      setOpenChunk(cached);
+      return;
+    }
+    setChunkLoading(chunkId);
     try {
-      setOpenChunk(await getChunk(chunkId));
+      const chunk = await getChunk(chunkId);
+      chunkCache.current.set(chunkId, chunk);
+      setOpenChunk(chunk);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load chunk");
+    } finally {
+      setChunkLoading(null);
     }
   }, []);
 
@@ -210,6 +243,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
       readyDocuments: documents.filter((d) => d.status === "ready"),
       ingesting,
       openChunk,
+      chunkLoading,
       showChunk,
       closeChunk,
       railActive,
@@ -231,6 +265,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
       refreshDocuments,
       ingesting,
       openChunk,
+      chunkLoading,
       showChunk,
       closeChunk,
       railActive,

@@ -80,10 +80,20 @@
 
 /* The sidebar and rail are fixed elements parked off-canvas with translate-x.
    A transformed fixed element still extends the scrollable area, which caused
-   a horizontal scrollbar and let the layout drift sideways. */
+   a horizontal scrollbar and let the layout drift sideways.
+
+   `clip`, NOT `hidden`. They look identical here but differ in one way that
+   matters: `overflow: hidden` makes the element a SCROLL CONTAINER, and a
+   scroll container on html/body silently breaks `position: sticky` in every
+   descendant -- the sticky element resolves against body instead of the
+   viewport, so it scrolls away like static content. That is why the chat
+   header and composer were declared sticky and did not stick.
+
+   `overflow-x: clip` crops the overflow without creating a scroll container,
+   so it stops the sideways drift AND leaves sticky working. */
 html,
 body {
-  overflow-x: hidden;
+  overflow-x: clip;
   max-width: 100%;
 }
 
@@ -330,6 +340,75 @@ textarea:focus-visible {
   .md-card-interactive:hover { box-shadow: var(--md-elev-2); }
 
   /* =========================================================================
+     Assistant answer card.
+
+     `.md-card-elevated` was invisible here: its background is
+     surface-container-low, and so is the page body, so an elevated card on
+     this screen was a shadow around nothing. Answers are the primary content
+     of the app and need to read as a distinct sheet, so they sit on
+     `--md-surface` -- the lightest surface in the tonal palette, near-white in
+     the light theme and correctly dark in the dark one. The hairline border
+     carries the edge where the shadow is too subtle to.
+     ========================================================================= */
+  .md-answer {
+    border-radius: var(--md-shape-lg);
+    background: var(--md-surface);
+    color: var(--md-on-surface);
+    border: 1px solid var(--md-outline-variant);
+    box-shadow: var(--md-elev-1);
+  }
+
+  /* Inline citation marker: the [5] inside answer prose, made clickable so it
+     opens that passage in the rail. Sized and aligned to sit inside a line of
+     body text without disturbing its rhythm -- hence the em-based padding and
+     the baseline nudge rather than a fixed height. */
+  .md-cite {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 1.5em;
+    padding: 0 0.35em;
+    margin: 0 0.1em;
+    border: none;
+    border-radius: var(--md-shape-full);
+    background: var(--md-secondary-container);
+    color: var(--md-on-secondary-container);
+    font-size: 0.8em;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.5;
+    vertical-align: 0.08em;
+    cursor: pointer;
+    transition:
+      background var(--md-dur-short) var(--md-ease-standard),
+      color var(--md-dur-short) var(--md-ease-standard);
+  }
+  .md-cite:hover {
+    background: var(--md-primary);
+    color: var(--md-on-primary);
+  }
+  .md-cite[aria-current="true"] {
+    background: var(--md-primary);
+    color: var(--md-on-primary);
+  }
+
+  /* Answer prose. Gemma emits markdown-ish text -- blank-line paragraphs,
+     `- ` bullets, `**bold**` -- which `whitespace-pre-wrap` rendered as one
+     undifferentiated block. These rules style the elements the renderer
+     produces; they are scoped so they cannot leak into user-authored chunk
+     text shown elsewhere. */
+  .md-prose > * + * { margin-top: 0.75rem; }
+  .md-prose ul { padding-left: 1.25rem; list-style: disc; }
+  .md-prose ol { padding-left: 1.5rem; list-style: decimal; }
+  .md-prose li + li { margin-top: 0.25rem; }
+  .md-prose strong { font-weight: 600; }
+  .md-prose h3 {
+    font-weight: 600;
+    font-size: 1rem;
+    letter-spacing: 0.00625em;
+  }
+
+  /* =========================================================================
      Outlined text field. The label floats into the border notch when the
      field is focused or filled - the most recognisable M3 form element, and
      the only one needing real DOM structure (see TextField in md.tsx).
@@ -345,7 +424,10 @@ textarea:focus-visible {
     background: transparent;
     color: var(--md-on-surface);
     border: 1px solid var(--md-outline);
-    border-radius: var(--md-shape-xs);
+    /* M3's outlined field is a 4px rectangle. Overridable per instance because
+       the chat composer wants to read as a pill -- see --md-field-radius on the
+       chat page. */
+    border-radius: var(--md-field-radius, var(--md-shape-xs));
     outline: none;
     transition: border-color var(--md-dur-short) var(--md-ease-standard);
     font-size: 1rem;
@@ -368,7 +450,11 @@ textarea:focus-visible {
      surface so the outline appears notched. */
   .md-field-label {
     position: absolute;
-    left: 0.75rem;
+    /* Overridable: on a pill-shaped field the default 12px puts the floated
+       label on top of the corner curve, where the notch it cuts in the outline
+       lands on empty space instead of the border. Pill fields push it clear of
+       the radius. */
+    left: var(--md-field-label-left, 0.75rem);
     top: 1rem;
     padding: 0 0.25rem;
     color: var(--md-on-surface-variant);
@@ -633,6 +719,69 @@ textarea:focus-visible {
   }
   /* Dense variant for the session list, which can be long. */
   .md-nav-item-dense { height: 40px; font-size: 0.8125rem; }
+
+  /* -------------------------------------------------------------------------
+     Icon container — the M3 Expressive nav treatment.
+
+     The icon sits in its own 40px container that is invisible at rest and, on
+     hover, gains a state-layer background, morphs from rounded-square to pill,
+     and scales up slightly. Two details make it feel right rather than merely
+     animated:
+
+     * The container is ALWAYS 40px and always in the layout, so nothing
+       reflows when it appears. Growing the box on hover would shove the label
+       sideways and make the whole row twitch.
+     * `transform` and `background-color` are the only animated properties, so
+       this stays on the compositor. Animating width or border-width here would
+       relayout the drawer on every pointer move.
+
+     The shape morph (12px -> full) is the expressive part: M3 treats corner
+     radius as a channel that carries state, not just decoration.
+     ------------------------------------------------------------------------- */
+  /* The container is 40px around a 24px icon, so without this the icon sits 8px
+     further right than it did and the label 16px further. Scoped with :has()
+     so the dense session rows -- which have no icon -- keep their own inset. */
+  .md-nav-item:has(.md-nav-icon) {
+    padding-left: 0.5rem;
+    gap: 0.5rem;
+  }
+
+  .md-nav-icon {
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 40px;
+    height: 40px;
+    border-radius: var(--md-shape-md);
+    background: transparent;
+    transition:
+      background-color var(--md-dur-short) var(--md-ease-standard),
+      border-radius var(--md-dur-medium) var(--md-ease-emphasized),
+      transform var(--md-dur-medium) var(--md-ease-emphasized);
+  }
+  .md-nav-item:hover .md-nav-icon {
+    background: color-mix(in srgb, var(--md-state-color) 16%, transparent);
+    border-radius: var(--md-shape-full);
+    transform: scale(1.08);
+  }
+  /* Pressed reads as a dip, so the gesture has a bottom rather than just
+     snapping back to rest. */
+  .md-nav-item:active .md-nav-icon { transform: scale(0.96); }
+  /* On the active item the pill already carries the emphasis, so the container
+     only needs to hint -- a full-strength layer on top of --md-primary muddies
+     it. */
+  .md-nav-item[data-active="true"] .md-nav-icon {
+    background: color-mix(in srgb, var(--md-on-primary) 15%, transparent);
+    border-radius: var(--md-shape-full);
+  }
+
+  /* Motion is decoration here; the state-layer colour still communicates
+     hover, so removing the movement loses nothing functional. */
+  @media (prefers-reduced-motion: reduce) {
+    .md-nav-icon { transition: background-color var(--md-dur-short) linear; }
+    .md-nav-item:hover .md-nav-icon,
+    .md-nav-item:active .md-nav-icon { transform: none; }
+  }
 
   /* =========================================================================
      Dialog. 28px radius, elevation 3, scrim.

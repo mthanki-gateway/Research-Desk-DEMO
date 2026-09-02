@@ -11,6 +11,7 @@ import {
   updateSession,
 } from "@/lib/api";
 import { useApp } from "../../providers";
+import { Answer } from "../../answer";
 import { Button, Chip, Fab, TextField } from "../../md";
 import { IconQuote, IconSpinner } from "../../icons";
 import Rail, { RAIL_WIDTH, RAIL_WIDTH_COLLAPSED, type TurnSettings } from "./rail";
@@ -90,14 +91,38 @@ function Conversation({ id }: { id: string }) {
     void load();
   }, [load]);
 
+  /**
+   * Keep the newest turn in view.
+   *
+   * Keyed on the message COUNT, not the `session` object: `load()` replaces
+   * that object on every background refresh, so depending on it re-scrolled on
+   * refreshes that changed nothing visible -- and fought the user if they had
+   * scrolled up to read.
+   *
+   * `progress` is deliberately not a dependency either. It updates on every
+   * graph node, and scrolling on each one yanked the view mid-read.
+   *
+   * The sentinel carries `scroll-mb-40`, which is what actually makes this
+   * land: the composer is `sticky bottom-0` and overlays the end of the
+   * document, so a plain scrollIntoView puts the newest turn *underneath* it.
+   * That looked like the scroll had not happened at all.
+   */
+  const messageCount = session?.messages.length ?? 0;
   useEffect(() => {
     if (!session) return;
-    bottom.current?.scrollIntoView({
-      behavior: hasPainted.current ? "smooth" : "auto",
-      block: "end",
+    // rAF: the optimistic bubble is added in the same commit, so without
+    // waiting a frame the scroll measures the layout from before it existed
+    // and stops one bubble short.
+    const id = requestAnimationFrame(() => {
+      bottom.current?.scrollIntoView({
+        behavior: hasPainted.current ? "smooth" : "auto",
+        block: "end",
+      });
+      hasPainted.current = true;
     });
-    hasPainted.current = true;
-  }, [session, pendingQuestion, progress]);
+    return () => cancelAnimationFrame(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messageCount, pendingQuestion, Boolean(session)]);
 
   async function send(e: React.FormEvent) {
     e.preventDefault();
@@ -166,10 +191,17 @@ function Conversation({ id }: { id: string }) {
       }
     >
       <div className="mx-auto flex min-h-[calc(100vh-2rem)] max-w-3xl flex-col px-6 py-6">
-        {/* Top app bar, small */}
+        {/* Top app bar, small. Sticky only works because html/body use
+            `overflow-x: clip` rather than `hidden` -- `hidden` makes body a
+            scroll container, which silently disables sticky in descendants.
+            The negative margin plus padding lets the opaque background bleed
+            to the column edges so text scrolling underneath is covered. */}
         <header
-          className="sticky top-0 z-20 mb-5 flex h-16 items-center gap-3"
-          style={{ background: "var(--md-surface-container-low)" }}
+          className="sticky top-0 z-20 mb-5 -mx-6 flex h-16 items-center gap-3 px-6"
+          style={{
+            background: "var(--md-surface-container-low)",
+            boxShadow: "0 1px 0 0 var(--md-outline-variant)",
+          }}
         >
           <h1 className="md-title-large min-w-0 flex-1 truncate">{title}</h1>
           {!session && <IconSpinner className="h-4 w-4 opacity-40" />}
@@ -229,11 +261,14 @@ function Conversation({ id }: { id: string }) {
           </p>
         )}
 
-        <div ref={bottom} />
+        {/* Scroll sentinel. `scroll-mb-40` (10rem) reserves room for the
+            sticky composer, which otherwise covers the very thing we just
+            scrolled to. */}
+        <div ref={bottom} className="scroll-mb-40" />
 
         <form
           onSubmit={send}
-          className="sticky bottom-0 mt-6 pb-5 pt-3"
+          className="sticky bottom-0 -mx-6 mt-6 px-6 pb-5 pt-3"
           style={{
             background:
               "linear-gradient(to top, var(--md-surface-container-low) 65%, transparent)",
@@ -247,6 +282,17 @@ function Conversation({ id }: { id: string }) {
               disabled={busy || !session}
               surface="var(--md-surface-container-low)"
               className="flex-1"
+              // Pill composer. `shape` moves the floating label's inset in
+              // step with the radius; see TextField.
+              shape="var(--md-shape-xl)"
+              // Chrome was offering previously-typed questions as autofill
+              // history, dropping a suggestion list over the answer above the
+              // composer. `autoComplete="off"` alone is unreliable here --
+              // Chrome ignores it on fields it has already learned -- so the
+              // field also carries no `name`, which is what its autofill
+              // heuristics key on. spellCheck stays ON: this is prose.
+              autoComplete="off"
+              autoCorrect="off"
             />
             <Fab
               type="submit"
@@ -345,8 +391,16 @@ function Turn({
 
   return (
     <li className="space-y-2">
-      <div className="md-card md-card-elevated p-4">
-        <p className="md-body-large whitespace-pre-wrap">{message.content}</p>
+      {/* `.md-answer`, not `.md-card md-card-elevated`: the elevated card's
+          background is surface-container-low, which is also the page
+          background, so answers were a shadow around nothing. */}
+      <div className="md-answer p-5">
+        <Answer
+          content={message.content}
+          sources={message.sources}
+          activeChunkId={activeChunkId}
+          onCite={(chunkId) => void onCite(chunkId)}
+        />
 
         {cited.length > 0 && (
           <div

@@ -178,11 +178,39 @@ def is_repetitive(text: str) -> bool:
     return len(set(words)) / len(words) < 0.4
 
 
+# Why a 200 can carry no usable text. The old error told the operator to raise
+# max_output_tokens regardless of cause, which is only ever right for
+# MAX_TOKENS -- and actively misleading for RECITATION, where more tokens
+# cannot help.
+_EMPTY_REASONS = {
+    "MAX_TOKENS": (
+        "the model hit its output limit before emitting anything usable. "
+        "Raise max_output_tokens for this call."
+    ),
+    # Google stops generation when output starts reproducing memorised training
+    # data. In this app it means the question was NOT answerable from the
+    # retrieved passages, so the model fell back on world knowledge and began
+    # reciting a remembered fact. The trigger is a grounding failure, not a
+    # configuration problem.
+    "RECITATION": (
+        "the model began reproducing memorised training text and Google "
+        "stopped it. This usually means the question is not answerable from "
+        "the retrieved passages, so the model fell back on world knowledge. "
+        "Raising max_output_tokens will not help."
+    ),
+    "SAFETY": "the response was blocked by a safety filter.",
+    "PROHIBITED_CONTENT": "the response was blocked as prohibited content.",
+    "OTHER": "generation stopped for an unspecified reason.",
+}
+
+
 def _extract_text(payload: dict[str, Any]) -> str:
     """Pull text out of a generateContent response.
 
     Defensive because there are several ways to get a 200 with no usable text:
-    a safety block, or finishReason=MAX_TOKENS with an empty parts list.
+    a safety block, a recitation stop, or finishReason=MAX_TOKENS with an empty
+    parts list. The finish reason decides what the operator should actually do,
+    so it is named in the message rather than guessed at.
     """
     candidates = payload.get("candidates") or []
     if not candidates:
@@ -194,10 +222,11 @@ def _extract_text(payload: dict[str, Any]) -> str:
     text = "".join(part.get("text", "") for part in parts)
 
     if not text.strip():
-        raise LLMError(
-            f"empty response (finishReason={candidate.get('finishReason')}). "
-            "If MAX_TOKENS, raise max_output_tokens."
+        reason = candidate.get("finishReason") or "UNKNOWN"
+        explanation = _EMPTY_REASONS.get(
+            reason, "no text was returned and the finish reason is unrecognised."
         )
+        raise LLMError(f"empty response ({reason}): {explanation}")
     return text
 
 

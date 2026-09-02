@@ -24,6 +24,10 @@ node_modules/
 .next/
 out/
 .vercel/
+# tsc's incremental cache. It was committed by mistake in the initial commit
+# and shows up as a spurious modification after every typecheck; untrack with
+#   git rm --cached frontend/tsconfig.tsbuildinfo
+tsconfig.tsbuildinfo
 
 # misc
 .DS_Store

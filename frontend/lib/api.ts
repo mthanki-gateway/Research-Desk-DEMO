@@ -241,18 +241,25 @@ export type ChatSession = {
   n_messages: number;
 };
 
+/**
+ * One numbered citation on an assistant message. `n` is the number the model
+ * writes as `[n]` in its prose, which is what lets the answer renderer resolve
+ * an inline marker back to the passage it refers to.
+ */
+export type MessageSource = {
+  n: number;
+  chunk_id: string;
+  filename: string;
+  heading: string | null;
+  page: number | null;
+  score: number;
+};
+
 export type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   content: string;
-  sources: {
-    n: number;
-    chunk_id: string;
-    filename: string;
-    heading: string | null;
-    page: number | null;
-    score: number;
-  }[];
+  sources: MessageSource[];
   agent_meta: {
     sources_used?: number[];
     sub_questions?: string[];

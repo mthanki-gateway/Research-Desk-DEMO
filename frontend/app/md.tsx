@@ -235,6 +235,16 @@ type TextFieldProps = InputHTMLAttributes<HTMLInputElement> & {
   label: string;
   /** Surface the field sits on, so the floating label's notch matches it. */
   surface?: string;
+  /**
+   * Corner radius. Defaults to M3's 4px outlined field; pass
+   * `var(--md-shape-xl)` for a pill, as the chat composer does.
+   *
+   * Set on the WRAPPER, not the input: the floating label is a sibling of the
+   * input, so a custom property on the input cannot reach it. The label needs
+   * its inset moved in step with the radius or it floats onto the corner
+   * curve, which is why these two travel together as one prop.
+   */
+  shape?: string;
 };
 
 /**
@@ -246,12 +256,24 @@ type TextFieldProps = InputHTMLAttributes<HTMLInputElement> & {
  * matches and the label never floats for filled-but-unfocused fields.
  */
 export const TextField = forwardRef<HTMLInputElement, TextFieldProps>(
-  function TextField({ label, surface, className = "", ...rest }, ref) {
+  function TextField({ label, surface, shape, className = "", ...rest }, ref) {
     const id = useId();
     return (
       <span
         className={`md-field ${className}`}
-        style={surface ? ({ "--md-field-bg": surface } as React.CSSProperties) : undefined}
+        style={
+          {
+            ...(surface ? { "--md-field-bg": surface } : {}),
+            ...(shape
+              ? {
+                  "--md-field-radius": shape,
+                  // Clear the corner curve. 1.25rem is enough for the 28px
+                  // pill and harmless at smaller radii.
+                  "--md-field-label-left": "1.25rem",
+                }
+              : {}),
+          } as React.CSSProperties
+        }
       >
         <input
           id={id}
