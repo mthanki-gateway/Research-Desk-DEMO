@@ -82,9 +82,12 @@ the deploy has already started.
 
 ## Order of operations
 
-1. **Rotate the Google AI Studio key.** The old one was committed in plaintext
-   in this repo's history-to-be — it is out of `env.example` now, but rotate
-   anyway, and treat any key that has ever been in a file as burnt.
+1. **Rotate the Google AI Studio key** — prudent, not urgent. Verified: the
+   original key never entered git history (`git grep` across `rev-list --all`
+   finds nothing; `env.example` was sanitised to `REPLACE_ME` before the first
+   commit). Its only exposure is the local `.env` and the chat transcript it was
+   pasted into, so this is housekeeping rather than an incident. Rotate before
+   the repo goes public, and thereafter keep the key only in Render's env store.
 2. Create the GitHub repo **private**. Public only after step 6.
 3. Neon: create a project, copy the **direct** connection string (the one
    without `-pooler`), and swap its `postgresql://` prefix for

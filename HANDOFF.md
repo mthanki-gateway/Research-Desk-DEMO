@@ -190,6 +190,11 @@ Don't relitigate these without a new reason; each was argued through.
 19. **A guard blocks reading/writing any `.env*` file**, and it aborts the whole shell command when one is mentioned. Real values live in `env.example`; the user copies it to `.env` themselves.
 20. **Qdrant client and server must match on major.minor.** Client 1.19 could not read storage written by server 1.12.4 and crash-looped. Both are pinned; bumping one means bumping the other and wiping the volume.
 
+### Deploy-only — cannot be reproduced locally or in CI
+
+21. **`output: "standalone"` breaks the Vercel build.** It was set for the Docker prod stage with the comment "harmless on Vercel". It is not. Vercel builds through its own Build Output API, and standalone mode relocates the file-trace manifests, so the deploy dies with `ENOENT: ... open '/vercel/path0/frontend/.next/next-server.js.nft.json'` — which reads like a broken `node_modules`, not a config conflict. Now gated on `process.env.VERCEL`, which Vercel sets in every build environment. **Neither `next build` locally nor CI can catch this**: both succeed *with* standalone output, because the step that fails is Vercel's own post-build trace collection. Adding `VERCEL=1` to CI would not help either — the build still passes; only a real deploy exercises it. Verified both branches: unset → `.next/standalone` present (Docker needs it), `VERCEL=1` → absent (Vercel needs it absent).
+22. **`sslmode`/`channel_binding` in `DATABASE_URL` kill asyncpg.** Managed Postgres hands out libpq-style URLs; asyncpg rejects both params as unknown `connect()` kwargs, while the LangGraph checkpointer reads the *same* URL through psycopg, which understands only `sslmode`. One URL, two dialects — so it cannot be fixed by rewriting the URL. `db/session.py` translates for asyncpg only (`sslmode` → `connect_args["ssl"]`, `channel_binding` dropped) and `checkpointer.psycopg_url()` passes the libpq form through. Invisible locally: compose Postgres carries no SSL params at all.
+
 ---
 
 ## 6. Testing — what exists, honestly
