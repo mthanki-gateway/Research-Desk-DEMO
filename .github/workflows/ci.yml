@@ -117,5 +117,24 @@ jobs:
           context: ./backend
           target: prod
           push: false
+          # load: makes the built image available to the local docker daemon so
+          # the smoke test below can actually run it. Without this the image
+          # only exists inside buildx's cache and `docker run` cannot see it.
+          load: true
+          tags: rd-api:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # `docker build` proves the dependencies install and the files copy. It
+      # NEVER imports the application, so a syntax error or a bad import in any
+      # module sails straight through a green build and fails at boot on Render
+      # instead. This closes that gap for the cost of one second.
+      #
+      # Importing app.main runs every module-level statement -- settings
+      # parsing, logging config, router registration, route decorators -- but
+      # NOT the lifespan handler, so no database or API key is needed. The dummy
+      # key exists only to satisfy settings validation.
+      - name: Smoke test — app imports and registers its routes
+        run: |
+          docker run --rm -e GOOGLE_API_KEY=ci-dummy rd-api:ci \
+            python -c "import app.main; assert app.main.app.routes; print('import OK')"

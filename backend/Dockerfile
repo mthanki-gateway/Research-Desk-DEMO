@@ -33,6 +33,14 @@ EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
 # --- prod: self-contained image for Render ----------------------------------
+#
+# KEEP THIS STAGE LAST. Render's UI has no "target stage" setting -- it builds
+# the FINAL stage in the Dockerfile. So `prod` being last is what makes the
+# deploy correct, and it is load-bearing: move `dev` below this and Render
+# silently ships a container running --reload with pytest and ruff installed,
+# with nothing in its build log to suggest anything is wrong.
+#
+# docker-compose.yml is unaffected either way -- it names its target explicitly.
 FROM base AS prod
 COPY app ./app
 EXPOSE 8000

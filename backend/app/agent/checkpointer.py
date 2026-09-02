@@ -41,7 +41,16 @@ async def init_checkpointer() -> AsyncPostgresSaver | None:
     try:
         _pool = AsyncConnectionPool(
             conninfo=psycopg_url(),
-            max_size=5,
+            # min_size MUST be set alongside max_size. psycopg defaults
+            # min_size=4, so lowering max_size below 4 alone raises
+            # "max_size must be greater or equal than min_size" -- and because
+            # this whole block is wrapped in try/except, that surfaced as the
+            # app booting fine but silently WITHOUT resume. Measured, not
+            # theorised. 1 is right here: the pool grows on demand, and holding
+            # idle connections open against a managed Postgres wastes a scarce
+            # connection budget for a checkpointer that is idle between turns.
+            min_size=1,
+            max_size=get_settings().checkpointer_pool_size,
             # The checkpointer issues multi-statement DDL during setup(), which
             # psycopg refuses inside an implicit transaction.
             kwargs={"autocommit": True, "prepare_threshold": 0},

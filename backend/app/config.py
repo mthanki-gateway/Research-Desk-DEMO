@@ -103,6 +103,20 @@ class Settings(BaseSettings):
 
     # --- infra ---
     database_url: str = "postgresql+asyncpg://rd:rd_local_dev@localhost:5432/research_desk"
+
+    # Connection budget. This app opens TWO independent pools against the same
+    # database -- asyncpg via SQLAlchemy, and psycopg3 via LangGraph's
+    # AsyncPostgresSaver -- so it uses roughly twice what a single-driver app
+    # of the same size would.
+    #
+    # The trap: SQLAlchemy's pool_size is NOT a ceiling. max_overflow defaults
+    # to 10, so the previous `pool_size=10` could actually open 20 connections,
+    # and every value here is per *process*. Render running two instances
+    # doubles it again. Hence explicit and small: worst case is
+    # 5 + 2 + 2 = 9 connections per instance.
+    db_pool_size: int = 5
+    db_max_overflow: int = 2
+    checkpointer_pool_size: int = 2
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: str = ""
     qdrant_collection: str = "documents"
