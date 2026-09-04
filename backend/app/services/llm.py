@@ -33,21 +33,36 @@ class LLMError(RuntimeError):
 
 
 class GemmaClient:
-    def __init__(self) -> None:
+    """A Google Generative Language client for ONE model, with its own limiter.
+
+    Named for Gemma because that is what it was written against, but it speaks
+    the plain generateContent REST API and works for any model on the key --
+    including the Gemini Flash Lite models used for judging, whose quota shape
+    is completely different.
+    """
+
+    def __init__(
+        self,
+        model: str | None = None,
+        *,
+        requests_per_minute: int | None = None,
+        tokens_per_minute: int | None = None,
+    ) -> None:
         s = get_settings()
         if not s.google_api_key:
             raise RuntimeError("GOOGLE_API_KEY is required")
 
-        self._model = s.llm_model.removeprefix("models/")
+        self._model = (model or s.llm_model).removeprefix("models/")
         self._client = httpx.AsyncClient(
             base_url=GENAI_BASE,
             timeout=httpx.Timeout(180.0),
             headers={"x-goog-api-key": s.google_api_key},
         )
         self._limiter = RateLimiter(
-            requests_per_minute=s.llm_requests_per_minute,
-            tokens_per_minute=s.llm_tokens_per_minute,
-            name="llm",
+            requests_per_minute=requests_per_minute or s.llm_requests_per_minute,
+            tokens_per_minute=tokens_per_minute or s.llm_tokens_per_minute,
+            # Named per model so limiter log lines say WHICH budget throttled.
+            name=f"llm:{self._model}",
         )
 
     async def aclose(self) -> None:
@@ -230,20 +245,37 @@ def _extract_text(payload: dict[str, Any]) -> str:
     return text
 
 
-_client: GemmaClient | None = None
+# One client PER MODEL, not one per process.
+#
+# Each entry owns its own RateLimiter, and that is the whole point: free-tier
+# quotas are per model and have opposite shapes. Gemma 4 allows 30 requests and
+# 14,400/day but only 16K tokens/minute; Gemini Flash Lite allows 250K
+# tokens/minute but only 500 requests/day. A shared limiter would throttle both
+# on whichever numbers it happened to be configured with, and silently waste
+# most of the combined budget.
+#
+# Routing follows the shapes: small frequent calls (plan, query expansion) to
+# Gemma, large context-carrying calls (draft, critique, judging) to Flash Lite.
+_clients: dict[str, GemmaClient] = {}
 
 
-def get_llm() -> GemmaClient:
-    """Singleton, so the whole process shares one rate-limit budget."""
-    global _client
-    if _client is None:
-        _client = GemmaClient()
-        log.info("llm_ready", model=get_settings().llm_model)
-    return _client
+def get_llm(model: str | None = None) -> GemmaClient:
+    """Client for `model`, defaulting to `settings.llm_model`.
+
+    Cached per model name so the limiter state persists across calls -- a fresh
+    client per request would start with a full token bucket and defeat rate
+    limiting entirely.
+    """
+    settings = get_settings()
+    name = model or settings.llm_model
+    if name not in _clients:
+        rpm, tpm = settings.limits_for(name)
+        _clients[name] = GemmaClient(model=name, requests_per_minute=rpm, tokens_per_minute=tpm)
+        log.info("llm_ready", model=name, rpm=rpm, tpm=tpm)
+    return _clients[name]
 
 
 async def close_llm() -> None:
-    global _client
-    if _client is not None:
-        await _client.aclose()
-        _client = None
+    for client in _clients.values():
+        await client.aclose()
+    _clients.clear()

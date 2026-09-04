@@ -21,9 +21,12 @@ import uuid
 from dataclasses import asdict, dataclass, field
 
 import structlog
+from sqlalchemy import select
 
+from app.db.models import Chunk, Document
+from app.db.session import SessionLocal
 from app.services.evaluation import Aggregate, QuestionScores, recall_at_k
-from app.services.golden import GoldenQuestion, MatchResult, match
+from app.services.golden import ChunkSpec, GoldenQuestion, MatchResult, match
 from app.services.retrieval import retrieve
 
 log = structlog.get_logger()
@@ -70,6 +73,21 @@ class ExpectedFact:
     must_contain: list[str]
     # None means no retrieved chunk satisfied it at any depth.
     found_at_rank: int | None
+    # Chunks in the corpus that DO satisfy this label, resolved by direct SQL
+    # rather than by retrieval. Two jobs:
+    #
+    #   1. The UI can open the chunk retrieval *should* have returned, which is
+    #      the only way to judge whether a miss was reasonable.
+    #   2. It validates the label. An empty list means NO chunk in the corpus
+    #      matches, so the question can never pass -- either the fixture is not
+    #      ingested or `must_contain` has a typo. That failure is otherwise
+    #      indistinguishable from a retrieval failure, and would send you
+    #      optimising retrieval against an impossible target.
+    matching_chunk_ids: list[str]
+
+    @property
+    def label_resolves(self) -> bool:
+        return bool(self.matching_chunk_ids)
 
 
 @dataclass(slots=True)
@@ -112,6 +130,35 @@ class Tier1Report:
             "aggregates": self.aggregates,
             "questions": [asdict(q) for q in self.questions],
         }
+
+
+async def _resolve_spec(
+    spec: ChunkSpec, owner_id: str | None, *, limit: int = 5
+) -> list[str]:
+    """Find chunks in the corpus that satisfy a golden label.
+
+    Direct SQL, not retrieval -- the point is to know what SHOULD have come
+    back, independently of whether search found it. `ILIKE` mirrors the
+    case-insensitive substring test in `golden.ChunkSpec.matches`, so the two
+    cannot disagree about what counts as a match.
+    """
+    async with SessionLocal() as db:
+        stmt = (
+            select(Chunk.id)
+            .join(Document, Document.id == Chunk.document_id)
+            .where(Document.filename == spec.file)
+            .order_by(Chunk.chunk_index)
+            .limit(limit)
+        )
+        if owner_id is not None:
+            stmt = stmt.where(Document.owner_id == owner_id)
+        for needle in spec.must_contain:
+            # Escape LIKE wildcards so a label containing % or _ still means
+            # itself. Percent signs are common in this corpus ("62.1%").
+            escaped = needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            stmt = stmt.where(Chunk.text.ilike(f"%{escaped}%", escape="\\"))
+        rows = (await db.execute(stmt)).scalars().all()
+    return [str(r) for r in rows]
 
 
 def _score_at(
@@ -221,6 +268,7 @@ async def run_tier1(
                     file=spec.file,
                     must_contain=list(spec.must_contain),
                     found_at_rank=m.satisfied_at.get(i),
+                    matching_chunk_ids=await _resolve_spec(spec, owner_id),
                 )
                 for i, spec in enumerate(question.expect_chunks)
             ],

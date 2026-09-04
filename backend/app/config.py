@@ -39,6 +39,33 @@ class Settings(BaseSettings):
     # goes through a schema; bare JSON mode leaks chain-of-thought.
     llm_structured_mode: Literal["response_schema", "tool_calling"] = "response_schema"
 
+    # --- judge model (evaluation Tier 2) ---
+    # A DIFFERENT model from the one being evaluated, deliberately: a model
+    # judging its own output has a documented self-preference bias, and Gemma
+    # is also the weaker judge (no function calling, degenerates at moderate
+    # temperature, and it is the component under test).
+    #
+    # The quota shapes are opposite, which is the other reason. Verified on
+    # this key: gemini-3.5-flash-lite allows 250K tokens/minute against Gemma's
+    # 16K, so judging -- which sends the answer plus every retrieved chunk --
+    # fits comfortably where Gemma would spend a minute of budget per call.
+    # Gemma's 14,400 requests/day dwarfs Flash Lite's 500, so small frequent
+    # calls stay on Gemma and large ones move here.
+    judge_model: str = "models/gemini-3.5-flash-lite"
+    judge_requests_per_minute: int = 15
+    judge_tokens_per_minute: int = 250_000
+
+    def limits_for(self, model: str) -> tuple[int, int]:
+        """(requests_per_minute, tokens_per_minute) for a model name.
+
+        Each model gets its OWN limiter keyed on these numbers. Sharing one
+        budget across models with opposite shapes would throttle both on the
+        wrong limits and waste most of the combined quota.
+        """
+        if model.removeprefix("models/") == self.judge_model.removeprefix("models/"):
+            return self.judge_requests_per_minute, self.judge_tokens_per_minute
+        return self.llm_requests_per_minute, self.llm_tokens_per_minute
+
     # --- embeddings ---
     embedding_provider: Literal["gemini", "fastembed"] = "gemini"
     embedding_model: str = "models/gemini-embedding-001"

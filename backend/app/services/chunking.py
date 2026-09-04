@@ -125,16 +125,49 @@ def _split_sections(text: str) -> list[tuple[str | None, str]]:
     if preamble:
         sections.append((None, preamble))
 
+    # A heading with no body of its own -- an H1 document title immediately
+    # followed by an H2 -- is CARRIED FORWARD and prefixed onto the next
+    # heading, producing a heading path like:
+    #
+    #     # Incident Post-Mortem: INC-2024-1183
+    #     ## Summary
+    #
+    # Two earlier approaches were both wrong, and the second was worse:
+    #
+    #   1. Emitting it as its own section produced a content-free chunk (39
+    #      chars of pure title) that ranked SECOND in every retrieval, because
+    #      a bare title embeds close to almost any question about the document.
+    #   2. Dropping it via the min-body filter DESTROYED the text. Measured: the
+    #      only occurrence of "INC-2024-1183" in the corpus was that title, so
+    #      no retriever -- dense or BM25 -- could find the document by its own
+    #      incident number. The label validator caught it; a benchmark had
+    #      already mis-attributed the loss to "dense retrieval is bad at
+    #      identifiers", which sent the diagnosis in entirely the wrong
+    #      direction.
+    #
+    # Carrying it forward keeps the text searchable, attaches it to real
+    # content, and creates no content-free chunk. It is also just what a
+    # heading path means.
+    pending: list[str] = []
     for i, match in enumerate(matches):
         heading_line = match.group(0).strip()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
         body = text[match.end() : end].strip()
-        if body:
-            sections.append((heading_line, body))
-        else:
-            # A heading with no body of its own (e.g. an H1 title immediately
-            # followed by an H2). Keep it so its text is still searchable.
-            sections.append((heading_line, heading_line))
+
+        if not body:
+            pending.append(heading_line)
+            continue
+
+        full_heading = "\n".join([*pending, heading_line])
+        pending.clear()
+        sections.append((full_heading, body))
+
+    # Trailing heading with nothing after it at all. Keep it rather than lose
+    # the text -- the min-body filter will drop it only if it is genuinely too
+    # short to matter, and by then there is nothing to attach it to.
+    if pending:
+        tail = "\n".join(pending)
+        sections.append((tail, tail))
     return sections
 
 

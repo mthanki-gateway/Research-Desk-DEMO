@@ -101,6 +101,10 @@ export type EvalExpectedFact = {
   must_contain: string[];
   /** null = not satisfied by any retrieved chunk, at any depth. */
   found_at_rank: number | null;
+  /** Chunks that DO satisfy this label, found by SQL rather than retrieval.
+   *  Empty means the label matches nothing in the corpus — a broken label, not
+   *  a retrieval failure. */
+  matching_chunk_ids: string[];
 };
 
 export type EvalQuestionResult = {

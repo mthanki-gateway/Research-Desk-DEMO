@@ -574,38 +574,78 @@ function QuestionDetail({
           <div>
             <p className="md-label-medium mb-1">Expected</p>
             <ul className="md-body-small space-y-1">
-              {q.expected.map((e) => (
-                <li key={e.index} className="flex items-start gap-2">
-                  <span
-                    style={{
-                      color:
-                        e.found_at_rank !== null
-                          ? "var(--md-primary)"
-                          : "var(--md-error)",
-                    }}
-                  >
-                    {e.found_at_rank !== null ? "✓" : "✗"}
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <strong>{e.file}</strong>
-                    {e.must_contain.length > 0 && (
-                      <> containing {e.must_contain.map((c) => `“${c}”`).join(" + ")}</>
-                    )}
-                    {e.found_at_rank !== null ? (
-                      <span style={{ color: "var(--md-on-surface-variant)" }}>
-                        {" "}
-                        — found at rank {e.found_at_rank}
-                        {e.found_at_rank > topK && " (beyond top-k)"}
-                      </span>
+              {q.expected.map((e) => {
+                const broken = e.matching_chunk_ids.length === 0;
+                const target = e.matching_chunk_ids[0];
+                const body = (
+                  <>
+                    <span
+                      style={{
+                        color: broken
+                          ? "var(--md-tertiary)"
+                          : e.found_at_rank !== null
+                            ? "var(--md-primary)"
+                            : "var(--md-error)",
+                      }}
+                    >
+                      {broken ? "!" : e.found_at_rank !== null ? "✓" : "✗"}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <strong>{e.file}</strong>
+                      {e.must_contain.length > 0 && (
+                        <>
+                          {" "}
+                          containing {e.must_contain.map((c) => `“${c}”`).join(" + ")}
+                        </>
+                      )}
+                      {broken ? (
+                        /* The label matches no chunk at all, so the question
+                           CANNOT pass. Distinguishing this from a retrieval
+                           miss matters: otherwise you tune retrieval against
+                           an impossible target. */
+                        <span style={{ color: "var(--md-tertiary)" }}>
+                          {" "}
+                          — no chunk in the corpus matches this label. Either the
+                          fixture is not ingested, or the label is wrong.
+                        </span>
+                      ) : e.found_at_rank !== null ? (
+                        <span style={{ color: "var(--md-on-surface-variant)" }}>
+                          {" "}
+                          — found at rank {e.found_at_rank}
+                          {e.found_at_rank > topK && " (beyond top-k)"}
+                        </span>
+                      ) : (
+                        <span style={{ color: "var(--md-error)" }}>
+                          {" "}
+                          — not retrieved in top {topK}
+                          {e.matching_chunk_ids.length > 1 &&
+                            ` · ${e.matching_chunk_ids.length} chunks would satisfy it`}
+                        </span>
+                      )}
+                    </span>
+                  </>
+                );
+
+                // Clickable whenever the label resolves — most valuable on a
+                // MISS, since reading the chunk that should have won is how
+                // you judge whether the miss was reasonable.
+                return (
+                  <li key={e.index}>
+                    {target ? (
+                      <button
+                        type="button"
+                        onClick={() => void onCite(target)}
+                        title="Open the chunk this label points at"
+                        className="flex w-full items-start gap-2 rounded-[var(--md-shape-xs)] px-1 py-0.5 text-left hover:bg-[color-mix(in_srgb,var(--md-on-surface)_8%,transparent)]"
+                      >
+                        {body}
+                      </button>
                     ) : (
-                      <span style={{ color: "var(--md-error)" }}>
-                        {" "}
-                        — not retrieved in top {topK}
-                      </span>
+                      <span className="flex items-start gap-2 px-1 py-0.5">{body}</span>
                     )}
-                  </span>
-                </li>
-              ))}
+                  </li>
+                );
+              })}
             </ul>
           </div>
         )}
