@@ -72,6 +72,11 @@ services:
       # Read-only so ruff/pytest config edits apply without an image rebuild.
       # Dependency changes still need `docker compose up -d --build api`.
       - ./backend/pyproject.toml:/app/pyproject.toml:ro
+      # uv.lock is WRITABLE, unlike pyproject. `uv lock` inside the container
+      # must land on the host or the committed lock silently goes stale and
+      # CI's `uv sync --frozen` fails on the next dependency change. That
+      # already happened once and needed a `docker compose cp` to recover.
+      - ./backend/uv.lock:/app/uv.lock
       - hfcache:/root/.cache/huggingface # persist fastembed model download
     restart: unless-stopped
     depends_on:

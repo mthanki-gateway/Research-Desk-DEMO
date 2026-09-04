@@ -36,6 +36,8 @@ import sys
 
 from app.services.eval_runner import DEFAULT_K_VALUES, run_tier1
 from app.services.golden import load_golden_set
+from app.services.judge import ALL_METRICS, CHEAP_METRICS, ragas_available
+from app.services.tier2 import run_tier2
 
 
 def _fmt(value: float | None) -> str:
@@ -104,6 +106,57 @@ def _print_report(report) -> None:
     print()
 
 
+def _print_tier2(report) -> None:
+    cfg = report.config
+    agg = report.aggregates
+    print()
+    print("=" * 72)
+    print(f"TIER 2 — generation, judged by RAGAS    mode={cfg['mode']} top_k={cfg['top_k']}")
+    print(f"answering: {cfg['model']}    judge: {cfg['judge_model']}")
+    print(
+        f"{cfg['n_questions']} questions · {report.n_generated} generated · "
+        f"{report.n_from_cache} from cache · {report.elapsed_seconds:.1f}s"
+    )
+    if cfg.get("filters"):
+        bits = ", ".join(f"{k}={'|'.join(v)}" for k, v in cfg["filters"].items())
+        print()
+        print(f"!! SUBSET RUN — filtered by {bits}. Not comparable to a full-suite run.")
+    print("=" * 72)
+    print()
+
+    rows = [
+        ("Faithfulness", "faithfulness", "claims supported by the retrieved context"),
+        ("Answer relevancy", "answer_relevancy", "does it address the question asked"),
+        ("Context precision", "context_precision", "were the retrieved chunks needed"),
+        ("Context recall", "context_recall", "did retrieval get everything needed"),
+    ]
+    print(f"{'metric':20s} {'score':>7}  {'n':>4}   what it measures")
+    print(f"{'-' * 20} {'-' * 7}  {'-' * 4}   {'-' * 40}")
+    for label, key, blurb in rows:
+        value = agg.get(key)
+        shown = f"{value:.3f}" if value is not None else "  --  "
+        print(f"{label:20s} {shown:>7}  {agg.get(f'{key}_n', 0):>4}   {blurb}")
+
+    if agg.get("n_judge_errors"):
+        print()
+        print(f"!! {agg['n_judge_errors']} judge call(s) failed — see --json for details")
+
+    # Worst faithfulness first: an unsupported claim is a hallucination, which
+    # matters more than a merely irrelevant answer.
+    scored = [q for q in report.questions if q.scores.get("faithfulness") is not None]
+    scored.sort(key=lambda q: q.scores["faithfulness"])
+    print()
+    print("-" * 72)
+    print("LOWEST FAITHFULNESS")
+    print("-" * 72)
+    for q in scored[:5]:
+        s = q.scores
+        print(f"  {q.question_id}   faithfulness {s['faithfulness']:.2f}")
+        print(f"      {q.question}")
+        print(f"      answer: {q.answer[:110]}")
+    print()
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -126,6 +179,38 @@ async def main() -> int:
     parser.add_argument("--tag", action="append", default=[], help="only questions with this tag")
     parser.add_argument("--id", action="append", default=[], help="only these question ids")
     parser.add_argument("--json", action="store_true", help="emit JSON instead of a table")
+    parser.add_argument(
+        "--tier",
+        type=int,
+        choices=[1, 2],
+        default=1,
+        help="1 = retrieval metrics (fast, no LLM). 2 = generation metrics via RAGAS",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["agent", "baseline"],
+        default="agent",
+        help="tier 2 only: run the LangGraph agent, or plain single-pass RAG",
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="tier 2 only: regenerate answers instead of reusing the cache",
+    )
+    parser.add_argument(
+        "--generate-only",
+        action="store_true",
+        help="tier 2 only: produce and cache answers without judging them",
+    )
+    parser.add_argument(
+        "--all-metrics",
+        action="store_true",
+        help=(
+            "tier 2 only: add context precision and recall. SLOW -- RAGAS makes "
+            "roughly one call per context chunk for precision, and on a 15 rpm "
+            "judge all four metrics took ~9 minutes for ONE question"
+        ),
+    )
     args = parser.parse_args()
 
     questions = load_golden_set()
@@ -140,16 +225,40 @@ async def main() -> int:
         print("no questions matched the filters", file=sys.stderr)
         return 1
 
+    filters = {
+        **({"tags": args.tag} if args.tag else {}),
+        **({"ids": args.id} if args.id else {}),
+    }
+
+    if args.tier == 2:
+        ok, why = ragas_available()
+        if not ok and not args.generate_only:
+            print(f"Tier 2 needs RAGAS: {why}", file=sys.stderr)
+            return 1
+        report2 = await run_tier2(
+            questions,
+            mode=args.mode,
+            top_k=args.top_k,
+            multi_query=args.multi_query,
+            owner_id=args.owner,
+            use_cache=not args.no_cache,
+            judge=not args.generate_only,
+            metrics=ALL_METRICS if args.all_metrics else CHEAP_METRICS,
+            filters=filters,
+        )
+        if args.json:
+            print(json.dumps(report2.to_dict(), indent=2))
+        else:
+            _print_tier2(report2)
+        return 0
+
     report = await run_tier1(
         questions,
         top_k=args.top_k,
         k_values=tuple(sorted(args.k)),
         multi_query=args.multi_query,
         owner_id=args.owner,
-        filters={
-            **({"tags": args.tag} if args.tag else {}),
-            **({"ids": args.id} if args.id else {}),
-        },
+        filters=filters,
     )
 
     if args.json:

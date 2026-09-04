@@ -44,6 +44,25 @@ dev = [
 # install with `uv sync --extra local-embeddings` if EMBEDDING_PROVIDER=fastembed.
 [project.optional-dependencies]
 local-embeddings = ["fastembed>=0.4"]
+# RAG evaluation via the standard library, used as a CROSS-CHECK on the
+# hand-rolled judge rather than as the only implementation. Optional because it
+# pulls pandas and datasets, and none of it is needed to serve a request --
+# keeping it out of the default set is what holds the prod image at 177MB.
+#   uv sync --extra eval
+eval = [
+    "ragas>=0.2",
+    # RAGAS accepts a judge through LangChain wrappers. This was already a
+    # declared dependency and never imported; using it here finally makes it
+    # real.
+    "langchain-google-genai>=2.0.7",
+    # Pinned below 0.4 because ragas 0.4.3 UNCONDITIONALLY imports
+    # `langchain_community.chat_models.vertexai.ChatVertexAI` in
+    # ragas/llms/base.py, and langchain-community 0.4.x removed that module
+    # (VertexAI moved to langchain-google-vertexai). With 0.4.x installed,
+    # `import ragas` itself raises ModuleNotFoundError -- so this is not
+    # optional tidiness, it is what makes the extra importable at all.
+    "langchain-community<0.4",
+]
 
 [tool.ruff]
 line-length = 100

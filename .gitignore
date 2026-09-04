@@ -33,3 +33,6 @@ tsconfig.tsbuildinfo
 .DS_Store
 *.log
 .playwright-mcp/
+# Tier 2 answer cache. Generated model output, keyed by config hash --
+# regenerable, and it would churn the diff on every evaluation run.
+.eval-cache/
