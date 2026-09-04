@@ -64,6 +64,11 @@ services:
       - ./backend/app:/app/app          # hot reload
       # Tests are mounted, not COPYed, so they never enter the prod image.
       - ./backend/tests:/app/tests
+      # The golden evaluation set and its corpus. Read-only: the app reads
+      # these, the developer edits them on the host. Mounted rather than COPYed
+      # for the same reason as tests — evaluation fixtures have no business in
+      # a production image.
+      - ./fixtures:/app/fixtures:ro
       # Read-only so ruff/pytest config edits apply without an image rebuild.
       # Dependency changes still need `docker compose up -d --build api`.
       - ./backend/pyproject.toml:/app/pyproject.toml:ro

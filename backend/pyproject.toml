@@ -29,6 +29,9 @@ dependencies = [
     # ingestion
     "pypdf>=5.1",
     "python-multipart>=0.0.17",
+    # Reads fixtures/golden.yaml. A main dependency rather than a dev one
+    # because the /eval endpoint serves the suite to the Lab UI at runtime.
+    "pyyaml>=6.0",
 ]
 
 [dependency-groups]

@@ -14,6 +14,7 @@ import {
 import { useApp } from "../providers";
 import { Button, Ripplable, Switch, TextField } from "../md";
 import { IconSearch, IconSpinner } from "../icons";
+import Benchmark from "./benchmark";
 
 /**
  * Developer surface, kept separate from Chat.
@@ -25,11 +26,25 @@ import { IconSearch, IconSpinner } from "../icons";
 export default function Lab() {
   const { readyDocuments, showChunk } = useApp();
   const [stats, setStats] = useState<Stats | null>(null);
+  // Three states, not two. `stats === null` cannot distinguish "still
+  // loading" from "the request failed", and rendering nothing for both meant
+  // the badges popped in with no warning that anything was coming — the
+  // route-level loading.tsx does not help here, because this fetch starts
+  // AFTER the page has mounted.
+  const [statsState, setStatsState] = useState<"loading" | "ready" | "error">(
+    "loading",
+  );
 
   useEffect(() => {
     void getStats()
-      .then(setStats)
-      .catch(() => setStats(null));
+      .then((s) => {
+        setStats(s);
+        setStatsState("ready");
+      })
+      .catch(() => {
+        setStats(null);
+        setStatsState("error");
+      });
   }, []);
 
   const enabled = readyDocuments.length > 0;
@@ -47,22 +62,45 @@ export default function Lab() {
         </p>
       </header>
 
-      {stats && (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-          <Stat label="Documents" value={stats.documents} />
-          <Stat label="Chunks" value={stats.chunks_in_postgres} />
-          <Stat
-            label="Vectors"
-            value={stats.vectors_in_qdrant}
-            warn={stats.chunks_in_postgres !== stats.vectors_in_qdrant}
-          />
-          <Stat
-            label="Embeddings"
-            value={`${stats.embedding_dim}d`}
-            sub={stats.embedding_provider}
-          />
-        </div>
-      )}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4" data-stats>
+        {statsState === "loading" &&
+          /* Same card, same height, skeleton contents — so the grid does not
+             reflow when the real numbers land. A spinner here would shift the
+             whole page down on arrival. */
+          ["Documents", "Chunks", "Vectors", "Embeddings"].map((label) => (
+            <StatSkeleton key={label} label={label} />
+          ))}
+
+        {statsState === "ready" && stats && (
+          <>
+            <Stat label="Documents" value={stats.documents} />
+            <Stat label="Chunks" value={stats.chunks_in_postgres} />
+            <Stat
+              label="Vectors"
+              value={stats.vectors_in_qdrant}
+              warn={stats.chunks_in_postgres !== stats.vectors_in_qdrant}
+            />
+            <Stat
+              label="Embeddings"
+              value={`${stats.embedding_dim}d`}
+              sub={stats.embedding_provider}
+            />
+          </>
+        )}
+
+        {statsState === "error" && (
+          /* Says so, rather than silently showing nothing. On the deployed
+             backend the first request after 15 minutes idle can take 50s, and
+             an empty area is indistinguishable from a broken page. */
+          <p
+            className="md-body-small col-span-2 sm:col-span-4"
+            style={{ color: "var(--md-tertiary)" }}
+          >
+            Could not load index stats. The backend may be waking up — reload
+            in a moment.
+          </p>
+        )}
+      </div>
 
       {stats && stats.chunks_in_postgres !== stats.vectors_in_qdrant && (
         <p className="md-body-small" style={{ color: "var(--md-tertiary)" }}>
@@ -81,6 +119,32 @@ export default function Lab() {
 
       <AskPanel enabled={enabled} onCite={showChunk} />
       <SearchPanel enabled={enabled} onCite={showChunk} />
+
+      {/* Benchmark last: the single-shot tools above are for diagnosing ONE
+          question, this measures the whole suite. Separate file because it is
+          substantial enough to own its state. */}
+      <div
+        className="border-t pt-8"
+        style={{ borderColor: "var(--md-outline-variant)" }}
+      >
+        <Benchmark />
+      </div>
+    </div>
+  );
+}
+
+/** Placeholder matching Stat's exact box, so nothing reflows on arrival. */
+function StatSkeleton({ label }: { label: string }) {
+  return (
+    <div className="md-card md-card-filled px-4 py-3" aria-busy="true">
+      <p
+        className="md-label-medium"
+        style={{ color: "var(--md-on-surface-variant)" }}
+      >
+        {label}
+      </p>
+      {/* Height matches md-title-large's line box, so the card keeps its size. */}
+      <div className="mt-1.5 md-skeleton h-5 w-12 rounded-[var(--md-shape-xs)]" />
     </div>
   );
 }

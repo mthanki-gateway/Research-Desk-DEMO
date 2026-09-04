@@ -685,6 +685,33 @@ textarea:focus-visible {
     background: var(--md-secondary-container);
     overflow: hidden;
   }
+  /* Indeterminate: a bar that sweeps rather than fills. Animates `transform`
+     only, so it stays on the compositor -- animating `left` or `width` would
+     relayout on every frame. */
+  .md-linear-progress-indeterminate {
+    height: 100%;
+    width: 40%;
+    border-radius: var(--md-shape-full);
+    background: var(--md-primary);
+    animation: md-indeterminate 1.4s var(--md-ease-standard) infinite;
+    will-change: transform;
+  }
+  @keyframes md-indeterminate {
+    /* -100% of its OWN width at the start, 250% at the end, so the bar clears
+       both edges of a track 2.5x its width. */
+    from { transform: translateX(-100%); }
+    to   { transform: translateX(250%); }
+  }
+  /* Motion here is the only signal that work is happening, so reduced-motion
+     keeps a static bar rather than removing the indicator entirely. */
+  @media (prefers-reduced-motion: reduce) {
+    .md-linear-progress-indeterminate {
+      animation: none;
+      width: 100%;
+      opacity: 0.5;
+    }
+  }
+
   .md-linear-progress > div {
     height: 100%;
     border-radius: var(--md-shape-full);

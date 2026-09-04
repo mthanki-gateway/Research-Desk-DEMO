@@ -48,6 +48,147 @@ export type Health = {
   google_api_key_present: boolean;
 };
 
+// ---------------------------------------------------------------------------
+// Evaluation (Tier 1 — retrieval metrics)
+//
+// Mirrors backend/app/services/eval_runner.py. Hand-written, like every other
+// type here, which means it can drift from the Python if a field is renamed;
+// generating these from the OpenAPI schema is the standing fix.
+// ---------------------------------------------------------------------------
+
+/** Suite-level means at one k. Null where a metric is undefined. */
+export type EvalAggregate = {
+  k: number;
+  n_questions: number;
+  /** Answerable questions only — unanswerable ones are excluded, not zeroed. */
+  n_scored: number;
+  hit_rate: number | null;
+  precision: number | null;
+  recall: number | null;
+  mrr: number | null;
+  map: number | null;
+  ndcg: number | null;
+};
+
+export type EvalQuestionScores = {
+  k: number;
+  n_retrieved: number;
+  total_relevant: number;
+  hit: boolean;
+  precision: number;
+  recall: number | null;
+  reciprocal_rank: number;
+  average_precision: number | null;
+  ndcg: number | null;
+};
+
+export type EvalHit = {
+  rank: number;
+  /** For opening the full chunk in the side panel — the preview is truncated. */
+  chunk_id: string;
+  filename: string;
+  heading: string | null;
+  score: number;
+  relevant: boolean;
+  preview: string;
+  n_chars: number;
+};
+
+/** A labelled fact the question needs, and whether retrieval found it. */
+export type EvalExpectedFact = {
+  index: number;
+  file: string;
+  must_contain: string[];
+  /** null = not satisfied by any retrieved chunk, at any depth. */
+  found_at_rank: number | null;
+};
+
+export type EvalQuestionResult = {
+  id: string;
+  question: string;
+  tags: string[];
+  answerable: boolean;
+  total_specs: number;
+  specs_satisfied: number;
+  expected: EvalExpectedFact[];
+  expected_answer: string;
+  expect_refusal: boolean;
+  /** spec index -> rank it was first found at. A fact at rank 9 with top_k=5
+   *  is a RANKING failure, not a retrieval one. */
+  satisfied_at: Record<string, number>;
+  unsatisfied_specs: number[];
+  hits: EvalHit[];
+  /** keyed by k as a string */
+  scores: Record<string, EvalQuestionScores>;
+};
+
+export type EvalReport = {
+  config: {
+    top_k: number;
+    k_values: number[];
+    multi_query: boolean;
+    n_questions: number;
+    scoped_to_documents: string[] | null;
+    /** Empty = the full suite ran. Anything else means these metrics cover a
+     *  SUBSET and must not be compared against a full-suite number. */
+    filters: { tags?: string[]; ids?: string[] };
+    question_ids: string[];
+  };
+  elapsed_seconds: number;
+  n_embedding_calls: number;
+  aggregates: Record<string, EvalAggregate>;
+  questions: EvalQuestionResult[];
+};
+
+export type GoldenSet = {
+  n_questions: number;
+  n_answerable: number;
+  n_unanswerable: number;
+  tags: string[];
+  questions: {
+    id: string;
+    question: string;
+    tags: string[];
+    answerable: boolean;
+    n_facts: number;
+  }[];
+};
+
+export type EvalCorpus = {
+  documents: { filename: string; chunks: number }[];
+  n_documents: number;
+  n_chunks: number;
+};
+
+export async function getGoldenSet(): Promise<GoldenSet> {
+  const res = await authedFetch("/eval/golden", { cache: "no-store" });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function getEvalCorpus(): Promise<EvalCorpus> {
+  const res = await authedFetch("/eval/corpus", { cache: "no-store" });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function runTier1(opts: {
+  topK?: number | null;
+  kValues?: number[];
+  multiQuery?: boolean;
+  tags?: string[];
+}): Promise<EvalReport> {
+  const res = await authedJson("/eval/tier1", "POST", {
+    top_k: opts.topK ?? null,
+    k_values: opts.kValues ?? [1, 3, 5, 10],
+    multi_query: opts.multiQuery ?? false,
+    tags: opts.tags ?? [],
+    ids: [],
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
 export type DocStatus =
   | "pending"
   | "parsing"

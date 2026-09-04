@@ -344,14 +344,30 @@ export function Dialog({
   );
 }
 
-export function LinearProgress({ value }: { value: number }) {
+/**
+ * M3 linear progress, determinate or indeterminate.
+ *
+ * Omit `value` for the indeterminate variant — the correct choice when the
+ * work has no measurable progress, like a benchmark run whose duration depends
+ * on rate limits. A determinate bar stuck at one value reads as frozen; an
+ * indeterminate one reads as working.
+ *
+ * `aria-valuenow` is set only in the determinate case: on an indeterminate
+ * progressbar its absence is what tells assistive tech the value is unknown.
+ */
+export function LinearProgress({ value }: { value?: number }) {
+  const indeterminate = value === undefined;
   return (
     <div
       className="md-linear-progress"
       role="progressbar"
-      aria-valuenow={Math.round(value)}
+      aria-valuenow={indeterminate ? undefined : Math.round(value)}
     >
-      <div style={{ width: `${Math.max(2, Math.min(100, value))}%` }} />
+      {indeterminate ? (
+        <div className="md-linear-progress-indeterminate" />
+      ) : (
+        <div style={{ width: `${Math.max(2, Math.min(100, value))}%` }} />
+      )}
     </div>
   );
 }

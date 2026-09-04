@@ -86,18 +86,34 @@ class TestRecallAtK:
 
 class TestReciprocalRank:
     def test_first_result_relevant(self):
-        assert reciprocal_rank([True, False]) == pytest.approx(1.0)
+        assert reciprocal_rank([True, False], k=2) == pytest.approx(1.0)
 
     def test_third_result_relevant(self):
-        assert reciprocal_rank([False, False, True]) == pytest.approx(1 / 3)
+        assert reciprocal_rank([False, False, True], k=3) == pytest.approx(1 / 3)
 
     def test_none_relevant_is_zero(self):
-        assert reciprocal_rank([False, False]) == 0.0
+        assert reciprocal_rank([False, False], k=2) == 0.0
 
     def test_only_the_first_hit_counts(self):
         # Later relevant results do not improve RR -- which is why it is a poor
         # fit for RAG, where every retrieved chunk enters the prompt.
-        assert reciprocal_rank([False, True, True]) == pytest.approx(1 / 2)
+        assert reciprocal_rank([False, True, True], k=3) == pytest.approx(1 / 2)
+
+    def test_truncates_at_k(self):
+        """A relevant result BEYOND k must score 0 — the user never saw it.
+
+        Without truncation this scans the whole list and returns the same value
+        at every k, which makes a per-k report silently meaningless.
+        """
+        relevance = [False, False, False, False, False, False, False, True]
+        assert reciprocal_rank(relevance, k=5) == 0.0
+        assert reciprocal_rank(relevance, k=8) == pytest.approx(1 / 8)
+
+    def test_varies_with_k(self):
+        # The property whose absence was the bug: MRR must move as k moves.
+        relevance = [False, False, True]
+        assert reciprocal_rank(relevance, k=2) == 0.0
+        assert reciprocal_rank(relevance, k=3) == pytest.approx(1 / 3)
 
 
 class TestAveragePrecision:
@@ -107,13 +123,17 @@ class TestAveragePrecision:
         #   precision@3 = 2/3 = 0.667
         #   AP = (1.0 + 0.667) / 4 relevant = 0.4167
         expected = (1 / 1 + 2 / 3) / 4
-        assert average_precision(RELEVANCE, total_relevant=4) == pytest.approx(expected)
+        assert average_precision(RELEVANCE, k=5, total_relevant=4) == pytest.approx(expected)
 
     def test_perfect_ordering_scores_one(self):
-        assert average_precision([True, True], total_relevant=2) == pytest.approx(1.0)
+        assert average_precision([True, True], k=2, total_relevant=2) == pytest.approx(1.0)
 
     def test_unanswerable_returns_none(self):
-        assert average_precision([False], total_relevant=0) is None
+        assert average_precision([False], k=1, total_relevant=0) is None
+
+    def test_truncates_at_k(self):
+        # Only the hit at rank 1 counts at k=2; the rank-3 hit is unseen.
+        assert average_precision(RELEVANCE, k=2, total_relevant=4) == pytest.approx(1 / 4)
 
 
 class TestDcg:

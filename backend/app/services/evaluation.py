@@ -65,31 +65,37 @@ def recall_at_k(relevance: list[bool], k: int, total_relevant: int) -> float | N
     return sum(relevance[:k]) / total_relevant
 
 
-def reciprocal_rank(relevance: list[bool]) -> float:
-    """1 / rank of the FIRST relevant result, or 0 if none.
+def reciprocal_rank(relevance: list[bool], k: int) -> float:
+    """1 / rank of the first relevant result WITHIN the top k, else 0.
 
-    Averaged over questions this is MRR. Worth knowing that it is a poor fit
-    for RAG: when five chunks all go into the prompt, whether the good one was
-    rank 1 or rank 3 barely matters. It is a search metric, kept here because
-    interviews ask for it.
+    Averaged over questions this is MRR@k. The `k` is not optional: without
+    truncation this scans the whole retrieved list and returns the same value
+    at every k, which makes a per-k table silently meaningless. If the first
+    relevant result sits at rank 8, MRR@5 must be 0 -- at k=5 the user never
+    saw it.
+
+    Worth knowing it is a poor fit for RAG anyway: when five chunks all go into
+    the prompt, whether the good one was rank 1 or rank 3 barely matters. It is
+    a search metric, kept because interviews ask for it.
     """
-    for index, is_relevant in enumerate(relevance, start=1):
+    for index, is_relevant in enumerate(relevance[:k], start=1):
         if is_relevant:
             return 1.0 / index
     return 0.0
 
 
-def average_precision(relevance: list[bool], total_relevant: int) -> float | None:
-    """Mean of precision@i taken at each rank where a relevant item appears.
+def average_precision(relevance: list[bool], k: int, total_relevant: int) -> float | None:
+    """Mean of precision@i at each rank within the top k holding a relevant item.
 
-    Averaged over questions this is MAP. Rank-aware and binary; rewards putting
-    relevant results early, unlike plain precision.
+    Averaged over questions this is MAP@k. Truncated at k for the same reason
+    as reciprocal_rank: a relevant result the user never saw cannot count
+    towards the score.
     """
     if total_relevant <= 0:
         return None
     hits = 0
     running = 0.0
-    for index, is_relevant in enumerate(relevance, start=1):
+    for index, is_relevant in enumerate(relevance[:k], start=1):
         if is_relevant:
             hits += 1
             running += hits / index
@@ -156,8 +162,8 @@ class QuestionScores:
             hit=hit_at_k(relevance, k),
             precision=precision_at_k(relevance, k),
             recall=recall_at_k(relevance, k, total_relevant),
-            reciprocal_rank=reciprocal_rank(relevance),
-            average_precision=average_precision(relevance, total_relevant),
+            reciprocal_rank=reciprocal_rank(relevance, k),
+            average_precision=average_precision(relevance, k, total_relevant),
             ndcg=ndcg_at_k(relevance, k, total_relevant),
         )
 

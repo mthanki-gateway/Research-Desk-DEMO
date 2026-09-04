@@ -1,0 +1,242 @@
+# Golden evaluation set.
+#
+# LABELS REFERENCE CONTENT, NEVER IDS. Chunk UUIDs are generated at ingest and
+# change on every re-ingest; `chunk_index` shifts whenever chunking changes --
+# and chunking changes are precisely what this set exists to measure. So a
+# retrieved chunk counts as relevant when its `file` matches and every string in
+# `must_contain` appears in its text. That survives re-chunking, re-embedding,
+# and switching embedding models.
+#
+# `expect_chunks: []` marks an UNANSWERABLE question. Recall is undefined there
+# (0/0), so the aggregate excludes it from the recall mean rather than scoring
+# it zero -- otherwise a system that correctly finds nothing looks broken. What
+# is measured instead is whether it declined to answer.
+#
+# The corpus deliberately contains DISTRACTORS: the annual report and the Q1
+# review restate overlapping figures for different periods, and the incident
+# post-mortem and the interview transcript describe the same outage from
+# different angles. A question that does not disambiguate period or source
+# SHOULD be hard.
+
+questions:
+  # ---------------------------------------------------------------- single-hop
+  - id: margin-driver-fy2024
+    question: "What drove the gross margin improvement in fiscal 2024?"
+    tags: [single-hop, financial]
+    expect_chunks:
+      - file: acme-report.md
+        must_contain: ["62.1", "subscription"]
+    expected_answer: >
+      A shift in product mix toward higher-margin subscription offerings, which
+      lifted gross margin from 58.7% to 62.1%.
+
+  - id: headcount-fy2024
+    question: "How many employees did Acme have at the end of fiscal 2024?"
+    tags: [single-hop, factual]
+    expect_chunks:
+      - file: acme-report.md
+        must_contain: ["4,182"]
+    expected_answer: "4,182 employees as of 31 December 2024."
+
+  - id: rollback-threshold
+    question: "What error rate should trigger a rollback during a cutover?"
+    tags: [single-hop, technical]
+    expect_chunks:
+      - file: acme-incident-2024-11.md
+        must_contain: ["8%"]
+    expected_answer: >
+      8% sustained error rate over 60 seconds. The original runbook used 25%,
+      which was well above the point of material customer impact.
+
+  - id: capex-guidance
+    question: "What is the capital expenditure guidance for FY2025?"
+    tags: [single-hop, factual]
+    expect_chunks:
+      - file: acme-q1-2025-review.md
+        must_contain: ["58 million"]
+    expected_answer: "$58 million for the year, unchanged."
+
+  # -------------------------------------------------- temporal disambiguation
+  # These exist because the two financial documents are near-duplicates in
+  # vocabulary. Retrieval must pick the right PERIOD, not merely the right
+  # topic. This is the class of failure a small corpus cannot expose.
+  - id: cloud-share-q1-2025
+    question: "What share of revenue did Cloud Platform represent in Q1 FY2025?"
+    tags: [temporal, distractor]
+    expect_chunks:
+      - file: acme-q1-2025-review.md
+        must_contain: ["63.4"]
+    expected_answer: "63.4% of total revenue in Q1 FY2025."
+
+  - id: cloud-share-fy2024
+    question: "What share of revenue did Cloud Platform represent across the whole of fiscal 2024?"
+    tags: [temporal, distractor]
+    expect_chunks:
+      - file: acme-report.md
+        must_contain: ["60.5"]
+    expected_answer: "60.5% of total revenue in FY2024."
+
+  - id: concentration-trend
+    question: "Did customer concentration improve or worsen between FY2024 and Q1 FY2025?"
+    tags: [multi-hop, temporal, distractor]
+    expect_chunks:
+      - file: acme-report.md
+        must_contain: ["31.4"]
+      - file: acme-q1-2025-review.md
+        must_contain: ["28.9"]
+    expected_answer: >
+      It improved, from 31.4% of revenue in FY2024 to 28.9% in Q1 FY2025,
+      though it remains above the board's 25% target.
+
+  # ----------------------------------------------------------------- multi-hop
+  - id: outage-cause-and-fix
+    question: "What caused the payments outage and what was done to prevent it recurring?"
+    tags: [multi-hop, technical]
+    expect_chunks:
+      - file: acme-incident-2024-11.md
+        must_contain: ["connection pool"]
+      - file: acme-incident-2024-11.md
+        must_contain: ["startup"]
+    expected_answer: >
+      Connection pool exhaustion: two independent pools against one database
+      requested 64 connections against a 40-connection limit. Fixes included a
+      startup check on total configured pool size, retry jitter, and lowering
+      the rollback threshold to 8%.
+
+  - id: cross-document-outage
+    question: "How long was the payments service degraded, and who led the migration?"
+    tags: [multi-hop, cross-document]
+    expect_chunks:
+      - file: acme-incident-2024-11.md
+        must_contain: ["2 hours and 47 minutes"]
+      - file: interview-transcript-backend.md
+        must_contain: ["I led it"]
+    expected_answer: >
+      Two hours and 47 minutes. The migration was led by the candidate,
+      J. Okonkwo, per the interview transcript.
+
+  - id: hardware-vs-cloud
+    question: "Compare how the Hardware and Cloud Platform segments performed in Q1 FY2025."
+    tags: [multi-hop, comparison]
+    expect_chunks:
+      - file: acme-q1-2025-review.md
+        must_contain: ["Hardware", "declining"]
+    expected_answer: >
+      Cloud Platform grew 31.2% to $146.8 million; Hardware declined 4.6% to
+      $52.1 million and is in managed wind-down for two of four product lines.
+
+  # ------------------------------------------------------------------ anaphora
+  # The INAMO problem in miniature. The answer text is substantive but its
+  # SUBJECT is named only in an earlier turn, so the chunk is retrievable only
+  # if chunking or enrichment carried the antecedent along with it.
+  - id: anaphora-parallel-run
+    question: "How did they de-risk the payments cutover before shifting traffic?"
+    tags: [anaphora, transcript]
+    expect_chunks:
+      - file: interview-transcript-backend.md
+        must_contain: ["parallel", "dual-wrote"]
+    expected_answer: >
+      Both systems ran in parallel for six weeks with dual writes and a nightly
+      reconciliation job; traffic shifted only after fourteen consecutive clean
+      days.
+
+  - id: anaphora-rollback-insight
+    question: "Why is rollback capability not a property of the new system?"
+    tags: [anaphora, transcript]
+    expect_chunks:
+      - file: interview-transcript-backend.md
+        must_contain: ["property of the old system"]
+    expected_answer: >
+      Because rollback depends on the OLD system still being able to absorb the
+      load, and that capability decays as soon as decommissioning starts.
+
+  - id: anaphora-testing-example
+    question: "What is a good example of separating deterministic from non-deterministic testing?"
+    tags: [anaphora, transcript]
+    expect_chunks:
+      - file: interview-transcript-backend.md
+        must_contain: ["token bucket"]
+    expected_answer: >
+      Rate limiters: the token-bucket arithmetic is pure and exhaustively
+      unit-testable with a fake clock, but whether the limiter actually stays
+      under a provider quota is a production metric, not a test.
+
+  # ------------------------------------------------------------- exact-term
+  # Dense retrieval is weak on identifiers and codes. These are the questions
+  # that should improve when hybrid/BM25 lands, so they are the before/after
+  # measurement for that work.
+  - id: exact-incident-id
+    question: "What is incident INC-2024-1183 about?"
+    tags: [exact-term, bm25]
+    expect_chunks:
+      - file: acme-incident-2024-11.md
+        must_contain: ["INC-2024-1183"]
+    expected_answer: "The 14 November 2024 payments cutover outage."
+
+  - id: exact-action-item
+    question: "What is action item AI-3?"
+    tags: [exact-term, bm25]
+    expect_chunks:
+      - file: acme-incident-2024-11.md
+        must_contain: ["AI-3"]
+    expected_answer: "Add jitter to all connection retry policies. Completed 5 December 2024."
+
+  # -------------------------------------------------------------- broad / scope
+  # "Summarize" has no semantic overlap with document content, so single-vector
+  # retrieval returns near-arbitrary chunks. These measure the scope-aware
+  # rewriting in expand_query, which is currently unverified.
+  - id: broad-summarise-incident
+    question: "Summarise the incident post-mortem."
+    tags: [broad, scope]
+    expect_chunks:
+      - file: acme-incident-2024-11.md
+        must_contain: ["Summary"]
+      - file: acme-incident-2024-11.md
+        must_contain: ["Root Cause"]
+      - file: acme-incident-2024-11.md
+        must_contain: ["Action Items"]
+    expected_answer: >
+      A SEV-1 payments outage on 14 November 2024 lasting 2h47m, caused by
+      connection pool exhaustion, with five action items covering rollback
+      thresholds, startup checks, retry jitter and decommissioning policy.
+
+  - id: broad-key-risks
+    question: "What are the main risks facing the company?"
+    tags: [broad, scope]
+    expect_chunks:
+      - file: acme-q1-2025-review.md
+        must_contain: ["Risks"]
+      - file: acme-report.md
+        must_contain: ["concentration"]
+    expected_answer: >
+      Customer concentration above the 25% target, Hardware supply chain
+      constraints into H1 2026, the delayed Japan launch, and new mid-market
+      pricing pressure.
+
+  # ---------------------------------------------------------------- unanswerable
+  # The class that catches hallucination. `expect_chunks: []` means recall is
+  # undefined and excluded from the mean; what is asserted is refusal.
+  - id: unanswerable-pyramid
+    question: "What is the height of the Great Pyramid of Giza?"
+    tags: [unanswerable]
+    expect_chunks: []
+    expect_refusal: true
+    expected_answer: "Not answerable from the provided documents."
+
+  - id: unanswerable-ceo-salary
+    question: "What is the CEO's total compensation?"
+    tags: [unanswerable]
+    expect_chunks: []
+    expect_refusal: true
+    expected_answer: >
+      Not answerable. The Q1 review states no changes were made to executive
+      compensation arrangements but never discloses amounts.
+
+  - id: unanswerable-fy2026
+    question: "What was Acme's revenue in fiscal 2026?"
+    tags: [unanswerable, temporal]
+    expect_chunks: []
+    expect_refusal: true
+    expected_answer: >
+      Not answerable. The documents cover FY2024 and Q1 FY2025, with guidance
+      for FY2025 only.
