@@ -165,11 +165,23 @@ export function Ripplable({
   children,
   ...rest
 }: {
-  as?: "button" | "div" | "li";
+  /**
+   * Element or component to render. A string tag, or a component such as
+   * next/link's `Link` — which the navigation drawer uses so its items are
+   * real anchors and get Next's route prefetching.
+   *
+   * `React.ElementType` rather than a string union because the union could not
+   * accept a component, and wrapping a Ripplable inside a Link would nest two
+   * interactive elements.
+   */
+  as?: React.ElementType;
   type?: "button" | "submit" | "reset";
   className?: string;
   children: React.ReactNode;
-} & React.HTMLAttributes<HTMLElement>) {
+  // Extra props are forwarded to the rendered component, so `href`/`prefetch`
+  // reach Link without Ripplable needing to know they exist.
+} & React.HTMLAttributes<HTMLElement> &
+  Record<string, unknown>) {
   const ripple = useRipple<HTMLElement>();
   const Component = Tag as React.ElementType;
   return (

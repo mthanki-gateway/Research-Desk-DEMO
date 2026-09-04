@@ -73,7 +73,10 @@ async def ingest_document(document_id: uuid.UUID, data: bytes) -> None:
 
             # --- stage 2: chunk ---
             chunks = chunk_pages(
-                pages, size=settings.chunk_size, overlap=settings.chunk_overlap
+                pages,
+                size=settings.chunk_size,
+                overlap=settings.chunk_overlap,
+                min_chars=settings.min_chunk_chars,
             )
             if not chunks:
                 raise ValueError("Document produced no chunks.")

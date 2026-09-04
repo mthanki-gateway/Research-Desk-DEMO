@@ -173,6 +173,15 @@ async def stream_turn(
                 req.question,
                 top_k=req.top_k,
                 document_ids=prep["scope"],
+                # MUST be passed. `stream_agent` defaults owner_id to None, and
+                # None means "do not filter by owner" in the vector store -- so
+                # omitting it here (as this call did) made a streamed turn
+                # search EVERY user's chunks. The document scope masked it
+                # whenever a session had documents selected, but a session with
+                # no scope resolves to `scope=None`, and then nothing constrained
+                # retrieval at all. /messages passed it; /stream did not, and
+                # /stream is the path the UI uses.
+                owner_id=user.owner_id,
                 multi_query=req.multi_query,
                 chat_context=prep["context"],
                 thread_id=prep["thread_id"],

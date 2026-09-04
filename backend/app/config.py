@@ -54,6 +54,13 @@ class Settings(BaseSettings):
     retrieval_top_k: int = 5
     chunk_size: int = 900
     chunk_overlap: int = 150
+    # Minimum BODY length (text minus the prefixed heading) for a chunk to be
+    # kept. Measured problem: a heading with no body of its own produced a
+    # 39-char chunk of pure title that ranked SECOND in every retrieval,
+    # because a bare title embeds close to almost any question about the
+    # document -- burning one of five slots on text no answer could cite.
+    # 50 clears those while leaving genuinely short sections intact.
+    min_chunk_chars: int = 50
 
     # Multi-query: rewrite the question into N variations, retrieve for each,
     # fuse the ranked lists with RRF. Costs one extra Gemma call plus N

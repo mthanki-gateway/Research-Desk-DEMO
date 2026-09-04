@@ -184,14 +184,24 @@ export default function Shell({ children }: { children: React.ReactNode }) {
           {NAV.map(({ href, label, Icon }) => {
             const active = pathname.startsWith(href);
             return (
+              /* A real <Link>, not a div with role="link" calling
+                 router.push(). Two reasons, and the first is the bigger cause
+                 of the perceived lag between Chat / Library / Lab:
+
+                 1. PREFETCH. Next prefetches a <Link>'s route when it enters
+                    the viewport (and on hover), so by the time you click, the
+                    payload is usually already there. `router.push()` prefetches
+                    nothing — every navigation started cold.
+                 2. It is an anchor, so middle-click, ctrl-click, "open in new
+                    tab" and screen-reader link navigation all work. A div with
+                    role="link" only *claims* to be a link. */
               <Ripplable
                 key={href}
-                as="div"
+                as={Link}
+                href={href}
+                prefetch
                 className="md-nav-item"
                 data-active={active}
-                onClick={() => router.push(href)}
-                role="link"
-                tabIndex={0}
               >
                 {/* The icon gets its own container so it can carry the hover
                     treatment independently of the row. See .md-nav-icon. */}

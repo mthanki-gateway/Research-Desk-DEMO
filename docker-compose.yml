@@ -62,6 +62,8 @@ services:
       - "8000:8000"
     volumes:
       - ./backend/app:/app/app          # hot reload
+      # Tests are mounted, not COPYed, so they never enter the prod image.
+      - ./backend/tests:/app/tests
       # Read-only so ruff/pytest config edits apply without an image rebuild.
       # Dependency changes still need `docker compose up -d --build api`.
       - ./backend/pyproject.toml:/app/pyproject.toml:ro

@@ -55,3 +55,10 @@ ignore = ["B008"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Where to look, so a bare `pytest` finds the suite.
+testpaths = ["tests"]
+# Without this, `import app...` fails inside tests. `tests/` has no
+# __init__.py, so pytest puts /app/tests on sys.path rather than /app --
+# and the package under test is at /app/app. Adding the rootdir fixes it
+# without needing an __init__.py or an editable install.
+pythonpath = ["."]

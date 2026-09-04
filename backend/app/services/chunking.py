@@ -29,7 +29,9 @@ class TextChunk:
     heading: str | None = None
 
 
-def chunk_pages(pages: list[Page], *, size: int, overlap: int) -> list[TextChunk]:
+def chunk_pages(
+    pages: list[Page], *, size: int, overlap: int, min_chars: int = 0
+) -> list[TextChunk]:
     """Chunk each page independently so a chunk never straddles two pages.
 
     That costs a little efficiency at page boundaries but keeps every chunk
@@ -44,24 +46,67 @@ def chunk_pages(pages: list[Page], *, size: int, overlap: int) -> list[TextChunk
     if overlap >= size:
         raise ValueError("chunk_overlap must be smaller than chunk_size")
 
-    chunks: list[TextChunk] = []
+    candidates: list[TextChunk] = []
     for page in pages:
         for heading, body in _split_sections(page.text):
             for piece in _split(body, size, overlap):
                 # Prepend the heading so an isolated chunk still states its own
                 # context. Retrieval sees "## Risks" next to the risk text,
-                # which measurably sharpens the match.
+                # which measurably sharpened the match.
                 already_prefixed = heading is None or piece.startswith(heading)
                 text = piece if already_prefixed else f"{heading}\n{piece}"
-                chunks.append(
+                candidates.append(
                     TextChunk(
-                        index=len(chunks),
+                        index=0,  # assigned after filtering, so they stay dense
                         page=page.number,
                         text=text,
                         heading=heading,
                     )
                 )
-    return chunks
+
+    kept = _drop_contentless(candidates, min_chars=min_chars)
+    for i, chunk in enumerate(kept):
+        chunk.index = i
+    return kept
+
+
+def _body_length(chunk: TextChunk) -> int:
+    """Length of a chunk MINUS its heading prefix.
+
+    Measuring the whole text would be wrong: every chunk carries its heading, so
+    a long heading can push a content-free chunk over any threshold. What
+    matters is how much actual body there is underneath it.
+    """
+    text = chunk.text
+    if chunk.heading and text.startswith(chunk.heading):
+        text = text[len(chunk.heading) :]
+    return len(text.strip())
+
+
+def _drop_contentless(chunks: list[TextChunk], *, min_chars: int) -> list[TextChunk]:
+    """Remove chunks with too little body to answer anything.
+
+    The case that motivated this: `_split_sections` deliberately keeps a heading
+    that has no body of its own (an H1 title immediately followed by an H2) so
+    the title stays searchable. In practice that produced a 39-character chunk
+    of pure heading -- "Acme Corporation — Annual Report 2024" -- which then
+    ranked SECOND in every retrieval, because a bare title embeds close to
+    almost any question about the document. It consumed one of five slots and
+    contributed nothing any answer could cite.
+
+    The document title is not lost: it stays in `documents.filename`, it is
+    shown in every citation, and it is prefixed onto real chunks in its own
+    section.
+
+    Guard: if filtering would empty the document, keep everything. A one-line
+    file is a legitimate upload, and returning zero chunks would fail ingestion
+    for a document that is merely short rather than broken.
+    """
+    if min_chars <= 0:
+        return chunks
+
+    kept = [c for c in chunks if _body_length(c) >= min_chars]
+    return kept if kept else chunks
 
 
 def _split_sections(text: str) -> list[tuple[str | None, str]]:
