@@ -411,6 +411,8 @@ export type ChatMessage = {
     iterations?: number;
     sufficient?: boolean;
     critique?: string;
+    /** Set only when the user was asked to clarify and answered. */
+    clarification?: string | null;
   };
   created_at: string;
 };
@@ -463,33 +465,67 @@ export type DoneEvent = {
   iterations: number;
   trace: TraceStep[];
   context_chars: number;
+  /** What the user said when asked to clarify. Null on an ordinary turn. */
+  clarification?: string | null;
+};
+
+export type ClarifyOption = { label: string; description: string };
+
+/**
+ * The graph paused to ask the user what they meant.
+ *
+ * `thread_id` is the checkpoint key and the only way back to this state — the
+ * pause lives in Postgres, not in the open connection, so resuming is a fresh
+ * request that may land on a different worker.
+ */
+export type InterruptEvent = {
+  type: string;
+  /** The clarifying question, written by the model. */
+  question: string;
+  /** 2–4 concrete choices, grounded in the documents' actual headings. */
+  options: ClarifyOption[];
+  /** What the user originally typed. */
+  original: string;
+  actions: string[];
+  thread_id: string;
 };
 
 /**
- * Stream a turn, calling onProgress as each graph node finishes.
+ * A stream ends one of two ways, and callers must handle both. A discriminated
+ * union rather than a nullable `done`, so TypeScript forces the paused branch
+ * to be considered instead of letting it be forgotten.
+ */
+export type TurnOutcome =
+  | { status: "done"; done: DoneEvent }
+  | { status: "paused"; interrupt: InterruptEvent };
+
+export type ClarifyDecision =
+  /** Narrow the search. `answer` is a chosen option's label or free text — the
+   *  graph treats both identically, so "something else" is not a special case. */
+  | { action: "answer"; answer: string }
+  /** Search the original question as written. */
+  | { action: "skip" }
+  /** Stop without searching. */
+  | { action: "cancel" };
+
+/**
+ * Shared SSE reader for both starting and resuming a turn.
  *
  * EventSource can only issue GET requests, so this uses fetch + a ReadableStream
  * and parses the SSE frames by hand. That is the standard workaround for POST
  * server-sent events.
  */
-export async function streamTurn(
-  sessionId: string,
-  question: string,
-  opts: { topK?: number; multiQuery?: boolean } = {},
+async function readTurnStream(
+  res: Response,
   onProgress?: (node: string, detail: string) => void,
-): Promise<DoneEvent> {
-  const res = await authedJson(`/sessions/${sessionId}/stream`, "POST", {
-    question,
-    top_k: opts.topK ?? null,
-    multi_query: opts.multiQuery ?? null,
-  });
+): Promise<TurnOutcome> {
   if (!res.ok) throw new Error(await detail(res));
   if (!res.body) throw new Error("No response body to stream");
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  let done: DoneEvent | null = null;
+  let outcome: TurnOutcome | null = null;
 
   while (true) {
     const { value, done: finished } = await reader.read();
@@ -510,13 +546,55 @@ export async function streamTurn(
       const payload = JSON.parse(dataLine.slice(5).trim());
 
       if (event === "progress") onProgress?.(payload.node, payload.detail);
-      else if (event === "done") done = payload as DoneEvent;
+      else if (event === "done") outcome = { status: "done", done: payload };
+      else if (event === "interrupt")
+        outcome = { status: "paused", interrupt: payload };
       else if (event === "error") throw new Error(payload.detail);
     }
   }
 
-  if (!done) throw new Error("Stream ended without a result");
-  return done;
+  if (!outcome) throw new Error("Stream ended without a result");
+  return outcome;
+}
+
+/** Start a turn. Resolves either with an answer or with a pause. */
+export async function streamTurn(
+  sessionId: string,
+  question: string,
+  opts: { topK?: number; multiQuery?: boolean; clarify?: boolean } = {},
+  onProgress?: (node: string, detail: string) => void,
+): Promise<TurnOutcome> {
+  const res = await authedJson(`/sessions/${sessionId}/stream`, "POST", {
+    question,
+    top_k: opts.topK ?? null,
+    multi_query: opts.multiQuery ?? null,
+    // null = use the server's AGENT_CLARIFY default rather than asserting a
+    // value the UI has no opinion about.
+    clarify: opts.clarify ?? null,
+  });
+  return readTurnStream(res, onProgress);
+}
+
+/**
+ * Answer the clarifying question and stream the rest of the turn.
+ *
+ * `question` is echoed back because the resumed turn is persisted against it —
+ * the graph holds it too, but sending it keeps the endpoint self-contained.
+ */
+export async function resumeTurn(
+  sessionId: string,
+  threadId: string,
+  question: string,
+  decision: ClarifyDecision,
+  onProgress?: (node: string, detail: string) => void,
+): Promise<TurnOutcome> {
+  const res = await authedJson(`/sessions/${sessionId}/resume/stream`, "POST", {
+    thread_id: threadId,
+    question,
+    action: decision.action,
+    answer: decision.action === "answer" ? decision.answer : "",
+  });
+  return readTurnStream(res, onProgress);
 }
 
 export async function getStats(): Promise<Stats> {

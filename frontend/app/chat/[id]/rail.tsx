@@ -17,7 +17,12 @@ import {
   IconTrash,
 } from "../../icons";
 
-export type TurnSettings = { topK: number; multiQuery: boolean };
+export type TurnSettings = {
+  topK: number;
+  multiQuery: boolean;
+  /** Let the agent ask what a vague question means before searching. */
+  clarify: boolean;
+};
 
 /** Rail widths, shared so the page's padding animation matches exactly. */
 export const RAIL_WIDTH = "20rem";
@@ -59,7 +64,8 @@ function CollapsedRail({
       }`}
       style={{
         width: RAIL_WIDTH_COLLAPSED,
-        background: "var(--md-surface-container)",
+        background: "var(--md-surface)",
+        borderLeft: "1px solid var(--md-outline-variant)",
       }}
     >
       <IconButton onClick={onExpand} aria-label="Expand panel">
@@ -82,6 +88,15 @@ function CollapsedRail({
 
       {settings.multiQuery && (
         <RailStat title="Multi-query is on" onClick={onExpand} active label="MQ" />
+      )}
+
+      {settings.clarify && (
+        <RailStat
+          title="Clarifying questions are on"
+          onClick={onExpand}
+          active
+          label="ASK"
+        />
       )}
 
       {session.summary && (
@@ -200,7 +215,8 @@ export default function Rail({
         }`}
         style={{
           width: RAIL_WIDTH,
-          background: "var(--md-surface-container)",
+          background: "var(--md-surface)",
+          borderLeft: "1px solid var(--md-outline-variant)",
           transitionDuration: "var(--md-dur-medium)",
           transitionTimingFunction: "var(--md-ease-emphasized)",
         }}
@@ -468,6 +484,23 @@ function Controls({
               aria-label="Multi-query"
             />
           </div>
+
+          <div className="flex items-center justify-between gap-3">
+            <span className="md-body-medium">
+              Ask if unclear
+              <span
+                className="md-body-small mt-0.5 block"
+                style={{ color: "var(--md-on-surface-variant)" }}
+              >
+                Offer options when a question is vague
+              </span>
+            </span>
+            <Switch
+              on={settings.clarify}
+              onChange={(v) => onSettings({ ...settings, clarify: v })}
+              aria-label="Ask if unclear"
+            />
+          </div>
         </div>
       </section>
 
@@ -479,11 +512,8 @@ function Controls({
               Memory
             </SectionHeading>
             <p
-              className="md-body-small whitespace-pre-wrap rounded-[var(--md-shape-md)] p-3"
-              style={{
-                background: "var(--md-surface-container-highest)",
-                color: "var(--md-on-surface-variant)",
-              }}
+              className="md-body-small md-quote"
+              style={{ color: "var(--md-on-surface-variant)" }}
             >
               {session.summary}
             </p>
@@ -571,10 +601,7 @@ function Source({
         <span className="md-badge">{chunk.n_chars} chars</span>
       </div>
 
-      <p
-        className="md-body-medium whitespace-pre-wrap rounded-[var(--md-shape-md)] p-3"
-        style={{ background: "var(--md-surface-container-highest)" }}
-      >
+      <p className="md-body-medium md-quote">
         {chunk.text}
       </p>
 

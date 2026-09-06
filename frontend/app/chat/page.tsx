@@ -16,8 +16,10 @@ export default function ChatIndex() {
     setCreating(true);
     try {
       const s = await createSession();
-      await refreshSessions();
+      // Navigate first; the list refresh is not needed to render the new chat
+      // and awaiting it just delayed the navigation. See shell.tsx.
       router.push(`/chat/${s.id}`);
+      void refreshSessions();
     } finally {
       setCreating(false);
     }

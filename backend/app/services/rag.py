@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 import structlog
 
-from app.services.llm import get_llm
+from app.services.llm import extract_int_list, extract_string, get_llm
 from app.services.retrieval import build_context, retrieve
 from app.services.vectorstore import SearchHit
 
@@ -99,7 +99,11 @@ async def answer_question(
             sources_used=[],
         )
 
-    result = await get_llm().generate_json(
+    # Lenient parsing, for the same reason the agent's `draft` node uses it: a
+    # Gemma repetition loop runs until the token cap and truncates the JSON,
+    # and a strict parse throws away an answer that was complete before the
+    # loop started. See `strip_degeneration` in llm.py.
+    raw = await get_llm().generate(
         PROMPT.format(context=build_context(hits), question=question),
         schema=ANSWER_SCHEMA,
         system=SYSTEM,
@@ -107,8 +111,10 @@ async def answer_question(
         max_output_tokens=900,
     )
 
-    answer = str(result.get("answer", "")).strip()
-    sources_used = [int(n) for n in result.get("sources_used", []) if isinstance(n, int)]
+    answer = extract_string(raw, "answer")
+    sources_used = extract_int_list(raw, "sources_used")
+    if not answer:
+        answer = "The model did not return a usable answer. Try asking again."
 
     log.info(
         "rag_answered",

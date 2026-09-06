@@ -9,13 +9,21 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from app.agent.checkpointer import discard_thread
-from app.agent.graph import AgentResult, run_agent, stream_agent
+from app.agent.graph import (
+    AgentResult,
+    resume_agent,
+    run_agent,
+    stream_agent,
+    stream_resume,
+)
 from app.auth import User, current_user, forbid_if_not_owner
 from app.db.models import ChatSession, Message, Role
 from app.db.session import SessionLocal
 from app.schemas.documents import SearchHitOut
 from app.schemas.sessions import (
+    InterruptOut,
     MessageOut,
+    ResumeRequest,
     SessionCreate,
     SessionDetail,
     SessionOut,
@@ -129,26 +137,41 @@ async def add_turn(
             multi_query=req.multi_query,
             chat_context=prep["context"],
             thread_id=prep["thread_id"],
+            clarify=req.clarify,
         )
     except LLMError as exc:
         log.warning("turn_failed", error=str(exc))
         raise HTTPException(status_code=502, detail=f"Model error: {exc}") from exc
 
-    await _persist_turn(session_id, req.question, result, prep, user)
+    return await _finish_turn(session_id, req.question, result, prep, user)
 
-    return TurnResponse(
-        session_id=session_id,
-        question=req.question,
-        answer=result.answer,
-        sources=[_hit_out(h) for h in result.evidence],
-        sources_used=result.citations,
-        sub_questions=result.sub_questions,
-        critique=result.critique,
-        sufficient=result.sufficient,
-        iterations=result.iterations,
-        trace=result.trace,
-        context_chars=len(prep["context"]),
-    )
+
+@router.post("/{session_id}/resume", response_model=TurnResponse)
+async def resume_turn(
+    session_id: uuid.UUID, req: ResumeRequest, user: User = Depends(current_user)
+) -> TurnResponse:
+    """Answer the clarifying question: narrow, skip, or cancel.
+
+    A separate request from the one that started the turn, and that is the
+    whole point -- the pause lives in the checkpoint, not in a held-open
+    connection, so it survives a deploy or a user who wandered off for ten
+    minutes.
+    """
+    # Ownership first. `thread_id` is a client-supplied checkpoint key, so it
+    # must never be the only thing authorising a resume -- checking the session
+    # is what stops one user continuing another's paused graph.
+    prep = await _prepare_resume(session_id, req, user)
+
+    try:
+        result = await resume_agent(
+            req.thread_id,
+            {"action": req.action, "answer": req.answer},
+        )
+    except LLMError as exc:
+        log.warning("resume_failed", error=str(exc))
+        raise HTTPException(status_code=502, detail=f"Model error: {exc}") from exc
+
+    return await _finish_turn(session_id, req.question, result, prep, user)
 
 
 @router.post("/{session_id}/stream")
@@ -167,54 +190,115 @@ async def stream_turn(
     prep = await _prepare_turn(session_id, req, user)
 
     async def events() -> AsyncIterator[str]:
-        final_state: dict = {}
-        try:
-            async for kind, node, payload in stream_agent(
+        async for chunk in _stream_events(
+            stream_agent(
                 req.question,
                 top_k=req.top_k,
                 document_ids=prep["scope"],
                 # MUST be passed. `stream_agent` defaults owner_id to None, and
                 # None means "do not filter by owner" in the vector store -- so
-                # omitting it here (as this call did) made a streamed turn
+                # omitting it here (as this call once did) made a streamed turn
                 # search EVERY user's chunks. The document scope masked it
                 # whenever a session had documents selected, but a session with
-                # no scope resolves to `scope=None`, and then nothing constrained
-                # retrieval at all. /messages passed it; /stream did not, and
-                # /stream is the path the UI uses.
+                # no scope resolves to `scope=None`, and then nothing
+                # constrained retrieval at all. /messages passed it; /stream did
+                # not, and /stream is the path the UI uses.
                 owner_id=user.owner_id,
                 multi_query=req.multi_query,
                 chat_context=prep["context"],
                 thread_id=prep["thread_id"],
-            ):
-                if kind == "state":
-                    final_state = payload
-                    continue
-                yield _sse("progress", {"node": node, "detail": _describe(node, payload)})
+                clarify=req.clarify,
+            ),
+            session_id=session_id,
+            question=req.question,
+            prep=prep,
+            user=user,
+        ):
+            yield chunk
 
-            result = AgentResult(final_state)
-            await _persist_turn(session_id, req.question, result, prep, user)
-            yield _sse(
-                "done",
-                {
-                    "answer": result.answer,
-                    "sources": [_hit_out(h).model_dump(mode="json") for h in result.evidence],
-                    "sources_used": result.citations,
-                    "sub_questions": result.sub_questions,
-                    "critique": result.critique,
-                    "sufficient": result.sufficient,
-                    "iterations": result.iterations,
-                    "trace": result.trace,
-                    "context_chars": len(prep["context"]),
-                },
-            )
-        except Exception as exc:
-            # The response has already started, so an HTTP error code is no
-            # longer available -- the failure has to travel as an event.
-            log.exception("stream_turn_failed")
-            yield _sse("error", {"detail": str(exc)})
+    return _sse_response(events())
 
+
+@router.post("/{session_id}/resume/stream")
+async def resume_stream(
+    session_id: uuid.UUID, req: ResumeRequest, user: User = Depends(current_user)
+) -> StreamingResponse:
+    """SSE resume, so a continued turn streams exactly like a fresh one."""
+    prep = await _prepare_resume(session_id, req, user)
+
+    async def events() -> AsyncIterator[str]:
+        async for chunk in _stream_events(
+            stream_resume(
+                req.thread_id,
+                {"action": req.action, "answer": req.answer},
+            ),
+            session_id=session_id,
+            question=req.question,
+            prep=prep,
+            user=user,
+        ):
+            yield chunk
+
+    return _sse_response(events())
+
+
+async def _stream_events(
+    source: AsyncIterator[tuple],
+    *,
+    session_id: uuid.UUID,
+    question: str,
+    prep: dict,
+    user: User,
+) -> AsyncIterator[str]:
+    """Turn agent stream items into SSE, shared by start and resume.
+
+    Three terminal shapes: `interrupt` (paused, nothing persisted), `done`
+    (finished and persisted), or `error`.
+    """
+    final_state: dict = {}
+    try:
+        async for kind, node, payload in source:
+            if kind == "state":
+                final_state = payload
+                continue
+            if kind == "interrupt":
+                # A pause is terminal FOR THIS STREAM. The turn is not
+                # finished, so nothing is persisted and the thread is not
+                # discarded -- it is the only way back to this state.
+                yield _sse(
+                    "interrupt",
+                    {**payload, "thread_id": prep.get("thread_id")},
+                )
+                return
+            yield _sse("progress", {"node": node, "detail": _describe(node, payload)})
+
+        result = AgentResult(final_state)
+        await _persist_turn(session_id, question, result, prep, user)
+        yield _sse(
+            "done",
+            {
+                "answer": result.answer,
+                "sources": [_hit_out(h).model_dump(mode="json") for h in result.evidence],
+                "sources_used": result.citations,
+                "sub_questions": result.sub_questions,
+                "critique": result.critique,
+                "sufficient": result.sufficient,
+                "iterations": result.iterations,
+                "trace": result.trace,
+                "context_chars": len(prep["context"]),
+                "clarification": result.clarification,
+            },
+        )
+    except Exception as exc:
+        # The response has already started, so an HTTP error code is no
+        # longer available -- the failure has to travel as an event.
+        log.exception("stream_turn_failed")
+        yield _sse("error", {"detail": str(exc)})
+
+
+def _sse_response(events: AsyncIterator[str]) -> StreamingResponse:
     return StreamingResponse(
-        events(),
+        events,
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -299,6 +383,87 @@ async def _prepare_turn(
         }
 
 
+async def _prepare_resume(
+    session_id: uuid.UUID, req: ResumeRequest, user: User
+) -> dict:
+    """Authorise a resume and rebuild the context a finished turn needs.
+
+    Two things matter here.
+
+    **Ownership is checked against the SESSION, never the thread id.** The
+    thread id arrives from the client and is only a checkpoint key -- treating
+    it as proof of anything would let one user continue another's paused graph
+    by guessing or replaying an id. `_load` does the real check.
+
+    **The thread id must belong to this session.** Thread ids are formatted
+    `<session>:<turn>:<random>`, so a mismatched prefix is a client sending a
+    valid-but-unrelated thread, which is rejected rather than resumed.
+    """
+    async with SessionLocal() as db:
+        chat = await _load(db, session_id, user)
+        messages = list(chat.messages)
+
+    if not req.thread_id.startswith(f"{session_id}:"):
+        raise HTTPException(status_code=400, detail="Thread does not belong to this session.")
+
+    return {
+        # The resumed run reuses the checkpointed chat_context; nothing needs
+        # rebuilding, and rebuilding it would risk a different value than the
+        # one the paused graph is holding.
+        "context": "",
+        "scope": None,
+        "was_empty": not messages,
+        "thread_id": req.thread_id,
+    }
+
+
+async def _finish_turn(
+    session_id: uuid.UUID,
+    question: str,
+    result: AgentResult,
+    prep: dict,
+    user: User,
+) -> TurnResponse:
+    """Persist a completed turn, or report a pause without persisting."""
+    if result.paused:
+        # Deliberately NOT persisted and NOT discarded: the turn has no answer
+        # yet, and the checkpoint is the only route back to this state. A
+        # paused thread is cleaned up by scripts/prune_checkpoints.py if the
+        # human never comes back.
+        log.info("turn_paused", session_id=str(session_id), thread=prep["thread_id"])
+        return TurnResponse(
+            session_id=session_id,
+            question=question,
+            answer="",
+            sources=[],
+            sources_used=[],
+            sub_questions=result.sub_questions,
+            critique="",
+            sufficient=False,
+            iterations=result.iterations,
+            trace=result.trace,
+            context_chars=len(prep["context"]),
+            interrupt=InterruptOut(**result.interrupt),
+            thread_id=prep["thread_id"],
+        )
+
+    await _persist_turn(session_id, question, result, prep, user)
+    return TurnResponse(
+        session_id=session_id,
+        question=question,
+        answer=result.answer,
+        sources=[_hit_out(h) for h in result.evidence],
+        sources_used=result.citations,
+        sub_questions=result.sub_questions,
+        critique=result.critique,
+        sufficient=result.sufficient,
+        iterations=result.iterations,
+        trace=result.trace,
+        context_chars=len(prep["context"]),
+        clarification=result.clarification,
+    )
+
+
 async def _persist_turn(
     session_id: uuid.UUID,
     question: str,
@@ -336,6 +501,11 @@ async def _persist_turn(
                     "iterations": result.iterations,
                     "sufficient": result.sufficient,
                     "critique": result.critique,
+                    # Absent on an ordinary turn, so "the question was clear" and
+                    # "the user clarified it" stay distinguishable after the
+                    # fact. Without it a clarified turn is indistinguishable from
+                    # an automatic one in the transcript.
+                    "clarification": result.clarification,
                 },
             )
         )

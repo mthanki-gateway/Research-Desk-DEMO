@@ -109,19 +109,34 @@ body {
   color: var(--md-on-primary-container);
 }
 
-/* M3 focus indicator: a 3px ring in the primary colour, keyboard only. */
+/* M3 focus indicator: a 3px ring in the primary colour, keyboard only.
+
+   NO `border-radius` here, and that omission is load-bearing.
+
+   This rule used to also set `border-radius: var(--md-shape-xs)`, presumably so
+   the ring looked slightly rounded on square elements. But it is UNLAYERED, so
+   it outranks every `@layer components` rule regardless of specificity -- the
+   same trap documented above for `border-color` -- and a bare `:focus-visible`
+   matches everything. The effect was that every rounded component SQUARED OFF
+   the moment it took focus: the chat composer's 28px pill collapsed to 4px,
+   and so did buttons, chips and FABs.
+
+   It was also invisible on the composer specifically, because the input opt-out
+   below kills the ring but could never undo the radius -- so that field lost
+   its shape and gained nothing. Measured: 28px unfocused, 4px focused.
+
+   An `outline` already follows the element's own border-radius automatically,
+   which is exactly the behaviour wanted. Nothing needs to set it here. */
 :focus-visible {
   outline: 3px solid var(--md-primary);
   outline-offset: 2px;
-  border-radius: var(--md-shape-xs);
 }
 
 /* Text inputs opt out. They already signal focus in their own way -- an M3
-   text field thickens its outline to 2px primary, and a bare search input has
-   a blinking caret -- so the ring is redundant and reads as a heavy blue box.
-   Higher specificity than the rule above, which is why Tailwind's
-   `outline-none` utility could not win: utilities live in a lower-priority
-   layer than this unlayered CSS. */
+   text field draws a primary inset ring -- so this one is redundant and reads
+   as a heavy blue box. Higher specificity than the rule above, which is why
+   Tailwind's `outline-none` utility could not win: utilities live in a
+   lower-priority layer than this unlayered CSS. */
 input:focus-visible,
 textarea:focus-visible {
   outline: none;
@@ -211,24 +226,31 @@ textarea:focus-visible {
   /* Icon-leading buttons get tighter leading padding per spec. */
   .md-btn:has(> svg:first-child) { padding-left: 1rem; }
 
+  /* No hover shadows on any variant. The state layer (a translucent overlay
+     via ::before) already signals hover, and it does so without the button
+     appearing to lift off a page that is otherwise completely flat. */
   .md-btn-filled {
     background: var(--md-primary);
     color: var(--md-on-primary);
     --md-state-color: var(--md-on-primary);
   }
-  .md-btn-filled:hover:not(:disabled) { box-shadow: var(--md-elev-1); }
 
+  /* Tonal is now OUTLINED-neutral rather than a blue-grey fill. A tonal
+     button next to a filled one gave two coloured blocks of near-equal
+     weight, so "which is the primary action" had to be worked out rather
+     than seen. Outlined recedes; filled stays the answer. */
   .md-btn-tonal {
-    background: var(--md-secondary-container);
-    color: var(--md-on-secondary-container);
-    --md-state-color: var(--md-on-secondary-container);
+    background: transparent;
+    color: var(--md-on-surface);
+    border: 1px solid var(--md-outline-variant);
+    --md-state-color: var(--md-on-surface);
   }
-  .md-btn-tonal:hover:not(:disabled) { box-shadow: var(--md-elev-1); }
+  .md-btn-tonal:hover:not(:disabled) { border-color: var(--md-outline); }
 
   .md-btn-outlined {
     background: transparent;
     color: var(--md-primary);
-    border: 1px solid var(--md-outline);
+    border: 1px solid var(--md-outline-variant);
     --md-state-color: var(--md-primary);
   }
 
@@ -292,6 +314,10 @@ textarea:focus-visible {
   /* =========================================================================
      FAB - used for the composer's send action.
      ========================================================================= */
+  /* Flat and filled with the primary colour, not a shadowed tonal block.
+     The send button is the one unambiguous action on the screen, so it earns
+     colour -- but a floating elevation-3 slab beside a flat composer looked
+     like it belonged to a different app. */
   .md-fab {
     display: inline-grid;
     place-items: center;
@@ -299,63 +325,92 @@ textarea:focus-visible {
     height: 56px;
     border: none;
     border-radius: var(--md-shape-lg);
-    background: var(--md-primary-container);
-    color: var(--md-on-primary-container);
-    box-shadow: var(--md-elev-3);
+    background: var(--md-primary);
+    color: var(--md-on-primary);
     cursor: pointer;
-    --md-state-color: var(--md-on-primary-container);
-    transition: box-shadow var(--md-dur-short) var(--md-ease-standard);
+    --md-state-color: var(--md-on-primary);
+    transition: background-color var(--md-dur-short) var(--md-ease-standard);
   }
-  .md-fab:hover:not(:disabled) { box-shadow: var(--md-elev-4); }
   .md-fab:disabled {
     cursor: not-allowed;
-    box-shadow: none;
     background: color-mix(in srgb, var(--md-on-surface) 12%, transparent);
     color: color-mix(in srgb, var(--md-on-surface) 38%, transparent);
   }
   .md-fab-sm { width: 40px; height: 40px; border-radius: var(--md-shape-md); }
 
   /* =========================================================================
-     Cards. Elevated / filled / outlined, all 12px.
+     Cards.
+
+     ONE look: a white sheet with a hairline outline. The three M3 variants
+     (elevated / filled / outlined) are kept as class names so call sites do
+     not all have to change, but they now render identically -- which is the
+     point rather than an oversight.
+
+     Why flat. M3's elevated and filled variants distinguish themselves with
+     shadow and tonal fill, and stacked up across a screen that reads as
+     clutter: every panel competing for depth, none of it meaning anything.
+     A hairline border says "this is a distinct region" for a fraction of the
+     visual weight, and it says it at exactly the same strength everywhere,
+     so the eye can spend its attention on content instead of chrome.
+
+     Depth is now reserved for things that genuinely float ABOVE the page --
+     dialogs, the command palette, the source panel. When everything is flat,
+     a shadow means something again.
      ========================================================================= */
   .md-card {
     border-radius: var(--md-shape-md);
-    background: var(--md-surface-container-low);
+    background: var(--md-surface);
     color: var(--md-on-surface);
+    border: 1px solid var(--md-outline-variant);
   }
-  .md-card-elevated {
-    background: var(--md-surface-container-low);
-    box-shadow: var(--md-elev-1);
-  }
-  .md-card-filled { background: var(--md-surface-container-highest); }
+  .md-card-elevated,
+  .md-card-filled,
   .md-card-outlined {
     background: var(--md-surface);
     border: 1px solid var(--md-outline-variant);
+    box-shadow: none;
   }
   .md-card-interactive {
     cursor: pointer;
     --md-state-color: var(--md-on-surface);
-    transition: box-shadow var(--md-dur-short) var(--md-ease-standard);
+    transition: border-color var(--md-dur-short) var(--md-ease-standard);
   }
-  .md-card-interactive:hover { box-shadow: var(--md-elev-2); }
+  /* Hover darkens the outline instead of lifting the card. Same affordance,
+     no layout-shifting shadow, and it works on a flat page. */
+  .md-card-interactive:hover { border-color: var(--md-outline); }
 
   /* =========================================================================
-     Assistant answer card.
+     Verbatim text from a document -- a retrieved passage, or the rolling
+     memory summary.
 
-     `.md-card-elevated` was invisible here: its background is
-     surface-container-low, and so is the page body, so an elevated card on
-     this screen was a shadow around nothing. Answers are the primary content
-     of the app and need to read as a distinct sheet, so they sit on
-     `--md-surface` -- the lightest surface in the tonal palette, near-white in
-     the light theme and correctly dark in the dark one. The hairline border
-     carries the edge where the shadow is too subtle to.
+     One shared treatment, because these are the same KIND of thing: text the
+     app is quoting rather than text the app is saying. A recessed tint plus a
+     hairline reads as "this came from somewhere else" without the heavy grey
+     block that a solid container-highest fill produced on a white panel.
+     ========================================================================= */
+  .md-quote {
+    border-radius: var(--md-shape-md);
+    padding: 0.75rem;
+    background: var(--md-surface-container-low);
+    border: 1px solid var(--md-outline-variant);
+    white-space: pre-wrap;
+  }
+
+  /* =========================================================================
+     Assistant answer.
+
+     Deliberately NOT a card: no background, no border, no shadow. An answer is
+     the primary content of this screen, and the user turn beside it is already
+     a filled bubble -- giving both a container made the page read as a stack
+     of boxes rather than a conversation. The asymmetry is the point: the
+     question is a discrete object, the answer is the page.
+
+     The radius stays because the internal divider and the source chips still
+     need a shape to sit inside on small screens.
      ========================================================================= */
   .md-answer {
     border-radius: var(--md-shape-lg);
-    background: var(--md-surface);
     color: var(--md-on-surface);
-    border: 1px solid var(--md-outline-variant);
-    box-shadow: var(--md-elev-1);
   }
 
   /* Inline citation marker: the [5] inside answer prose, made clickable so it
@@ -421,7 +476,11 @@ textarea:focus-visible {
     width: 100%;
     height: 56px;
     padding: 1rem;
-    background: transparent;
+    /* Shared with the floating label below, so the notch always matches the
+       field it is cut into. Transparent by default (M3 outlined fields sit on
+       whatever is behind them); the chat composer passes an opaque surface so
+       it reads as a distinct input rather than a hole in the page. */
+    background: var(--md-field-bg, transparent);
     color: var(--md-on-surface);
     border: 1px solid var(--md-outline);
     /* M3's outlined field is a 4px rectangle. Overridable per instance because
@@ -429,7 +488,9 @@ textarea:focus-visible {
        chat page. */
     border-radius: var(--md-field-radius, var(--md-shape-xs));
     outline: none;
-    transition: border-color var(--md-dur-short) var(--md-ease-standard);
+    transition:
+      border-color var(--md-dur-short) var(--md-ease-standard),
+      box-shadow var(--md-dur-short) var(--md-ease-standard);
     font-size: 1rem;
     line-height: 1.5rem;
     letter-spacing: 0.03125em;
@@ -437,8 +498,14 @@ textarea:focus-visible {
   .md-field-input:hover:not(:disabled) { border-color: var(--md-on-surface); }
   .md-field-input:focus {
     border-color: var(--md-primary);
-    border-width: 2px;
-    padding: calc(1rem - 1px);
+    /* An inset ring, NOT `border-width: 2px`.
+       Growing the border grows the box, which needed a compensating
+       `padding: calc(1rem - 1px)` and shifted the text by a pixel on every
+       focus. Worse on a pill: the thicker stroke reads as a squarer corner
+       because the outer edge stays put while the inner curve tightens.
+       A box-shadow paints on top of the border and cannot change geometry, so
+       the radius and the text position are identical focused or not. */
+    box-shadow: inset 0 0 0 1px var(--md-primary);
   }
   .md-field-input:disabled {
     color: color-mix(in srgb, var(--md-on-surface) 38%, transparent);
@@ -486,7 +553,11 @@ textarea:focus-visible {
     height: 32px;
     padding: 0 1rem;
     border-radius: var(--md-shape-sm);
-    border: 1px solid var(--md-outline);
+    /* outline-VARIANT, matching cards and panels. Plain `--md-outline` is
+       several steps darker, so a row of chips read as heavier than the card
+       containing them -- backwards, and the main thing that made dense screens
+       look busy. Every hairline in the app is now the same weight. */
+    border: 1px solid var(--md-outline-variant);
     background: transparent;
     color: var(--md-on-surface-variant);
     cursor: pointer;
@@ -811,13 +882,16 @@ textarea:focus-visible {
   }
 
   /* =========================================================================
-     Dialog. 28px radius, elevation 3, scrim.
+     Dialog. 28px radius, scrim, and one of the few places depth survives --
+     it is genuinely above the page. White rather than container-high, so it
+     matches every other sheet in the app.
      ========================================================================= */
   .md-dialog {
     border-radius: var(--md-shape-xl);
-    background: var(--md-surface-container-high);
+    background: var(--md-surface);
     color: var(--md-on-surface);
-    box-shadow: var(--md-elev-3);
+    border: 1px solid var(--md-outline-variant);
+    box-shadow: var(--md-elev-2);
     padding: 1.5rem;
     max-width: 22rem;
     width: 100%;
@@ -851,8 +925,60 @@ textarea:focus-visible {
   }
   .md-link:hover { text-decoration: underline; }
 
+  /* =========================================================================
+     Scroll containers.
+
+     The app scrolls INSIDE panels, not as a document: the shell is exactly one
+     viewport tall, and `<main>` owns the vertical scroll. That is what stops a
+     full-height browser scrollbar running down the right edge of the window,
+     past the fixed rail, for content that only occupies the middle column.
+
+     The bar itself is thin and transparent until it is wanted. `scrollbar-width:
+     thin` still reserves the gutter while the thumb is invisible, so fading it
+     in shifts nothing -- which is the reason for colouring it away rather than
+     hiding it with `overflow: overlay` or a width of 0.
+
+     Visible on hover (you are reaching for it) or while scrolling (you are
+     using it, and the position feedback is worth something). `[data-scrolling]`
+     comes from `useAutoHideScroll`; there is no `:scrolling` pseudo-class.
+     ========================================================================= */
+  .md-scroll {
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+    transition: scrollbar-color var(--md-dur-medium) var(--md-ease-standard);
+  }
+  .md-scroll:hover,
+  .md-scroll[data-scrolling="true"] {
+    scrollbar-color: var(--md-outline-variant) transparent;
+  }
+
+  /* WebKit fallback, for Chrome below 121 and Safari, which do not support the
+     standard properties above. Browsers that DO support them ignore this block
+     entirely, so the two cannot fight. */
+  .md-scroll::-webkit-scrollbar { width: 10px; height: 10px; }
+  .md-scroll::-webkit-scrollbar-track { background: transparent; }
+  .md-scroll::-webkit-scrollbar-thumb {
+    /* The transparent border plus background-clip is what makes a 10px-wide
+       scrollbar paint a 4px-wide thumb with breathing room either side. */
+    background-color: transparent;
+    border: 3px solid transparent;
+    background-clip: content-box;
+    border-radius: var(--md-shape-full);
+    transition: background-color var(--md-dur-medium) var(--md-ease-standard);
+  }
+  .md-scroll:hover::-webkit-scrollbar-thumb,
+  .md-scroll[data-scrolling="true"]::-webkit-scrollbar-thumb {
+    background-color: var(--md-outline-variant);
+  }
+
+  /* Kept as an alias: several places already ask for `scroll-thin`, and they
+     all want exactly this behaviour. */
   .scroll-thin {
     scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+    transition: scrollbar-color var(--md-dur-medium) var(--md-ease-standard);
+  }
+  .scroll-thin:hover {
     scrollbar-color: var(--md-outline-variant) transparent;
   }
 }

@@ -55,6 +55,11 @@ class ResearchState(TypedDict, total=False):
     # not need it, and per-node context budgets are where the real token
     # savings are.
     chat_context: str
+    # Ask the user a clarifying question when the request is too vague to
+    # search on. Carried in state rather than read from settings inside the
+    # node, so a single compiled graph serves both modes and the choice is per
+    # REQUEST -- which is what makes it comparable in the Lab.
+    clarify: bool
 
     # --- working state ---
     # Queries the next retrieve pass should run. `plan` fills it from the
@@ -77,6 +82,22 @@ class ResearchState(TypedDict, total=False):
     critique: str
     sufficient: bool
     missing: list[str]
+
+    # --- human-in-the-loop ---
+    # The question to put to the user, written by the `clarify` node:
+    # {"question": str, "options": [{"label": str, "description": str}]}.
+    # Written BEFORE the interrupt and read by `ask_human`, which is what keeps
+    # the expensive half out of the node that replays on resume.
+    pending_clarification: dict
+    # What the user chose, verbatim. Absent when nothing was asked, which keeps
+    # "the question was clear" distinguishable from "the user clarified it" --
+    # the same reason JudgeScores fields are None-able rather than zero.
+    clarification: str
+    # The original wording, kept because `question` is rewritten with the
+    # user's answer and the transcript should still show what they typed.
+    original_question: str
+    # The user declined to answer. Routes straight to END without retrieving.
+    cancelled: bool
 
     # --- control ---
     iterations: int

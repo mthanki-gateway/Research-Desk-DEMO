@@ -4,9 +4,13 @@ import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type ChatMessage,
+  type InterruptEvent,
+  type ClarifyDecision,
   type SessionDetail,
+  type TurnOutcome,
   deleteSession,
   getSession,
+  resumeTurn,
   streamTurn,
   updateSession,
 } from "@/lib/api";
@@ -14,7 +18,8 @@ import { useApp } from "../../providers";
 import { Answer } from "../../answer";
 import { Button, Chip, Fab, TextField } from "../../md";
 import { IconQuote, IconSpinner } from "../../icons";
-import Rail, { RAIL_WIDTH, RAIL_WIDTH_COLLAPSED, type TurnSettings } from "./rail";
+import Clarify from "./clarify";
+import Rail, { type TurnSettings } from "./rail";
 
 /**
  * Session details, kept across navigations.
@@ -62,7 +67,17 @@ function Conversation({ id }: { id: string }) {
   const [settings, setSettings] = useState<TurnSettings>({
     topK: 5,
     multiQuery: false,
+    clarify: true,
   });
+  /**
+   * The graph paused and is waiting on the human-in-the-loop prompt.
+   *
+   * Held here rather than in the message list because the turn does not exist
+   * server-side yet: nothing is persisted while paused, so there is no message
+   * to attach it to. It carries the `thread_id`, which is the only route back
+   * to the checkpoint.
+   */
+  const [pendingClarify, setPendingClarify] = useState<InterruptEvent | null>(null);
   const bottom = useRef<HTMLDivElement>(null);
   // The first scroll should jump, not glide. A smooth scroll on open read as
   // jank when moving between chats.
@@ -121,8 +136,29 @@ function Conversation({ id }: { id: string }) {
       hasPainted.current = true;
     });
     return () => cancelAnimationFrame(id);
+    // `Boolean(pendingClarify)`, not the object: the review card appearing is
+    // worth scrolling to, but editing inside it must not yank the view.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messageCount, pendingQuestion, Boolean(session)]);
+  }, [messageCount, pendingQuestion, Boolean(pendingClarify), Boolean(session)]);
+
+  /**
+   * Apply the end of a stream, which lands one of two ways.
+   *
+   * A pause is NOT an ending: nothing was persisted, so the optimistic question
+   * bubble must stay on screen and the turn stays open until the human answers.
+   * Reloading the session here would make the question vanish.
+   */
+  async function settle(outcome: TurnOutcome, q: string) {
+    if (outcome.status === "paused") {
+      setPendingClarify(outcome.interrupt);
+      setPendingQuestion(q);
+      return;
+    }
+    setPendingClarify(null);
+    setPendingQuestion(null);
+    await load();
+    await refreshSessions();
+  }
 
   async function send(e: React.FormEvent) {
     e.preventDefault();
@@ -131,25 +167,58 @@ function Conversation({ id }: { id: string }) {
 
     setQuestion("");
     setPendingQuestion(q); // optimistic: show it before the round-trip
+    setPendingClarify(null);
     setBusy(true);
     setProgress("Thinking");
     setError(null);
 
     try {
-      await streamTurn(
+      const outcome = await streamTurn(
         id,
         q,
-        { topK: settings.topK, multiQuery: settings.multiQuery },
+        {
+          topK: settings.topK,
+          multiQuery: settings.multiQuery,
+          clarify: settings.clarify,
+        },
         (_node, detail) => setProgress(detail),
       );
-      await load();
-      await refreshSessions();
+      await settle(outcome, q);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Request failed");
       setQuestion(q); // never lose what they typed
+      setPendingQuestion(null);
     } finally {
       setBusy(false);
-      setPendingQuestion(null);
+      setProgress(null);
+    }
+  }
+
+  /** Answer the clarifying question: narrow the search, skip, or cancel. */
+  async function answerClarify(decision: ClarifyDecision) {
+    if (!pendingClarify || busy) return;
+    // `original`, NOT `question`. Since clarification landed, `question` is the
+    // model's clarifying question -- persisting the turn against that would put
+    // the agent's words in the transcript where the user's belong.
+    const q = pendingClarify.original;
+    const thread = pendingClarify.thread_id;
+
+    setBusy(true);
+    setError(null);
+    setProgress(decision.action === "cancel" ? "Stopping" : "Searching");
+
+    try {
+      const outcome = await resumeTurn(id, thread, q, decision, (_n, detail) =>
+        setProgress(detail),
+      );
+      await settle(outcome, q);
+    } catch (err) {
+      // The pause is left in place on failure. The checkpoint still exists
+      // server-side, so the decision can simply be retried -- clearing it here
+      // would strand the thread with no way to reach it.
+      setError(err instanceof Error ? err.message : "Could not resume the turn");
+    } finally {
+      setBusy(false);
       setProgress(null);
     }
   }
@@ -178,18 +247,11 @@ function Conversation({ id }: { id: string }) {
     session?.title ?? sessions.find((s) => s.id === id)?.title ?? "Loading";
 
   return (
-    <div
-      className={`lg:pr-[var(--rail-pad)] ${
-        railReady ? "transition-[padding]" : ""
-      }`}
-      style={
-        {
-          "--rail-pad": railCollapsed ? RAIL_WIDTH_COLLAPSED : RAIL_WIDTH,
-          transitionDuration: "var(--md-dur-medium)",
-          transitionTimingFunction: "var(--md-ease-emphasized)",
-        } as React.CSSProperties
-      }
-    >
+    // The rail's width is reserved by <main>'s right MARGIN in shell.tsx, not
+    // by padding here. As padding, main still ran under the fixed rail to the
+    // window edge and its scrollbar went with it -- which is the whole reason
+    // the chat scrollbar looked like a browser scrollbar.
+    <div>
       <div className="mx-auto flex min-h-[calc(100vh-2rem)] max-w-3xl flex-col px-6 py-6">
         {/* Top app bar, small. Sticky only works because html/body use
             `overflow-x: clip` rather than `hidden` -- `hidden` makes body a
@@ -237,15 +299,28 @@ function Conversation({ id }: { id: string }) {
           {pendingQuestion && (
             <li className="flex justify-end">
               <p
-                className="md-body-medium max-w-[80%] rounded-[var(--md-shape-lg)] px-4 py-3 opacity-60"
+                className={`md-body-medium max-w-[80%] rounded-[var(--md-shape-lg)] px-4 py-3 ${
+                  // Full opacity once paused: the turn is no longer in flight,
+                  // it is waiting on the reader, and a faded bubble reads as
+                  // "still sending".
+                  pendingClarify ? "" : "opacity-60"
+                }`}
                 style={{
-                  background: "var(--md-primary-container)",
-                  color: "var(--md-on-primary-container)",
+                  background: "var(--md-secondary-container)",
+                  color: "var(--md-on-secondary-container)",
                 }}
               >
                 {pendingQuestion}
               </p>
             </li>
+          )}
+
+          {pendingClarify && (
+            <Clarify
+              interrupt={pendingClarify}
+              busy={busy}
+              onDecide={(d) => void answerClarify(d)}
+            />
           )}
         </ol>
 
@@ -276,11 +351,23 @@ function Conversation({ id }: { id: string }) {
         >
           <div className="flex items-end gap-3">
             <TextField
-              label="Ask about your documents"
+              label={
+                pendingClarify
+                  ? "Answer the question above to continue"
+                  : "Ask about your documents"
+              }
               value={question}
               onChange={(e) => setQuestion(e.target.value)}
-              disabled={busy || !session}
-              surface="var(--md-surface-container-low)"
+              // Locked while paused. A second question would start a second
+              // turn and orphan the paused checkpoint, leaving a thread nothing
+              // can ever reach.
+              disabled={busy || !session || Boolean(pendingClarify)}
+              // `--md-surface`, not the page's container-low: the composer
+              // should read as a distinct input sitting ON the page rather
+              // than a cut-out of it. Drives BOTH the input fill and the
+              // floating label's background, so the notch matches whatever
+              // the field is filled with.
+              surface="var(--md-surface)"
               className="flex-1"
               // Pill composer. `shape` moves the floating label's inset in
               // step with the radius; see TextField.
@@ -296,7 +383,7 @@ function Conversation({ id }: { id: string }) {
             />
             <Fab
               type="submit"
-              disabled={busy || !session || !question.trim()}
+              disabled={busy || !session || !question.trim() || Boolean(pendingClarify)}
               aria-label="Send"
             >
               {busy ? (
@@ -322,7 +409,9 @@ function Conversation({ id }: { id: string }) {
             style={{
               color: progress
                 ? "var(--md-primary)"
-                : "var(--md-on-surface-variant)",
+                : pendingClarify
+                  ? "var(--md-tertiary)"
+                  : "var(--md-on-surface-variant)",
             }}
           >
             {progress ? (
@@ -330,6 +419,8 @@ function Conversation({ id }: { id: string }) {
                 <IconSpinner className="h-3.5 w-3.5" />
                 {progress}
               </>
+            ) : pendingClarify ? (
+              "Waiting on your answer — nothing has been searched yet"
             ) : (
               'Follow-ups resolve against history — try "and the prior year?"'
             )}
@@ -374,8 +465,8 @@ function Turn({
         <p
           className="md-body-medium max-w-[80%] rounded-[var(--md-shape-lg)] px-4 py-3"
           style={{
-            background: "var(--md-primary-container)",
-            color: "var(--md-on-primary-container)",
+            background: "var(--md-secondary-container)",
+            color: "var(--md-on-secondary-container)",
           }}
         >
           {message.content}
@@ -443,6 +534,16 @@ function Turn({
         {meta.sufficient === false && (
           <span style={{ color: "var(--md-tertiary)" }}>
             critic flagged gaps
+          </span>
+        )}
+        {/* Only present when the user was asked and answered, so its absence
+            means the question was clear rather than that it was confirmed. */}
+        {meta.clarification && (
+          <span
+            className="md-badge md-badge-tertiary max-w-[18rem] truncate"
+            title={`You narrowed this to: ${meta.clarification}`}
+          >
+            narrowed: {meta.clarification}
           </span>
         )}
         {/* Zero citations means nothing in the library supported the answer —

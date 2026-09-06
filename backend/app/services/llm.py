@@ -193,6 +193,120 @@ def is_repetitive(text: str) -> bool:
     return len(set(words)) / len(words) < 0.4
 
 
+# A short unit repeated consecutively at least five times. Bounded on both
+# sides deliberately: `.{2,40}` keeps the backreference search cheap, and
+# requiring five repeats avoids cutting legitimate prose ("very, very good",
+# a row of dashes, "ha ha ha").
+_MAX_UNIT = 40
+_DEGENERATION = re.compile(rf"(.{{2,{_MAX_UNIT}}}?)\1{{4,}}", re.DOTALL)
+
+# Only the tail is scanned. A repetition loop runs until the token limit, so it
+# is always at the END -- and capping the scan keeps the backreference search
+# from getting expensive on a long answer.
+_DEGENERATION_SCAN = 2000
+
+
+def strip_degeneration(text: str) -> str:
+    """Cut a response at the point it started repeating itself.
+
+    Gemma's characteristic failure is a repetition loop: it emits a plausible
+    sentence, then loops a fragment until it hits max_output_tokens. Measured
+    example, from a real turn:
+
+        "...the provided sources do not contain information regarding which
+         specific pyramid you are asking about. [No source provided for this
+         clarification/refusal/unanswered part of the
+         question/question/question/question/question/..."
+
+    The first sentence is a perfectly good answer. Everything from
+    "question/question" on is noise, and because the loop ran until the token
+    cap it also truncated the JSON -- which is what turned a usable answer into
+    a 502.
+
+    Returns the text up to the loop. Never raises, and returns the input
+    unchanged when nothing repeats.
+    """
+    if not text:
+        return text
+
+    head, tail = text[:-_DEGENERATION_SCAN], text[-_DEGENERATION_SCAN:]
+
+    # Only a run that reaches the END counts.
+    #
+    # The loop runs until the token cap, so it is always the last thing in the
+    # response. Taking the earliest match instead cut legitimate content that
+    # merely contains a repeated pattern -- a rule of dashes, a run of spaces,
+    # a table separator. Requiring the run to reach the end removes that whole
+    # class of false positive. The trailing slack absorbs a final unit that
+    # truncation cut in half.
+    start = None
+    for match in _DEGENERATION.finditer(tail):
+        if match.end() >= len(tail) - _MAX_UNIT:
+            start = match.start()
+            break
+    if start is None:
+        return text
+
+    cut = (head + tail[:start]).rstrip()
+    # A loop starting in the first few characters means there is no real answer
+    # to salvage; returning "" lets the caller say so honestly rather than
+    # showing a fragment.
+    return cut if len(cut) >= 20 else ""
+
+
+def extract_string(raw: str, key: str) -> str:
+    """Pull a possibly-truncated string value out of JSON.
+
+    The string counterpart to `extract_string_list`, and it exists for the same
+    reason: a response that degenerated in one field still usually carries a
+    complete, useful value in another, and a strict parse throws all of it away.
+
+    Three attempts, weakest last:
+      1. parse the whole document
+      2. find a properly closed "key": "..." pair
+      3. take everything after the opening quote -- the truncated case
+    """
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict) and isinstance(data.get(key), str):
+            return strip_degeneration(data[key].strip())
+    except json.JSONDecodeError:
+        pass
+
+    quoted = rf'"{re.escape(key)}"\s*:\s*"((?:[^"\\]|\\.)*)"'
+    match = re.search(quoted, raw, re.DOTALL)
+    if match is None:
+        # Unterminated: the closing quote was never emitted.
+        match = re.search(rf'"{re.escape(key)}"\s*:\s*"(.*)$', raw, re.DOTALL)
+    if match is None:
+        return ""
+
+    value = match.group(1)
+    try:
+        # Round-trip through the JSON decoder so escapes are handled properly
+        # rather than by hand. A trailing lone backslash makes this fail, hence
+        # the fallback.
+        value = json.loads(f'"{value}"')
+    except json.JSONDecodeError:
+        value = value.replace('\\"', '"').replace("\\n", "\n").replace("\\\\", "\\")
+    return strip_degeneration(value.strip())
+
+
+def extract_int_list(raw: str, key: str) -> list[int]:
+    """Pull a list of integers (citation numbers) out of possibly-broken JSON."""
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return [n for n in data.get(key, []) if isinstance(n, int)]
+    except json.JSONDecodeError:
+        pass
+
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*\[([^\]]*)', raw, re.DOTALL)
+    if not match:
+        return []
+    return [int(n) for n in re.findall(r"\d+", match.group(1))]
+
+
 # Why a 200 can carry no usable text. The old error told the operator to raise
 # max_output_tokens regardless of cause, which is only ever right for
 # MAX_TOKENS -- and actively misleading for RECITATION, where more tokens

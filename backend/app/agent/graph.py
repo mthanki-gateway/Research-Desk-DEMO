@@ -1,8 +1,12 @@
 """The graph.
 
-    START → plan → retrieve → draft → critique ─┬→ END
-                      ▲                         │
-                      └──────── retry ──────────┘
+    START → clarify ─┬─(clear)──────────────→ plan → retrieve → draft ──┐
+                     │                                 ▲                │
+                     └─(vague)→ ask_human ─┬→ plan ────┘                │
+                                           │                     critique
+                                  cancelled │                     │    │
+                                           └─────→ END ←──────────┘    │
+                                                        └── retry ─────┘
 
 The cycle is the reason this is a graph and not four awaits. LangChain's LCEL
 builds DAGs, and a DAG cannot loop; expressing "critique decides whether to go
@@ -11,18 +15,33 @@ threading a mutable dict through every step by hand.
 
 The checkpointer slot (step 6) is the other reason: compiling with a
 checkpointer snapshots state after every node, which is what turns this into
-resumable chat sessions for free.
+resumable chat sessions for free -- and, in step 7, into a graph that can PAUSE
+mid-run to ask the user a question and be resumed by a different request.
+
+`clarify` is a no-op unless the turn asked for it, and even then it only routes
+to `ask_human` when the request is genuinely too vague to search -- so one
+compiled graph serves every mode.
 """
 
 from __future__ import annotations
 
 import uuid
-from typing import Literal
+from typing import Any, Literal
 
 import structlog
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command
 
-from app.agent.nodes import critique, draft, plan, retrieve_node
+from app.agent.nodes import (
+    ask_human,
+    critique,
+    draft,
+    plan,
+    retrieve_node,
+)
+from app.agent.nodes import (
+    clarify as clarify_node,
+)
 from app.agent.state import ResearchState
 from app.config import get_settings
 from app.services.vectorstore import SearchHit
@@ -50,15 +69,43 @@ def should_continue(state: ResearchState) -> Literal["retrieve", "__end__"]:
     return "retrieve"
 
 
+def needs_human(state: ResearchState) -> Literal["ask_human", "plan"]:
+    """Ask the user only when `clarify` actually produced a question.
+
+    A cheap dict read, deliberately: the judgement was made in the node and
+    written to state, and the router just reads the verdict. Routers stay pure
+    so control flow is testable without a model.
+    """
+    return "ask_human" if state.get("pending_clarification") else "plan"
+
+
+def after_human(state: ResearchState) -> Literal["plan", "__end__"]:
+    """The user declined to answer, so nothing is searched.
+
+    Separate from `should_continue` because they answer different questions:
+    this one is "did the user stop us", that one is "is the answer good
+    enough".
+    """
+    return END if state.get("cancelled") else "plan"
+
+
 def build_graph(checkpointer=None):
     builder = StateGraph(ResearchState)
 
+    builder.add_node("clarify", clarify_node)
+    builder.add_node("ask_human", ask_human)
     builder.add_node("plan", plan)
     builder.add_node("retrieve", retrieve_node)
     builder.add_node("draft", draft)
     builder.add_node("critique", critique)
 
-    builder.add_edge(START, "plan")
+    builder.add_edge(START, "clarify")
+    builder.add_conditional_edges(
+        "clarify", needs_human, {"ask_human": "ask_human", "plan": "plan"}
+    )
+    builder.add_conditional_edges(
+        "ask_human", after_human, {"plan": "plan", END: END}
+    )
     builder.add_edge("plan", "retrieve")
     builder.add_edge("retrieve", "draft")
     builder.add_edge("draft", "critique")
@@ -91,6 +138,23 @@ def get_graph():
     return _graph
 
 
+def interrupt_payload(state: dict) -> dict | None:
+    """The pending human-in-the-loop request, if the graph paused.
+
+    LangGraph reports a pause by putting `__interrupt__` in the returned state,
+    holding one or more Interrupt objects whose `.value` is whatever the node
+    passed to `interrupt()`. Read defensively -- the exact container type is an
+    internal detail, and a shape change here should degrade to "not paused"
+    rather than raise inside an API handler.
+    """
+    raw = state.get("__interrupt__")
+    if not raw:
+        return None
+    first = raw[0] if isinstance(raw, list | tuple) else raw
+    value = getattr(first, "value", first)
+    return value if isinstance(value, dict) else {"type": "unknown", "value": str(value)}
+
+
 class AgentResult:
     """Flattened view of the final state, for the API layer."""
 
@@ -104,6 +168,21 @@ class AgentResult:
         self.sufficient: bool = state.get("sufficient", True)
         self.iterations: int = state.get("iterations", 0)
         self.trace: list[dict] = state.get("trace", [])
+        # Human-in-the-loop. `interrupt` is None on every ordinary turn, so
+        # existing callers (the evaluation harness among them) are unaffected;
+        # they read `.answer` and never look here.
+        self.interrupt: dict | None = interrupt_payload(state)
+        # What the user said when asked to clarify. None on an ordinary turn,
+        # so "the question was clear" stays distinguishable from "the user
+        # clarified it".
+        self.clarification: str | None = state.get("clarification")
+        self.original_question: str | None = state.get("original_question")
+        self.cancelled: bool = bool(state.get("cancelled"))
+
+    @property
+    def paused(self) -> bool:
+        """True when the graph is waiting for a human, not finished."""
+        return self.interrupt is not None
 
 
 def initial_state(
@@ -114,14 +193,31 @@ def initial_state(
     owner_id: str | None = None,
     multi_query: bool | None = None,
     chat_context: str = "",
+    clarify: bool | None = None,
+    resumable: bool = True,
 ) -> ResearchState:
+    settings = get_settings()
+    ask = settings.agent_clarify if clarify is None else clarify
+    # A pause is only meaningful if there is a thread to resume. Without one
+    # the checkpointer stores nothing, `interrupt()` has nowhere to record the
+    # pause, and the turn would simply stop with no way to continue it. Forcing
+    # clarification off is the honest degradation.
+    if ask and not resumable:
+        # Debug, not warning: a caller with no thread simply cannot pause. That
+        # is the evaluation harness on every question, and it is correct
+        # behaviour rather than a misconfiguration.
+        log.debug("clarify_skipped", reason="no thread_id")
+        ask = False
+
     return {
         "question": question,
-        "top_k": top_k or get_settings().retrieval_top_k,
+        "top_k": top_k or settings.retrieval_top_k,
         "document_ids": [str(d) for d in document_ids] if document_ids else None,
         "owner_id": owner_id,
         "multi_query": multi_query,
         "chat_context": chat_context,
+        "clarify": ask,
+        "cancelled": False,
         # These cannot be reset by passing []: `evidence`, `sub_questions`,
         # `tried_queries` and `trace` all have append-style reducers, and a
         # reducer applies to the INPUT too -- so [] appends nothing rather than
@@ -167,6 +263,7 @@ async def run_agent(
     multi_query: bool | None = None,
     chat_context: str = "",
     thread_id: str | None = None,
+    clarify: bool | None = None,
 ) -> AgentResult:
     state = initial_state(
         question,
@@ -175,6 +272,8 @@ async def run_agent(
         owner_id=owner_id,
         multi_query=multi_query,
         chat_context=chat_context,
+        clarify=clarify,
+        resumable=bool(thread_id),
     )
     final = await get_graph().ainvoke(state, config=thread_config(thread_id))
     result = AgentResult(final)
@@ -183,6 +282,36 @@ async def run_agent(
         iterations=result.iterations,
         n_evidence=len(result.evidence),
         sufficient=result.sufficient,
+        paused=result.paused,
+    )
+    return result
+
+
+async def resume_agent(thread_id: str, decision: dict) -> AgentResult:
+    """Continue a paused graph with a human's answer.
+
+    `Command(resume=...)` replaces the graph's input entirely: LangGraph loads
+    the checkpoint for `thread_id`, replays the interrupted node, and this time
+    `interrupt()` returns `decision` instead of pausing. Nothing before it in
+    the graph runs again -- the plan is not re-planned.
+
+    Note the process boundary. The pause did not hold a coroutine open; the
+    request that started this turn has long since returned. This is a fresh
+    request, possibly on a different worker, and it works because the state was
+    PERSISTED rather than parked in memory.
+    """
+    config = thread_config(thread_id)
+    if config is None:
+        raise ValueError("resume needs a thread_id")
+
+    final = await get_graph().ainvoke(Command(resume=decision), config=config)
+    result = AgentResult(final)
+    log.info(
+        "agent_resumed",
+        thread_id=thread_id,
+        clarification=result.clarification,
+        cancelled=result.cancelled,
+        still_paused=result.paused,
     )
     return result
 
@@ -196,13 +325,17 @@ async def stream_agent(
     multi_query: bool | None = None,
     chat_context: str = "",
     thread_id: str | None = None,
+    clarify: bool | None = None,
 ):
-    """Yield (node_name, state_update) as each node completes.
+    """Yield (kind, node_name, payload) as each node completes.
 
     Node-level progress, not token-level. With responseSchema output there is
     no partial prose to stream -- you would be streaming half a JSON object.
     For an agent this is arguably the better signal anyway: "retrieving 2 of 3"
     says what is happening, where a token crawl only proves it is alive.
+
+    Three kinds are yielded: `node` per completed node, `state` with the full
+    state after each node, and `interrupt` if the graph pauses for a human.
     """
     state = initial_state(
         question,
@@ -211,15 +344,43 @@ async def stream_agent(
         owner_id=owner_id,
         multi_query=multi_query,
         chat_context=chat_context,
+        clarify=clarify,
+        resumable=bool(thread_id),
     )
+    async for item in _astream(state, thread_id):
+        yield item
+
+
+async def stream_resume(thread_id: str, decision: dict):
+    """Resume a paused graph, streaming the rest of the run.
+
+    Deliberately the same generator shape as `stream_agent`, so the SSE
+    endpoint that consumes it needs no second code path -- from the client's
+    point of view a resumed turn streams exactly like a fresh one.
+    """
+    async for item in _astream(Command(resume=decision), thread_id):
+        yield item
+
+
+async def _astream(inputs: Any, thread_id: str | None):
+    """Shared streaming loop. `inputs` is a fresh state or a resume Command."""
     # Two stream modes at once: "updates" gives per-node deltas for progress,
     # "values" gives the full state after each node so the caller ends up with
     # the final state without a second aget_state() round-trip.
     async for mode, chunk in get_graph().astream(
-        state, config=thread_config(thread_id), stream_mode=["updates", "values"]
+        inputs, config=thread_config(thread_id), stream_mode=["updates", "values"]
     ):
         if mode == "updates":
+            # A pause arrives on the "updates" channel under the same
+            # `__interrupt__` key `ainvoke` uses, NOT as a node result -- so it
+            # has to be filtered out here or the UI would render a progress
+            # line for a node called "__interrupt__".
             for node, update in chunk.items():
+                if node == "__interrupt__":
+                    payload = interrupt_payload({"__interrupt__": update})
+                    if payload is not None:
+                        yield "interrupt", None, payload
+                    continue
                 yield "node", node, update
         elif mode == "values":
             yield "state", None, chunk

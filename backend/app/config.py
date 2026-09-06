@@ -107,6 +107,28 @@ class Settings(BaseSettings):
     agent_max_iterations: int = 2
     agent_max_subquestions: int = 3
 
+    # --- human-in-the-loop ---
+    # Ask the user a clarifying question when their request is too vague to
+    # retrieve well, offering concrete options drawn from what their documents
+    # actually contain.
+    #
+    # This is the one interrupt worth having in a RAG system. The agent has no
+    # side effects to gate, so there is no "approve this action" moment -- but
+    # there is a very common failure where the question genuinely does not say
+    # enough to search on ("tell me about the pyramids"), and the model's only
+    # alternative is to guess. Guessing wastes the whole turn; asking costs one
+    # sentence.
+    #
+    # Default ON. It costs one extra Gemma call per turn to decide whether to
+    # ask, which is cheap next to the 3-5 calls a misunderstood question wastes
+    # -- and the node stays silent unless the request is genuinely too vague to
+    # search, so most turns never see the pause.
+    #
+    # Programmatic callers are unaffected: a pause needs a thread to resume, and
+    # `initial_state` forces this off when there is no thread_id. The evaluation
+    # harness therefore never pauses and never pays for the check.
+    agent_clarify: bool = True
+
     # --- auth (Supabase as identity provider only) ---
     # Empty = auth disabled, and every request runs as an anonymous local user
     # with owner_id None. That keeps the app usable before keys are configured

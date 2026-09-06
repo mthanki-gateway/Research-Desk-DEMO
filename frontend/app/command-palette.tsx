@@ -68,10 +68,12 @@ export default function CommandPalette({ onClose }: { onClose: () => void }) {
         onClick={(e) => e.stopPropagation()}
         className="relative w-full max-w-xl overflow-hidden"
         style={{
-          background: "var(--md-surface-container-high)",
+          background: "var(--md-surface)",
           color: "var(--md-on-surface)",
           borderRadius: "var(--md-shape-xl)",
-          boxShadow: "var(--md-elev-3)",
+          // See chunk-panel: overlays are the one place depth survives.
+          border: "1px solid var(--md-outline-variant)",
+          boxShadow: "var(--md-elev-2)",
         }}
       >
         {/* Docked search bar: 56px, no outline, icon leading. */}

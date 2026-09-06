@@ -32,9 +32,14 @@ export default function ChunkPanel() {
         onClick={(e) => e.stopPropagation()}
         className="relative flex w-full max-w-md flex-col"
         style={{
-          background: "var(--md-surface-container)",
+          background: "var(--md-surface)",
           color: "var(--md-on-surface)",
-          boxShadow: "var(--md-elev-3)",
+          // Overlays keep a shadow -- they genuinely float above the page, and
+          // now that everything else is flat that shadow means something again.
+          // Softened to elev-2 with a hairline, so it reads as a raised sheet
+          // rather than a slab.
+          borderLeft: "1px solid var(--md-outline-variant)",
+          boxShadow: "var(--md-elev-2)",
         }}
       >
         <header className="flex items-start justify-between gap-4 p-4">

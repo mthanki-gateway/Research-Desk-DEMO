@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -55,6 +56,50 @@ class TurnRequest(BaseModel):
     multi_query: bool | None = None
     # Overrides the session's scope for this one turn only.
     document_ids: list[uuid.UUID] | None = None
+    # None = use AGENT_CLARIFY from config. Explicit true lets this turn pause
+    # to ask what the request means, if the request is too vague to search on.
+    clarify: bool | None = None
+
+
+class ResumeRequest(BaseModel):
+    """A user's answer to a paused graph.
+
+    `thread_id` is required and comes from the paused turn's response. It is
+    the checkpoint key -- without it there is nothing to resume, and it is why
+    a pause survives across requests, workers and deploys.
+    """
+
+    thread_id: str = Field(..., min_length=1, max_length=200)
+    # answer = use `answer` to narrow the search
+    # skip   = search the original request as written
+    # cancel = stop without searching
+    action: Literal["answer", "skip", "cancel"] = "skip"
+    # Only read when action == "answer". Either a chosen option's label or
+    # whatever the user typed into the free-text box -- the graph treats both
+    # identically, which is what keeps "something else" from being a special
+    # case.
+    answer: str = Field("", max_length=500)
+    # Echoed back so the resumed turn is persisted against the right question;
+    # the graph also holds it, but re-sending keeps the endpoint self-contained.
+    question: str = Field(..., min_length=1, max_length=2000)
+
+
+class ClarifyOption(BaseModel):
+    label: str
+    description: str = ""
+
+
+class InterruptOut(BaseModel):
+    """What the graph is waiting for. Present only on a paused turn."""
+
+    type: str
+    # The clarifying question, written by the model.
+    question: str = ""
+    # Concrete choices, grounded in the headings the documents actually have.
+    options: list[ClarifyOption] = Field(default_factory=list)
+    # What the user originally typed, so the UI can show it alongside.
+    original: str = ""
+    actions: list[str] = Field(default_factory=list)
 
 
 class TurnResponse(BaseModel):
@@ -71,3 +116,14 @@ class TurnResponse(BaseModel):
     # Visibility into what history was actually sent, since that's the thing
     # you'll want to inspect when tuning token usage.
     context_chars: int
+    # --- human-in-the-loop ---
+    # Non-null means the turn is NOT finished: it is parked at a checkpoint
+    # waiting for POST /resume. Nothing has been persisted and no answer
+    # exists yet.
+    interrupt: InterruptOut | None = None
+    # The checkpoint key to resume with. Only returned while paused -- a
+    # completed turn deletes its thread, so the id would be a dangling
+    # reference.
+    thread_id: str | None = None
+    # What the user said when asked to clarify. Null on an ordinary turn.
+    clarification: str | None = None

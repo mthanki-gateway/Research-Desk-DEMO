@@ -18,6 +18,7 @@ import {
   listSessions,
 } from "@/lib/api";
 import { authEnabled, getSupabase } from "@/lib/supabase";
+import { ACCENTS, type Accent, DEFAULT_ACCENT } from "@/lib/accents";
 
 /**
  * One place that owns sessions and documents.
@@ -70,9 +71,14 @@ type AppData = {
    * off until then, so the stored value applies without an opening animation.
    */
   railReady: boolean;
+  accent: Accent;
+  setAccent: (a: Accent) => void;
 };
 
 const RAIL_KEY = "rd:rail-collapsed";
+// Must match the inline script in layout.tsx, which reads this before paint.
+// Kept as a bare string there because that script cannot import.
+const ACCENT_KEY = "rd.accent";
 
 const Ctx = createContext<AppData | null>(null);
 
@@ -98,6 +104,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
   const [railActive, setRailActive] = useState(false);
   const [railCollapsed, setRailCollapsedState] = useState(false);
   const [railReady, setRailReady] = useState(false);
+  const [accent, setAccentState] = useState<Accent>(DEFAULT_ACCENT);
   const [account, setAccount] = useState<AppData["account"]>(null);
   // With auth disabled there is nothing to look up, so treat it as resolved.
   const [authReady, setAuthReady] = useState(!authEnabled);
@@ -137,10 +144,30 @@ export function Providers({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     try {
       setRailCollapsedState(localStorage.getItem(RAIL_KEY) === "1");
+      const saved = localStorage.getItem(ACCENT_KEY);
+      // Validate against the generated list. A stored accent that has since
+      // been removed would otherwise set an attribute matching no CSS rule,
+      // silently falling back to the default while the picker showed the old
+      // choice as selected.
+      if (ACCENTS.some((a) => a.id === saved)) setAccentState(saved as Accent);
     } catch {
-      // private browsing or blocked storage — the default is fine
+      // private browsing or blocked storage — the defaults are fine
     }
     setRailReady(true);
+  }, []);
+
+  const setAccent = useCallback((a: Accent) => {
+    setAccentState(a);
+    // The attribute is the source of truth for rendering; state only drives
+    // the picker's selected mark. The default lives on bare `:root`, so it is
+    // set as an attribute too rather than removed -- keeps the two paths
+    // identical and avoids a branch that only runs for one accent.
+    document.documentElement.setAttribute("data-accent", a);
+    try {
+      localStorage.setItem(ACCENT_KEY, a);
+    } catch {
+      /* ignore — the choice just will not survive a reload */
+    }
   }, []);
 
   const setRailCollapsed = useCallback((v: boolean) => {
@@ -255,6 +282,8 @@ export function Providers({ children }: { children: React.ReactNode }) {
       railCollapsed,
       setRailCollapsed,
       railReady,
+      accent,
+      setAccent,
     }),
     [
       sessions,
@@ -275,6 +304,8 @@ export function Providers({ children }: { children: React.ReactNode }) {
       railCollapsed,
       setRailCollapsed,
       railReady,
+      accent,
+      setAccent,
     ],
   );
 

@@ -3,6 +3,7 @@
 import {
   forwardRef,
   useCallback,
+  useEffect,
   useId,
   useRef,
   useState,
@@ -50,6 +51,46 @@ export function useRipple<T extends HTMLElement>() {
   }, []);
 
   return { ref: host, onPointerDown: spawn };
+}
+
+/**
+ * Marks a scroll container as actively scrolling, so its scrollbar can fade in
+ * and back out.
+ *
+ * CSS can do the hover half on its own; "while scrolling" needs JavaScript,
+ * because there is no `:scrolling` selector. The attribute is written directly
+ * to the DOM rather than held in state -- this fires on every scroll frame, and
+ * re-rendering the whole page at 60fps to toggle a scrollbar colour would be an
+ * absurd trade.
+ *
+ * Pair with `.md-scroll`, which owns the appearance.
+ */
+export function useAutoHideScroll<T extends HTMLElement>() {
+  const ref = useRef<T>(null);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+
+    let timer: number | undefined;
+    const onScroll = () => {
+      el.dataset.scrolling = "true";
+      window.clearTimeout(timer);
+      // Long enough to survive the gap between two flicks of a wheel, short
+      // enough that the bar is gone by the time you have finished reading.
+      timer = window.setTimeout(() => delete el.dataset.scrolling, 900);
+    };
+
+    // Passive: this never calls preventDefault, and saying so lets the browser
+    // scroll without waiting on the handler.
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      window.clearTimeout(timer);
+    };
+  }, []);
+
+  return ref;
 }
 
 type ButtonVariant =
@@ -245,7 +286,14 @@ export function Checkbox({ on }: { on: boolean }) {
 
 type TextFieldProps = InputHTMLAttributes<HTMLInputElement> & {
   label: string;
-  /** Surface the field sits on, so the floating label's notch matches it. */
+  /**
+   * The field's fill. Drives the input background AND the floating label's
+   * background, which is what keeps the notch the label cuts in the outline
+   * the same colour as the field it is cut into — set them separately and the
+   * label reads as a floating swatch the moment the two diverge.
+   *
+   * Omit for a transparent field on whatever is behind it (M3's default).
+   */
   surface?: string;
   /**
    * Corner radius. Defaults to M3's 4px outlined field; pass
