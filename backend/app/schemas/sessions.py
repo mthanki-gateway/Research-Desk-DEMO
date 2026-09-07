@@ -127,3 +127,19 @@ class TurnResponse(BaseModel):
     thread_id: str | None = None
     # What the user said when asked to clarify. Null on an ordinary turn.
     clarification: str | None = None
+    # Langfuse trace id, so the client can attach feedback to this turn later.
+    # Null when tracing is not configured.
+    trace_id: str | None = None
+
+
+class FeedbackRequest(BaseModel):
+    """A thumbs up/down on one assistant message.
+
+    Identifies the turn by MESSAGE id, not trace id. The trace id is looked up
+    server-side from the stored message -- accepting one from the client would
+    let anyone score any trace, including another tenant's.
+    """
+
+    message_id: str = Field(..., min_length=1, max_length=64)
+    helpful: bool
+    comment: str | None = Field(None, max_length=1000)

@@ -19,6 +19,7 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.db.models import Chunk, Document
 from app.db.session import SessionLocal
+from app.services import tracing
 from app.services.embeddings import get_embeddings
 from app.services.llm import LLMError, extract_string_list, get_llm
 from app.services.vectorstore import SearchHit, get_vector_store
@@ -296,10 +297,46 @@ async def _search_one(
     document_ids: list[uuid.UUID] | None,
     owner_id: str | None,
 ) -> list[SearchHit]:
-    vector = await get_embeddings().embed_query(query)
-    return await get_vector_store().search(
-        vector, limit=limit, document_ids=document_ids, owner_id=owner_id
-    )
+    # Traced as a RETRIEVER, which is the granularity that makes a trace
+    # readable: one observation per query carrying what was asked and what came
+    # back. Instrumenting embed_query and search separately would be more
+    # faithful to the call stack and much worse to read -- with multi-query on,
+    # a turn would show eight sibling spans with no indication of which query
+    # produced which hits.
+    with tracing.observe(
+        "retrieve",
+        as_type="retriever",
+        input=query,
+        metadata={"limit": limit, "scoped": bool(document_ids)},
+    ) as span:
+        vector = await get_embeddings().embed_query(query)
+        hits = await get_vector_store().search(
+            vector, limit=limit, document_ids=document_ids, owner_id=owner_id
+        )
+        tracing.update(
+            span,
+            # Chunk ids and scores, NOT the chunk text. Two reasons: the text
+            # is already on the draft generation's prompt, so this would double
+            # every trace's size; and it keeps document contents out of the
+            # trace store, which is a third-party PII surface.
+            output=[
+                {
+                    "chunk_id": str(h.chunk_id),
+                    "file": h.filename,
+                    "heading": h.heading,
+                    "score": round(h.score, 4),
+                }
+                for h in hits
+            ],
+            metadata={
+                "n_hits": len(hits),
+                # A sharp drop from the top score is the cheap signal that the
+                # corpus cannot serve this query -- worth having as a
+                # filterable dimension in production.
+                "top_score": round(hits[0].score, 4) if hits else None,
+            },
+        )
+        return hits
 
 
 async def retrieve(

@@ -1,6 +1,8 @@
-﻿import json
+﻿import contextlib
+import json
 import uuid
 from collections.abc import AsyncIterator
+from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
@@ -21,6 +23,7 @@ from app.db.models import ChatSession, Message, Role
 from app.db.session import SessionLocal
 from app.schemas.documents import SearchHitOut
 from app.schemas.sessions import (
+    FeedbackRequest,
     InterruptOut,
     MessageOut,
     ResumeRequest,
@@ -31,6 +34,7 @@ from app.schemas.sessions import (
     TurnRequest,
     TurnResponse,
 )
+from app.services import tracing
 from app.services.history import build_chat_context, update_summary
 from app.services.llm import LLMError
 from app.services.vectorstore import SearchHit
@@ -121,6 +125,44 @@ async def delete_session(
 # --------------------------------------------------------------------------
 
 
+def _trace_turn(
+    session_id: uuid.UUID,
+    req: TurnRequest | ResumeRequest,
+    user: User,
+    *,
+    resumed: bool = False,
+):
+    """Trace-level attributes for one turn. A no-op when tracing is off.
+
+    `session_id` is what turns a pile of independent traces into conversations,
+    and multi-turn failures are invisible without it: "the answer was wrong"
+    often means "turn 4 misresolved a pronoun from turn 2", which can only be
+    read in order.
+
+    `user_id` is the Supabase uuid -- an opaque internal id, deliberately not
+    an email. A trace store is a third-party PII surface, and the id is enough
+    for per-tenant cost and a support workflow.
+
+    Tags carry the retrieval configuration, so a quality change can be
+    attributed to a setting rather than guessed at: filter traces by
+    `multi-query` and compare faithfulness against those without it.
+    """
+    tags = ["resumed" if resumed else "turn"]
+    if isinstance(req, TurnRequest):
+        if req.multi_query:
+            tags.append("multi-query")
+        if req.clarify:
+            tags.append("clarify")
+
+    return tracing.turn(
+        name="chat.resume" if resumed else "chat.turn",
+        session_id=str(session_id),
+        user_id=user.owner_id,
+        tags=tags,
+        metadata={"top_k": getattr(req, "top_k", None)},
+    )
+
+
 @router.post("/{session_id}/messages", response_model=TurnResponse)
 async def add_turn(
     session_id: uuid.UUID, req: TurnRequest, user: User = Depends(current_user)
@@ -128,22 +170,24 @@ async def add_turn(
     """Ask a question inside a session. Blocking; see /stream for progress."""
     prep = await _prepare_turn(session_id, req, user)
 
-    try:
-        result = await run_agent(
-            req.question,
-            top_k=req.top_k,
-            document_ids=prep["scope"],
-            owner_id=user.owner_id,
-            multi_query=req.multi_query,
-            chat_context=prep["context"],
-            thread_id=prep["thread_id"],
-            clarify=req.clarify,
-        )
-    except LLMError as exc:
-        log.warning("turn_failed", error=str(exc))
-        raise HTTPException(status_code=502, detail=f"Model error: {exc}") from exc
+    with _trace_turn(session_id, req, user):
+        try:
+            result = await run_agent(
+                req.question,
+                top_k=req.top_k,
+                document_ids=prep["scope"],
+                owner_id=user.owner_id,
+                multi_query=req.multi_query,
+                chat_context=prep["context"],
+                thread_id=prep["thread_id"],
+                clarify=req.clarify,
+            )
+        except LLMError as exc:
+            log.warning("turn_failed", error=str(exc))
+            raise HTTPException(status_code=502, detail=f"Model error: {exc}") from exc
 
-    return await _finish_turn(session_id, req.question, result, prep, user)
+        prep["trace_id"] = tracing.current_trace_id()
+        return await _finish_turn(session_id, req.question, result, prep, user)
 
 
 @router.post("/{session_id}/resume", response_model=TurnResponse)
@@ -162,16 +206,18 @@ async def resume_turn(
     # is what stops one user continuing another's paused graph.
     prep = await _prepare_resume(session_id, req, user)
 
-    try:
-        result = await resume_agent(
-            req.thread_id,
-            {"action": req.action, "answer": req.answer},
-        )
-    except LLMError as exc:
-        log.warning("resume_failed", error=str(exc))
-        raise HTTPException(status_code=502, detail=f"Model error: {exc}") from exc
+    with _trace_turn(session_id, req, user, resumed=True):
+        try:
+            result = await resume_agent(
+                req.thread_id,
+                {"action": req.action, "answer": req.answer},
+            )
+        except LLMError as exc:
+            log.warning("resume_failed", error=str(exc))
+            raise HTTPException(status_code=502, detail=f"Model error: {exc}") from exc
 
-    return await _finish_turn(session_id, req.question, result, prep, user)
+        prep["trace_id"] = tracing.current_trace_id()
+        return await _finish_turn(session_id, req.question, result, prep, user)
 
 
 @router.post("/{session_id}/stream")
@@ -213,6 +259,7 @@ async def stream_turn(
             question=req.question,
             prep=prep,
             user=user,
+            trace=_trace_turn(session_id, req, user),
         ):
             yield chunk
 
@@ -236,10 +283,55 @@ async def resume_stream(
             question=req.question,
             prep=prep,
             user=user,
+            trace=_trace_turn(session_id, req, user, resumed=True),
         ):
             yield chunk
 
     return _sse_response(events())
+
+
+@router.post("/{session_id}/feedback", status_code=204)
+async def submit_feedback(
+    session_id: uuid.UUID,
+    req: FeedbackRequest,
+    user: User = Depends(current_user),
+) -> None:
+    """Attach a thumbs up/down to a turn's trace.
+
+    Per §7.3.5 this is the single best quality signal available -- it is the
+    only one that reflects what the USER thought, and it costs a button. Every
+    model-based metric is a proxy for it.
+
+    The trace id is read from the stored message rather than taken from the
+    client. A client-supplied trace id would let anyone score any trace,
+    including another tenant's, and scores are what the dashboards aggregate.
+    """
+    async with SessionLocal() as db:
+        chat = await _load(db, session_id, user)
+        message = next(
+            (m for m in chat.messages if str(m.id) == req.message_id), None
+        )
+
+    if message is None or message.role != Role.assistant:
+        raise HTTPException(status_code=404, detail="Message not found.")
+
+    trace_id = (message.agent_meta or {}).get("trace_id")
+    if not trace_id:
+        # Tracing was off when this turn ran, so there is nothing to score.
+        # Not an error -- feedback on an untraced turn is simply a no-op.
+        log.info("feedback_untraced", message_id=req.message_id)
+        return
+
+    tracing.score(
+        "user_feedback",
+        # 1/0 rather than the raw string: numeric scores aggregate into a rate,
+        # which is the form the question "is quality improving?" needs.
+        1 if req.helpful else 0,
+        trace_id=trace_id,
+        data_type="NUMERIC",
+        comment=req.comment or None,
+    )
+    log.info("feedback_recorded", helpful=req.helpful, trace_id=trace_id)
 
 
 async def _stream_events(
@@ -249,13 +341,23 @@ async def _stream_events(
     question: str,
     prep: dict,
     user: User,
+    trace: Any = None,
 ) -> AsyncIterator[str]:
     """Turn agent stream items into SSE, shared by start and resume.
 
     Three terminal shapes: `interrupt` (paused, nothing persisted), `done`
     (finished and persisted), or `error`.
+
+    `trace` is the trace context manager, entered HERE rather than in the
+    endpoint. An SSE endpoint returns its StreamingResponse immediately and the
+    generator body runs afterwards, so a `with` in the endpoint would have
+    exited before a single node ran -- and every span would have landed outside
+    the trace.
     """
     final_state: dict = {}
+    stack = contextlib.ExitStack()
+    if trace is not None:
+        stack.enter_context(trace)
     try:
         async for kind, node, payload in source:
             if kind == "state":
@@ -273,7 +375,10 @@ async def _stream_events(
             yield _sse("progress", {"node": node, "detail": _describe(node, payload)})
 
         result = AgentResult(final_state)
+        # Captured inside the trace context, before it closes.
+        prep["trace_id"] = tracing.current_trace_id()
         await _persist_turn(session_id, question, result, prep, user)
+        _score_turn(result, prep["trace_id"])
         yield _sse(
             "done",
             {
@@ -287,6 +392,10 @@ async def _stream_events(
                 "trace": result.trace,
                 "context_chars": len(prep["context"]),
                 "clarification": result.clarification,
+                # Returned so the client can attach feedback later. Without it,
+                # a thumbs-down arriving two minutes after the answer has
+                # nothing to point at.
+                "trace_id": prep["trace_id"],
             },
         )
     except Exception as exc:
@@ -294,6 +403,8 @@ async def _stream_events(
         # longer available -- the failure has to travel as an event.
         log.exception("stream_turn_failed")
         yield _sse("error", {"detail": str(exc)})
+    finally:
+        stack.close()
 
 
 def _sse_response(events: AsyncIterator[str]) -> StreamingResponse:
@@ -417,6 +528,50 @@ async def _prepare_resume(
     }
 
 
+def _score_turn(result: AgentResult, trace_id: str | None) -> None:
+    """Programmatic scores, computed from data the turn already produced.
+
+    These cost nothing -- no model call, no extra work -- and they are the whole
+    of §7.3.6's "cheap proxies" turned into a queryable dimension. Until now
+    they went into a log line and evaporated; as scores they become a dashboard:
+    zero-citation rate over time, mean iterations, how often the critic is
+    unsatisfied.
+
+    BOOLEAN rather than 0/1 where the thing is a fact, so Langfuse renders and
+    aggregates it as a proportion instead of a meaningless average.
+    """
+    if trace_id is None:
+        return
+
+    # THE hallucination proxy: an answer citing nothing, from a system whose
+    # entire contract is citation. Cheap to compute, and the single most
+    # useful production signal here.
+    tracing.score(
+        "cited_sources",
+        bool(result.citations),
+        trace_id=trace_id,
+        data_type="BOOLEAN",
+    )
+    # How hard the agent had to work. A rising mean means retrieval is
+    # degrading -- the critic is sending it back more often.
+    tracing.score("iterations", result.iterations, trace_id=trace_id)
+    # The critic's own verdict. False means it gave up rather than succeeded.
+    tracing.score(
+        "sufficient", bool(result.sufficient), trace_id=trace_id, data_type="BOOLEAN"
+    )
+    if result.clarification:
+        # Only present when a human was asked and answered, so its RATE tells
+        # you how often questions arrive too vague to serve -- a fact about
+        # your users, not your retriever.
+        tracing.score(
+            "clarified",
+            True,
+            trace_id=trace_id,
+            data_type="BOOLEAN",
+            comment=result.clarification[:200],
+        )
+
+
 async def _finish_turn(
     session_id: uuid.UUID,
     question: str,
@@ -448,6 +603,7 @@ async def _finish_turn(
         )
 
     await _persist_turn(session_id, question, result, prep, user)
+    _score_turn(result, prep.get("trace_id"))
     return TurnResponse(
         session_id=session_id,
         question=question,
@@ -461,6 +617,7 @@ async def _finish_turn(
         trace=result.trace,
         context_chars=len(prep["context"]),
         clarification=result.clarification,
+        trace_id=prep.get("trace_id"),
     )
 
 
@@ -506,6 +663,10 @@ async def _persist_turn(
                     # fact. Without it a clarified turn is indistinguishable from
                     # an automatic one in the transcript.
                     "clarification": result.clarification,
+                    # Stored so feedback arriving LATER -- a thumbs-down two
+                    # minutes after the answer -- has a trace to attach to.
+                    # Without this the score would have nowhere to land.
+                    "trace_id": prep.get("trace_id"),
                 },
             )
         )

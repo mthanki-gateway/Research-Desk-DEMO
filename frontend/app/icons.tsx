@@ -124,6 +124,18 @@ export const IconQuote = (p: Props) => (
   </Svg>
 );
 
+export const IconThumbUp = (p: Props) => (
+  <Svg {...p}>
+    <path d="M7 20V9m0 0 3.5-6a2 2 0 0 1 2.9 2.4L12.5 9H18a2 2 0 0 1 2 2.3l-1.1 6.4A2 2 0 0 1 17 19.4H7Z" />
+  </Svg>
+);
+
+export const IconThumbDown = (p: Props) => (
+  <Svg {...p}>
+    <path d="M17 4v11m0 0-3.5 6a2 2 0 0 1-2.9-2.4l.9-3.6H6a2 2 0 0 1-2-2.3l1.1-6.4A2 2 0 0 1 7 4.6h10Z" />
+  </Svg>
+);
+
 export const IconSignOut = (p: Props) => (
   <Svg {...p}>
     <path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3" />

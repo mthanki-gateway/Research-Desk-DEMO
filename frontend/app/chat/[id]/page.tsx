@@ -10,6 +10,7 @@ import {
   type TurnOutcome,
   deleteSession,
   getSession,
+  sendFeedback,
   resumeTurn,
   streamTurn,
   updateSession,
@@ -17,7 +18,12 @@ import {
 import { useApp } from "../../providers";
 import { Answer } from "../../answer";
 import { Button, Chip, Fab, TextField } from "../../md";
-import { IconQuote, IconSpinner } from "../../icons";
+import {
+  IconQuote,
+  IconSpinner,
+  IconThumbDown,
+  IconThumbUp,
+} from "../../icons";
 import Clarify from "./clarify";
 import Rail, { type TurnSettings } from "./rail";
 
@@ -281,6 +287,7 @@ function Conversation({ id }: { id: string }) {
           {session?.messages.map((m) => (
             <Turn
               key={m.id}
+              sessionId={id}
               message={m}
               activeChunkId={openChunk?.id ?? null}
               onCite={showChunk}
@@ -450,10 +457,12 @@ function Conversation({ id }: { id: string }) {
 }
 
 function Turn({
+  sessionId,
   message,
   activeChunkId,
   onCite,
 }: {
+  sessionId: string;
   message: ChatMessage;
   activeChunkId: string | null;
   onCite: (chunkId: string) => Promise<void>;
@@ -546,10 +555,79 @@ function Turn({
             narrowed: {meta.clarification}
           </span>
         )}
+        {/* Only when the turn was traced -- otherwise the score would have
+            nowhere to attach and the buttons would silently do nothing. */}
+        {meta.trace_id && <Feedback sessionId={sessionId} messageId={message.id} />}
         {/* Zero citations means nothing in the library supported the answer —
             the shape a hallucination would take, so it gets the error role. */}
         {uncited && <span className="md-badge md-badge-error">no sources cited</span>}
       </div>
     </li>
+  );
+}
+
+/**
+ * Thumbs up/down on one answer.
+ *
+ * The single highest-value quality signal in the whole system, and it costs a
+ * button: it is the only measurement that reflects what the USER thought.
+ * Every model-based metric — faithfulness, relevancy — is a proxy for this.
+ *
+ * Optimistic and irreversible by design. The choice renders immediately, and
+ * there is no undo: a rating is an observation about a moment, and letting
+ * people toggle it back and forth produces noise rather than data. A failed
+ * request is swallowed for the same reason it is fire-and-forget on the API
+ * side — there is nothing useful to tell someone whose feedback did not send,
+ * and interrupting their reading to say so would be worse than losing it.
+ */
+function Feedback({
+  sessionId,
+  messageId,
+}: {
+  sessionId: string;
+  messageId: string;
+}) {
+  const [sent, setSent] = useState<boolean | null>(null);
+
+  function rate(helpful: boolean) {
+    if (sent !== null) return;
+    setSent(helpful);
+    void sendFeedback(sessionId, messageId, helpful).catch(() => {
+      /* ignore — see the note above */
+    });
+  }
+
+  if (sent !== null) {
+    return (
+      <span className="flex items-center gap-1">
+        {sent ? (
+          <IconThumbUp className="h-3.5 w-3.5" />
+        ) : (
+          <IconThumbDown className="h-3.5 w-3.5" />
+        )}
+        Thanks
+      </span>
+    );
+  }
+
+  return (
+    <span className="flex items-center gap-0.5">
+      <button
+        onClick={() => rate(true)}
+        title="This answer was helpful"
+        aria-label="This answer was helpful"
+        className="md-icon-btn md-icon-btn-sm md-state"
+      >
+        <IconThumbUp className="h-3.5 w-3.5" />
+      </button>
+      <button
+        onClick={() => rate(false)}
+        title="This answer was not helpful"
+        aria-label="This answer was not helpful"
+        className="md-icon-btn md-icon-btn-sm md-state"
+      >
+        <IconThumbDown className="h-3.5 w-3.5" />
+      </button>
+    </span>
   );
 }

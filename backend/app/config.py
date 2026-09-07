@@ -129,6 +129,27 @@ class Settings(BaseSettings):
     # harness therefore never pauses and never pays for the check.
     agent_clarify: bool = True
 
+    # --- observability (Langfuse) ---
+    # Empty keys = tracing OFF, and the app behaves exactly as it did before
+    # observability existed. Same pattern as SUPABASE_URL: a feature that
+    # configures itself on rather than needing a separate flag.
+    #
+    # Self-hosted default. Point at https://cloud.langfuse.com for the hosted
+    # service; nothing else changes.
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
+    langfuse_host: str = "http://langfuse:3000"
+
+    @property
+    def tracing_enabled(self) -> bool:
+        return bool(self.langfuse_public_key and self.langfuse_secret_key)
+
+    # Fraction of turns to score with the LLM judge in the background. Judging
+    # is expensive (~113s/question measured) so it CANNOT run inline -- and it
+    # does not need to, because online scoring is for spotting drift across
+    # many turns, not for grading each one.
+    trace_score_sample_rate: float = 0.0
+
     # --- auth (Supabase as identity provider only) ---
     # Empty = auth disabled, and every request runs as an anonymous local user
     # with owner_id None. That keeps the app usable before keys are configured

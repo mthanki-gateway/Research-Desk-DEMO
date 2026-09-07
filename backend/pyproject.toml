@@ -32,6 +32,17 @@ dependencies = [
     # Reads fixtures/golden.yaml. A main dependency rather than a dev one
     # because the /eval endpoint serves the suite to the Lab UI at runtime.
     "pyyaml>=6.0",
+    # observability
+    #
+    # A MAIN dependency, not an extra. Tracing is a production concern -- the
+    # whole point is that it runs where the users are -- and it is inert
+    # without keys, so shipping it costs nothing when unconfigured.
+    "langfuse>=2.53",
+    # Required by langfuse.langchain.CallbackHandler, which imports the
+    # `langchain` meta-package rather than langchain-core. Without it the
+    # handler raises ModuleNotFoundError on import and the whole graph goes
+    # untraced -- which the seam degrades past silently, so it is worth naming.
+    "langchain>=0.3",
 ]
 
 [dependency-groups]

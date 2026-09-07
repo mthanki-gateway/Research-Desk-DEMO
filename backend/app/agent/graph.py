@@ -44,6 +44,7 @@ from app.agent.nodes import (
 )
 from app.agent.state import ResearchState
 from app.config import get_settings
+from app.services import tracing
 from app.services.vectorstore import SearchHit
 
 log = structlog.get_logger()
@@ -232,7 +233,7 @@ def initial_state(
     }
 
 
-def thread_config(thread_id: str | None) -> dict | None:
+def thread_config(thread_id: str | None) -> dict:
     """The checkpointer keys state by thread_id. Without one, no persistence.
 
     Callers pass a thread id scoped to ONE TURN (`<session>:<n>`), not one per
@@ -249,9 +250,18 @@ def thread_config(thread_id: str | None) -> dict | None:
     a crash mid-graph, and `interrupt()` for human-in-the-loop -- not carrying
     the conversation.
     """
-    if not thread_id:
-        return None
-    return {"configurable": {"thread_id": thread_id}}
+    # `callbacks` is what instruments the whole graph: every node becomes a
+    # span, every edge the tree structure. One line, because LangGraph already
+    # fires callbacks at each boundary -- the strongest practical payoff of
+    # having built on it rather than hand-rolling the loop. Empty list when
+    # tracing is unconfigured.
+    #
+    # Returned even with no thread_id, so an un-checkpointed run (the
+    # evaluation harness) is still traced.
+    config: dict = {"callbacks": tracing.callbacks()}
+    if thread_id:
+        config["configurable"] = {"thread_id": thread_id}
+    return config
 
 
 async def run_agent(
@@ -300,11 +310,16 @@ async def resume_agent(thread_id: str, decision: dict) -> AgentResult:
     request, possibly on a different worker, and it works because the state was
     PERSISTED rather than parked in memory.
     """
-    config = thread_config(thread_id)
-    if config is None:
+    # Checked on the ARGUMENT, not on `thread_config(...) is None`.
+    # `thread_config` now always returns a dict (it carries tracing callbacks
+    # even without a thread), so the old `config is None` guard silently
+    # stopped guarding anything.
+    if not thread_id:
         raise ValueError("resume needs a thread_id")
 
-    final = await get_graph().ainvoke(Command(resume=decision), config=config)
+    final = await get_graph().ainvoke(
+        Command(resume=decision), config=thread_config(thread_id)
+    )
     result = AgentResult(final)
     log.info(
         "agent_resumed",

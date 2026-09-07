@@ -15,12 +15,14 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from typing import Any
 
 import httpx
 import structlog
 
 from app.config import get_settings
+from app.services import tracing
 from app.services.limiter import RateLimiter, estimate_tokens
 
 log = structlog.get_logger()
@@ -102,31 +104,100 @@ class GemmaClient:
         # back, since TPM counts both.
         cost = estimate_tokens(prompt) + estimate_tokens(system or "") + max_output_tokens
 
-        last_error: Exception | None = None
-        for attempt in range(4):
-            await self._limiter.acquire(cost)
-            try:
-                resp = await self._client.post(
-                    f"/models/{self._model}:generateContent", json=body
-                )
-                resp.raise_for_status()
-                return _extract_text(resp.json())
-            except httpx.HTTPStatusError as exc:
-                last_error = exc
-                if exc.response.status_code not in (429, 500, 502, 503):
-                    raise LLMError(
-                        f"{exc.response.status_code}: {exc.response.text[:400]}"
-                    ) from exc
-                backoff = 2**attempt * 5
-                log.warning(
-                    "llm_retry",
-                    status=exc.response.status_code,
-                    attempt=attempt + 1,
-                    backoff_s=backoff,
-                )
-                await asyncio.sleep(backoff)
+        # Traced as a GENERATION, not a plain span: that observation type is
+        # what gets Langfuse's token and cost accounting, model breakdown and
+        # latency-per-model charts. The LangChain callback handler cannot see
+        # this call -- it goes over raw httpx, not through LangChain -- which is
+        # exactly why it is instrumented by hand.
+        with tracing.observe(
+            "gemma.generate",
+            as_type="generation",
+            input={"system": system, "prompt": prompt},
+            model=self._model,
+            model_parameters={
+                "temperature": temperature,
+                "top_p": top_p,
+                "max_output_tokens": max_output_tokens,
+                # Whether the call was schema-constrained. Worth a dimension:
+                # the unstructured calls are the ones that degenerate.
+                "structured": bool(schema),
+            },
+        ) as span:
+            last_error: Exception | None = None
+            for attempt in range(4):
+                # Timed here rather than by making `acquire` return a duration:
+                # the limiter's contract stays "block until it fits", and the
+                # measurement is the caller's concern.
+                before = time.perf_counter()
+                await self._limiter.acquire(cost)
+                waited = time.perf_counter() - before
+                try:
+                    resp = await self._client.post(
+                        f"/models/{self._model}:generateContent", json=body
+                    )
+                    resp.raise_for_status()
+                    payload = resp.json()
+                    text = _extract_text(payload)
+                except httpx.HTTPStatusError as exc:
+                    last_error = exc
+                    if exc.response.status_code not in (429, 500, 502, 503):
+                        tracing.update(
+                            span,
+                            level="ERROR",
+                            status_message=f"{exc.response.status_code}",
+                        )
+                        raise LLMError(
+                            f"{exc.response.status_code}: {exc.response.text[:400]}"
+                        ) from exc
+                    backoff = 2**attempt * 5
+                    log.warning(
+                        "llm_retry",
+                        status=exc.response.status_code,
+                        attempt=attempt + 1,
+                        backoff_s=backoff,
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
+                except LLMError as exc:
+                    # A 200 with no usable text: safety block, recitation, or
+                    # MAX_TOKENS with empty parts. The finish reason is the
+                    # actionable part, so it goes on the span.
+                    tracing.update(span, level="ERROR", status_message=str(exc)[:200])
+                    raise
 
-        raise LLMError(f"LLM failed after retries: {last_error}")
+                usage = payload.get("usageMetadata") or {}
+                tracing.update(
+                    span,
+                    output=text,
+                    # Real counts from the provider where available, falling
+                    # back to the estimate the limiter used. Cost analytics is
+                    # only as good as these numbers.
+                    usage_details={
+                        "input": usage.get("promptTokenCount", estimate_tokens(prompt)),
+                        "output": usage.get(
+                            "candidatesTokenCount", estimate_tokens(text)
+                        ),
+                    },
+                    metadata={
+                        "attempts": attempt + 1,
+                        # Seconds spent waiting on this app's own rate limiter.
+                        # Distinguishes "the model was slow" from "we throttled
+                        # ourselves", which look identical in wall-clock latency
+                        # and have completely different fixes.
+                        "throttled_seconds": round(waited, 2),
+                        # RECITATION means the model was reproducing memorised
+                        # text -- in RAG that is a GROUNDING failure, not a
+                        # token-limit problem, and retrying with more tokens is
+                        # the wrong fix. Filterable here.
+                        "finish_reason": (payload.get("candidates") or [{}])[0].get(
+                            "finishReason"
+                        ),
+                    },
+                )
+                return text
+
+            tracing.update(span, level="ERROR", status_message="retries exhausted")
+            raise LLMError(f"LLM failed after retries: {last_error}")
 
     async def generate_json(
         self,

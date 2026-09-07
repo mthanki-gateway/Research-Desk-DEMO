@@ -413,6 +413,8 @@ export type ChatMessage = {
     critique?: string;
     /** Set only when the user was asked to clarify and answered. */
     clarification?: string | null;
+    /** Langfuse trace id. Present only on turns that ran with tracing on. */
+    trace_id?: string | null;
   };
   created_at: string;
 };
@@ -467,6 +469,8 @@ export type DoneEvent = {
   context_chars: number;
   /** What the user said when asked to clarify. Null on an ordinary turn. */
   clarification?: string | null;
+  /** Langfuse trace id, so feedback can be attached to this turn later. */
+  trace_id?: string | null;
 };
 
 export type ClarifyOption = { label: string; description: string };
@@ -595,6 +599,27 @@ export async function resumeTurn(
     answer: decision.action === "answer" ? decision.answer : "",
   });
   return readTurnStream(res, onProgress);
+}
+
+/**
+ * Thumbs up/down on one answer.
+ *
+ * Identified by MESSAGE id -- the server looks up the trace id from the stored
+ * message rather than trusting one from the client, since a client-supplied
+ * trace id would let anyone score any trace.
+ *
+ * Fire-and-forget by design: feedback failing must not interrupt reading the
+ * answer, and there is nothing useful to tell the user if it does.
+ */
+export async function sendFeedback(
+  sessionId: string,
+  messageId: string,
+  helpful: boolean,
+): Promise<void> {
+  await authedJson(`/sessions/${sessionId}/feedback`, "POST", {
+    message_id: messageId,
+    helpful,
+  });
 }
 
 export async function getStats(): Promise<Stats> {

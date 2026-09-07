@@ -13,6 +13,7 @@ from app.api import auth as auth_api
 from app.api import chat, documents, evaluation, sessions
 from app.config import get_settings
 from app.db.session import create_tables
+from app.services import tracing
 from app.services.embeddings import close_embeddings, get_embeddings
 from app.services.llm import close_llm
 from app.services.vectorstore import close_vector_store, get_vector_store
@@ -65,8 +66,17 @@ async def lifespan(app: FastAPI):
     set_graph(build_graph(checkpointer=saver))
     log.info("agent_graph_compiled", checkpointer=saver is not None)
 
+    # Initialised at boot rather than on the first request, so a wrong host or
+    # a bad key shows up in the startup log instead of adding latency to
+    # someone's first question. Returns None and logs when unconfigured.
+    tracing.get_tracer()
+
     yield
 
+    # Flush BEFORE anything else closes. The SDK batches in a background
+    # thread, so a process that exits promptly drops its last traces -- and the
+    # traces most worth having are the ones from just before a shutdown.
+    tracing.flush()
     await close_checkpointer()
     await close_vector_store()
     await close_embeddings()

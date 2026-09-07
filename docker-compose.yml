@@ -58,6 +58,16 @@ services:
       # One-time migration switch; see config.py. The pre-auth corpus has
       # already been adopted, so this stays off.
       ALLOW_CLAIM_UNOWNED: ${ALLOW_CLAIM_UNOWNED:-false}
+      # Observability. Empty = tracing off, and the app behaves exactly as it
+      # did before Langfuse existed. Get these from the project settings page
+      # at http://localhost:3001 after `docker compose --profile obs up -d`.
+      # Defaulted to the headless-init keys below, so `--profile obs up` gives
+      # working tracing with no configuration. Override in .env to point at
+      # Langfuse Cloud instead.
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-pk-lf-research-desk-local}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-sk-lf-research-desk-local}
+      # Container-to-container, so port 3000 not the 3001 published to the host.
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-http://langfuse:3000}
     ports:
       - "8000:8000"
     volumes:
@@ -72,10 +82,21 @@ services:
       # Read-only so ruff/pytest config edits apply without an image rebuild.
       # Dependency changes still need `docker compose up -d --build api`.
       - ./backend/pyproject.toml:/app/pyproject.toml:ro
-      # uv.lock is WRITABLE, unlike pyproject. `uv lock` inside the container
-      # must land on the host or the committed lock silently goes stale and
-      # CI's `uv sync --frozen` fails on the next dependency change. That
-      # already happened once and needed a `docker compose cp` to recover.
+      # uv.lock is mounted WRITABLE, unlike pyproject, so the lock the
+      # container resolves can be recovered.
+      #
+      # ⚠️ Mounting it does NOT make `uv lock` land on the host. uv writes the
+      # lock by creating a temp file and RENAMING it over the target, and a
+      # rename over a bind-mounted *single file* replaces the mount point
+      # inside the container only -- the host file is untouched. This has now
+      # bitten twice. The lock silently stays stale, and the failure surfaces
+      # much later as CI's `uv sync --frozen` refusing to install a dependency
+      # that is in pyproject.toml but not the lock.
+      #
+      # After changing dependencies, ALWAYS:
+      #     docker compose exec api uv lock
+      #     docker compose cp api:/app/uv.lock backend/uv.lock
+      #     docker compose build api
       - ./backend/uv.lock:/app/uv.lock
       - hfcache:/root/.cache/huggingface # persist fastembed model download
     restart: unless-stopped
@@ -107,6 +128,147 @@ services:
     depends_on:
       - api
 
+  # ==========================================================================
+  # Langfuse — LLM observability.  docker compose --profile obs up -d
+  # Then http://localhost:3001 (sign up locally, create a project, copy keys).
+  #
+  # Behind a PROFILE so it does not start by default: it is four containers,
+  # and the app is fully functional without it (no keys = tracing off).
+  #
+  # v3+ splits ingestion from serving, which is why there are two Langfuse
+  # containers plus ClickHouse (analytics store), Redis (queue) and MinIO
+  # (event blobs).
+  #
+  # It gets its OWN Postgres rather than a second database inside the app's.
+  # Sharing looked tidier and is worse: /docker-entrypoint-initdb.d only runs
+  # when the data directory is EMPTY, so on any existing volume the extra
+  # database silently never gets created and Langfuse fails its migration with
+  # an error that does not mention the database. Separate also means Langfuse
+  # migrations can never touch application data.
+  # ==========================================================================
+  langfuse:
+    image: langfuse/langfuse:3
+    profiles: ["obs"]
+    ports:
+      - "3001:3000"
+    environment: &langfuse_env
+      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-postgres:5432/langfuse
+      # Local-development values only; any real deployment needs real secrets.
+      #
+      # ENCRYPTION_KEY is QUOTED, and it has to be. Unquoted, YAML parses a
+      # run of digits as an INTEGER, so 64 zeros reached Langfuse as "0" and it
+      # refused to boot with "must be 256 bits, 64 string characters in hex".
+      # Generate a real one with: openssl rand -hex 32
+      SALT: local_dev_salt
+      ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      NEXTAUTH_SECRET: local_dev_secret
+      NEXTAUTH_URL: http://localhost:3001
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      REDIS_CONNECTION_STRING: redis://redis:6379
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: minio_password
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      TELEMETRY_ENABLED: "false"
+      # HEADLESS INIT. Creates the org, project, login user and -- the useful
+      # part -- API keys with values we choose, so the api container below can
+      # hardcode the same ones and tracing works on first boot with no signing
+      # up and no copying keys out of the UI.
+      #
+      # Only run once, against an empty Langfuse database. Safe to leave set.
+      LANGFUSE_INIT_ORG_ID: local
+      LANGFUSE_INIT_ORG_NAME: Local
+      LANGFUSE_INIT_PROJECT_ID: research-desk
+      LANGFUSE_INIT_PROJECT_NAME: Research Desk
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: pk-lf-research-desk-local
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: sk-lf-research-desk-local
+      # Log in at http://localhost:3001 with these.
+      # Needs a real-looking address: the validator requires a TLD, and
+      # `dev@local` fails with an unhelpful "Invalid input".
+      LANGFUSE_INIT_USER_EMAIL: dev@example.com
+      LANGFUSE_INIT_USER_NAME: Dev
+      LANGFUSE_INIT_USER_PASSWORD: localdev123
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      redis:
+        condition: service_started
+
+  # The async ingestion worker. Traces arrive at `langfuse` over HTTP, land in
+  # Redis, and this drains them into ClickHouse -- so without it the UI runs
+  # but no trace ever appears, which is a confusing way to debug.
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    profiles: ["obs"]
+    environment: *langfuse_env
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+
+  langfuse-postgres:
+    image: postgres:16-alpine
+    profiles: ["obs"]
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse
+      POSTGRES_DB: langfuse
+    volumes:
+      - langfusedata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.9
+    profiles: ["obs"]
+    environment:
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_DB: default
+    volumes:
+      - clickhousedata:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "localhost:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    profiles: ["obs"]
+
+  minio:
+    image: minio/minio:latest
+    profiles: ["obs"]
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio_password
+    # The bucket must exist before Langfuse writes to it, and MinIO has no
+    # declarative way to create one, so it is made as a directory under the
+    # data root before the server starts.
+    #
+    # ENTRYPOINT must be overridden, not just command: the image entrypoint is
+    # `minio` itself, so a bare command turns into arguments to it and the
+    # container dies with "'sh' is not a minio sub-command".
+    entrypoint: ["sh", "-c"]
+    command: ["mkdir -p /data/langfuse && minio server /data"]
+    volumes:
+      - miniodata:/data
+
   # Optional DB browser:  docker compose --profile tools up -d pgweb
   # Then http://localhost:8081 -- NO LOGIN, NO CREDENTIALS. It connects using
   # DATABASE_URL below and opens straight onto the schema.
@@ -135,3 +297,6 @@ volumes:
   pgdata:
   qdrantdata:
   hfcache:
+  clickhousedata:
+  miniodata:
+  langfusedata:
