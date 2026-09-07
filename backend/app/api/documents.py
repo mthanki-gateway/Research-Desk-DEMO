@@ -189,7 +189,7 @@ async def search(
 
     This exists to inspect retrieval on its own. When an answer is wrong, this
     is how you tell whether retrieval or generation is at fault -- and it's the
-    cheap way to compare multi_query on/off without spending a Gemma call on
+    cheap way to compare multi_query on/off without spending a model call on
     the answer.
     """
     hits = await retrieve(

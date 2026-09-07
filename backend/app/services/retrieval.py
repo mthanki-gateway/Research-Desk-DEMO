@@ -208,7 +208,11 @@ async def expand_query(
         f"Request: {question}"
     )
     try:
-        raw = await get_llm().generate(
+        # The REWRITER model, not the workhorse. Query rewriting is the one
+        # call where throughput beats quality: it fires N times per turn, emits
+        # short phrases rather than prose, and nothing a user reads comes from
+        # it -- so it stays on the model with the largest request budget.
+        raw = await get_llm(settings.rewriter_model).generate(
             prompt,
             schema=VARIATIONS_SCHEMA,
             system=VARIATIONS_SYSTEM,
@@ -352,23 +356,49 @@ async def retrieve(
     k = top_k or settings.retrieval_top_k
     use_multi = settings.multi_query if multi_query is None else multi_query
 
-    if not use_multi:
+    # INTENT IS CLASSIFIED EVEN WITH MULTI-QUERY OFF.
+    #
+    # The gap this closes: `scope` (specific vs broad) used to be produced only
+    # on the multi-query path, so with the toggle off a request like
+    # "summarize this document" went straight to a single dense search for the
+    # literal phrase -- and "summarize" describes an ACTION that shares no
+    # meaning with the document's contents, so it retrieves arbitrary passages.
+    # The exact failure the classifier exists to prevent was reachable by
+    # turning off an unrelated switch.
+    #
+    # Scope and the rewrites come from the SAME model call, so intent cannot be
+    # had without paying for the rewrite. That is why this is one call either
+    # way, and why the toggle now controls FAN-OUT rather than whether the
+    # query is understood at all.
+    #
+    # A broad request then uses the topic queries regardless of the toggle: a
+    # single search structurally cannot serve "tell me about the whole
+    # document", so honouring `multi_query=False` there would mean honouring a
+    # setting into a known-bad result.
+    classify = use_multi or settings.intent_always
+    expansion = Expansion.empty()
+    if classify:
+        # The outline is fetched before rewriting so the rewriter can target
+        # real sections. One SQL query, and [] on any failure.
+        outline = await document_outline(document_ids, owner_id)
+        expansion = await expand_query(query, outline=outline)
+
+    fan_out = use_multi or (expansion.broad and bool(expansion.variations))
+
+    if not fan_out:
         hits = await _search_one(
             query, limit=k, document_ids=document_ids, owner_id=owner_id
         )
         log.info(
             "retrieved",
             mode="single",
+            scope="broad" if expansion.broad else "specific",
+            classified=classify,
             query=query[:60],
             n=len(hits),
             top_score=round(hits[0].score, 4) if hits else None,
         )
         return hits
-
-    # The outline is fetched before rewriting so the rewriter can target real
-    # sections. One SQL query, and [] on any failure.
-    outline = await document_outline(document_ids, owner_id)
-    expansion = await expand_query(query, outline=outline)
 
     # For a BROAD request the original question is dropped from the query set.
     # This is not a tidy-up -- keeping it actively poisons the results. RRF
@@ -427,10 +457,23 @@ def build_context(hits: list[SearchHit]) -> str:
     """
     blocks: list[str] = []
     for i, hit in enumerate(hits, start=1):
-        where = hit.filename
-        if hit.heading:
-            where += f" › {hit.heading.lstrip('# ').strip()}"
-        if hit.page is not None:
-            where += f" › p.{hit.page}"
+        # EVERY source carries its kind, not just the web ones.
+        #
+        # It used to label only `web`, leaving an unlabelled source to mean
+        # "document" by omission. That was fine while documents were the whole
+        # universe and the web was the exception. They are peers now, so the
+        # asymmetry actively misleads: the drafter is asked to tell the reader
+        # where each fact came from, and it cannot do that reliably from a
+        # marking that is present on one kind and absent on the other.
+        if hit.source == "web":
+            where = f"web · {hit.filename}"
+            if hit.url:
+                where += f" · {hit.url}"
+        else:
+            where = f"document · {hit.filename}"
+            if hit.heading:
+                where += f" › {hit.heading.lstrip('# ').strip()}"
+            if hit.page is not None:
+                where += f" › p.{hit.page}"
         blocks.append(f"[{i}] {where}\n{hit.text}")
     return "\n\n".join(blocks)

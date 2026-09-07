@@ -7,6 +7,7 @@ import {
   useId,
   useRef,
   useState,
+  type AnchorHTMLAttributes,
   type ButtonHTMLAttributes,
   type InputHTMLAttributes,
 } from "react";
@@ -170,6 +171,30 @@ export function Fab({
     >
       {children}
     </button>
+  );
+}
+
+/**
+ * A chip that navigates. Same visual role as `Chip`, but an anchor rather than
+ * a button, because a web citation's job is to take the reader to a URL --
+ * ctrl-click, middle-click and "copy link address" have to work, and a button
+ * calling window.open gives up all three. No ripple: the page is leaving.
+ */
+export function LinkChip({
+  size = "md",
+  className = "",
+  children,
+  ...rest
+}: AnchorHTMLAttributes<HTMLAnchorElement> & { size?: "sm" | "md" }) {
+  return (
+    <a
+      className={`md-chip md-state no-underline ${
+        size === "sm" ? "md-chip-sm" : ""
+      } ${className}`}
+      {...rest}
+    >
+      {children}
+    </a>
   );
 }
 

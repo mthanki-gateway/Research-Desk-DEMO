@@ -17,6 +17,7 @@ from app.services import tracing
 from app.services.embeddings import close_embeddings, get_embeddings
 from app.services.llm import close_llm
 from app.services.vectorstore import close_vector_store, get_vector_store
+from app.services.websearch import close_web_search
 
 settings = get_settings()
 
@@ -43,6 +44,8 @@ async def lifespan(app: FastAPI):
         env=settings.app_env,
         docs=settings.docs_enabled,
         llm=settings.llm_model,
+        answer_model=settings.answer_model,
+        rewriter=settings.rewriter_model,
         embeddings=f"{settings.embedding_provider}:{settings.embedding_model}",
         qdrant=settings.qdrant_url,
     )
@@ -78,6 +81,7 @@ async def lifespan(app: FastAPI):
     # traces most worth having are the ones from just before a shutdown.
     tracing.flush()
     await close_checkpointer()
+    await close_web_search()
     await close_vector_store()
     await close_embeddings()
     await close_llm()

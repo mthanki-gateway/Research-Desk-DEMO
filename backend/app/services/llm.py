@@ -1,18 +1,33 @@
-"""Gemma client.
+"""Google Generative Language client. One instance per model, each rate-limited.
 
-Gemma 4 does NOT support native function-calling -- given tool declarations it
-narrates what it would do in prose. It DOES honour generationConfig.
-responseSchema, so every structured step in this app goes through a JSON schema
-instead of a tool call. Never use responseMimeType without a schema: Gemma
-emits its own reasoning trace instead of the object.
+Model-agnostic: it speaks the plain generateContent REST API, so the same class
+serves Gemini Flash, Flash Lite and Gemma. Which model a given call uses is a
+config decision (see `Settings.limits_for`), not a code one.
 
-Shares no quota with embeddings. Gemma is 30 RPM / 16K TPM on its own budget,
-so it gets its own limiter.
+WHY ONE CLIENT PER MODEL
+Free-tier request quota is PER MODEL -- 5/min for the full Flash models, 15 for
+Flash Lite, 30 for Gemma -- so each needs its own token bucket. Sharing one
+would throttle every call on the strictest limit.
+
+STRUCTURED OUTPUT
+Every structured step goes through generationConfig.responseSchema. Never use
+responseMimeType without a schema: the model emits its own reasoning trace
+instead of the object.
+
+Verified live on this key, and the reason the model split looks the way it does:
+gemini-3.5-flash VIOLATES a responseSchema (it returned "Here is the JSON
+requested:" as prose), while gemini-3.8-flash and gemini-3.5-flash-lite honour
+it exactly. Every Gemini Flash model here reports a 1,048,576-token input
+window and supports native functionDeclarations -- unlike Gemma, which narrates
+tool use as prose, which is why schemas remain the mechanism.
+
+Shares no quota with embeddings, which have their own limiter.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import re
 import time
@@ -34,13 +49,12 @@ class LLMError(RuntimeError):
     pass
 
 
-class GemmaClient:
+class GenAIClient:
     """A Google Generative Language client for ONE model, with its own limiter.
 
-    Named for Gemma because that is what it was written against, but it speaks
-    the plain generateContent REST API and works for any model on the key --
-    including the Gemini Flash Lite models used for judging, whose quota shape
-    is completely different.
+    Was `GemmaClient`. Renamed because it now serves Gemini for everything a
+    user sees and Gemma only for query rewriting -- a class named after one
+    model while serving three is a comment that lies.
     """
 
     def __init__(
@@ -86,11 +100,13 @@ class GemmaClient:
             "generationConfig": {
                 "temperature": temperature,
                 "maxOutputTokens": max_output_tokens,
-                # Gemma 4 is prone to repetition loops -- it once emitted
-                # "way's actually" a dozen times until it hit the token cap,
-                # producing truncated JSON. The API exposes no repetition
-                # penalty, so nucleus sampling plus a low temperature is the
-                # available defence.
+                # Repetition loops are the characteristic failure of the
+                # smaller models here -- Gemma once emitted "way's actually" a
+                # dozen times until it hit the token cap, producing truncated
+                # JSON, and later several hundred "the-the". The API exposes no
+                # repetition penalty, so nucleus sampling plus a low
+                # temperature is the available defence, and
+                # `strip_degeneration` below is the net underneath it.
                 "topP": top_p,
             },
         }
@@ -110,7 +126,7 @@ class GemmaClient:
         # this call -- it goes over raw httpx, not through LangChain -- which is
         # exactly why it is instrumented by hand.
         with tracing.observe(
-            "gemma.generate",
+            "genai.generate",
             as_type="generation",
             input={"system": system, "prompt": prompt},
             model=self._model,
@@ -198,6 +214,106 @@ class GemmaClient:
 
             tracing.update(span, level="ERROR", status_message="retries exhausted")
             raise LLMError(f"LLM failed after retries: {last_error}")
+
+    async def generate_tools(
+        self,
+        contents: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]],
+        system: str | None = None,
+        temperature: float = 0.0,
+        max_output_tokens: int = 1500,
+    ) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
+        """One round of native tool calling.
+
+        Returns `(function_calls, text, raw_model_content)`:
+
+        * `function_calls` -- what the model wants executed, each
+          `{"name": str, "args": dict}`. Empty when it is done and answering.
+        * `text` -- any prose parts, which is the final answer once it stops
+          calling tools.
+        * `raw_model_content` -- the model's own `content` block, which the
+          CALLER MUST append to `contents` before adding tool results. The
+          conversation has to contain the request as well as the response or
+          the model loses track of what it asked for.
+
+        Native functionDeclarations, not a text protocol. The original ReAct
+        parsed `Thought:/Action:` out of a completion, which is brittle and the
+        source of endless "could not parse LLM output" errors. Gemini returns a
+        structured `functionCall` part instead -- verified live on this key.
+        Gemma cannot do this at all: given tool declarations it narrates what
+        it would do in prose, which is why this exists only now.
+        """
+        body: dict[str, Any] = {
+            "contents": contents,
+            "tools": tools,
+            "generationConfig": {
+                "temperature": temperature,
+                "maxOutputTokens": max_output_tokens,
+            },
+        }
+        if system:
+            body["systemInstruction"] = {"parts": [{"text": system}]}
+
+        # Rough: the whole conversation grows each round, so cost is charged on
+        # the current transcript rather than one prompt.
+        cost = sum(
+            estimate_tokens(part.get("text", ""))
+            for message in contents
+            for part in message.get("parts", [])
+        ) + estimate_tokens(system or "") + max_output_tokens
+
+        with tracing.observe(
+            "genai.tools",
+            as_type="generation",
+            input=contents[-1] if contents else None,
+            model=self._model,
+            model_parameters={
+                "temperature": temperature,
+                "max_output_tokens": max_output_tokens,
+                "n_tools": sum(len(t.get("functionDeclarations", [])) for t in tools),
+            },
+        ) as span:
+            await self._limiter.acquire(cost)
+            try:
+                resp = await self._client.post(
+                    f"/models/{self._model}:generateContent", json=body
+                )
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                tracing.update(
+                    span, level="ERROR", status_message=str(exc.response.status_code)
+                )
+                raise LLMError(
+                    f"{exc.response.status_code}: {exc.response.text[:400]}"
+                ) from exc
+
+            payload = resp.json()
+            candidates = payload.get("candidates") or []
+            if not candidates:
+                feedback = payload.get("promptFeedback", {})
+                tracing.update(span, level="ERROR", status_message="no candidates")
+                raise LLMError(f"no candidates returned (promptFeedback={feedback})")
+
+            content = candidates[0].get("content") or {}
+            parts = content.get("parts") or []
+            calls = [p["functionCall"] for p in parts if "functionCall" in p]
+            text = "".join(p.get("text", "") for p in parts).strip()
+
+            usage = payload.get("usageMetadata") or {}
+            tracing.update(
+                span,
+                output={"calls": calls, "text": text},
+                usage_details={
+                    "input": usage.get("promptTokenCount", 0),
+                    "output": usage.get("candidatesTokenCount", 0),
+                },
+                metadata={
+                    "n_calls": len(calls),
+                    "finish_reason": candidates[0].get("finishReason"),
+                },
+            )
+            return calls, strip_degeneration(text), content
 
     async def generate_json(
         self,
@@ -310,15 +426,31 @@ def strip_degeneration(text: str) -> str:
     # a table separator. Requiring the run to reach the end removes that whole
     # class of false positive. The trailing slack absorbs a final unit that
     # truncation cut in half.
+    unit = None
     start = None
     for match in _DEGENERATION.finditer(tail):
         if match.end() >= len(tail) - _MAX_UNIT:
+            unit = match.group(1)
             start = match.start()
             break
-    if start is None:
+    if unit is None or start is None:
         return text
 
-    cut = (head + tail[:start]).rstrip()
+    # EXTEND BACKWARDS past the scan window.
+    #
+    # The window bounds the regex, not the run. A loop longer than the window
+    # begins before it, and cutting at the window boundary left the earlier
+    # part in place: measured 3364 chars in, 1363 out, with ~1200 characters of
+    # "the-the the-the ..." still in the answer the user read.
+    #
+    # The unit the regex found may be a rotation of the true period, which does
+    # not matter -- a periodic string repeats under any rotation of its period.
+    cut_at = len(head) + start
+    step = len(unit)
+    while cut_at - step >= 0 and text[cut_at - step : cut_at] == unit:
+        cut_at -= step
+
+    cut = text[:cut_at].rstrip()
     # A loop starting in the first few characters means there is no real answer
     # to salvage; returning "" lets the caller say so honestly rather than
     # showing a fragment.
@@ -361,6 +493,81 @@ def extract_string(raw: str, key: str) -> str:
     except json.JSONDecodeError:
         value = value.replace('\\"', '"').replace("\\n", "\n").replace("\\\\", "\\")
     return strip_degeneration(value.strip())
+
+
+def extract_object_list(raw: str, key: str) -> list[dict]:
+    """Pull a list of OBJECTS out of possibly-truncated JSON.
+
+    The object-array counterpart to `extract_string_list`, and it exists for a
+    measured failure: the clarify node asks for 2-4 `{label, description}`
+    options, Gemma degenerated inside the THIRD description, and the truncated
+    document took `ambiguous: true` and two complete, usable options down with
+    it. The turn then ran without pausing -- so a repetition loop in a field
+    nobody reads silently disabled the feature.
+
+    Scans the named array brace-by-brace and keeps only objects that closed.
+    The truncated final one simply never balances, so it is skipped.
+    """
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            items = data.get(key, [])
+            return [x for x in items if isinstance(x, dict)]
+    except json.JSONDecodeError:
+        pass
+
+    start = re.search(rf'"{re.escape(key)}"\s*:\s*\[', raw)
+    if not start:
+        return []
+
+    out: list[dict] = []
+    depth = 0
+    begin = -1
+    in_string = False
+    escaped = False
+    for i in range(start.end(), len(raw)):
+        ch = raw[i]
+        # String-aware, so a brace inside a description does not shift depth.
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            if depth == 0:
+                begin = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and begin >= 0:
+                with contextlib.suppress(json.JSONDecodeError):
+                    parsed = json.loads(raw[begin : i + 1])
+                    if isinstance(parsed, dict):
+                        out.append(parsed)
+                begin = -1
+        elif ch == "]" and depth == 0:
+            break
+    return out
+
+
+def extract_bool(raw: str, key: str, *, default: bool = False) -> bool:
+    """Pull a boolean out of possibly-truncated JSON."""
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict) and isinstance(data.get(key), bool):
+            return data[key]
+    except json.JSONDecodeError:
+        pass
+
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*(true|false)', raw, re.IGNORECASE)
+    if match:
+        return match.group(1).lower() == "true"
+    return default
 
 
 def extract_int_list(raw: str, key: str) -> list[int]:
@@ -441,10 +648,10 @@ def _extract_text(payload: dict[str, Any]) -> str:
 #
 # Routing follows the shapes: small frequent calls (plan, query expansion) to
 # Gemma, large context-carrying calls (draft, critique, judging) to Flash Lite.
-_clients: dict[str, GemmaClient] = {}
+_clients: dict[str, GenAIClient] = {}
 
 
-def get_llm(model: str | None = None) -> GemmaClient:
+def get_llm(model: str | None = None) -> GenAIClient:
     """Client for `model`, defaulting to `settings.llm_model`.
 
     Cached per model name so the limiter state persists across calls -- a fresh
@@ -455,7 +662,7 @@ def get_llm(model: str | None = None) -> GemmaClient:
     name = model or settings.llm_model
     if name not in _clients:
         rpm, tpm = settings.limits_for(name)
-        _clients[name] = GemmaClient(model=name, requests_per_minute=rpm, tokens_per_minute=tpm)
+        _clients[name] = GenAIClient(model=name, requests_per_minute=rpm, tokens_per_minute=tpm)
         log.info("llm_ready", model=name, rpm=rpm, tpm=tpm)
     return _clients[name]
 

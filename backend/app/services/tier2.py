@@ -168,6 +168,19 @@ async def _generate(
             top_k=top_k,
             owner_id=owner_id,
             multi_query=multi_query,
+            # PINNED, not left to REACT_DEFAULT -- and this is load-bearing.
+            #
+            # "agent" in this harness means the plan/retrieve/draft/critique
+            # graph. That is what every recorded recall, faithfulness and
+            # iteration number measures. When REACT_DEFAULT flipped to true,
+            # omitting this silently changed what "agent" meant, so old and
+            # new runs would sit in the same table measuring different
+            # systems. A config default must never be able to redefine the
+            # thing under test.
+            react=False,
+            # Likewise: the harness answers questions, it does not converse,
+            # so a paused turn would score as an empty answer.
+            clarify=False,
         )
         return GeneratedAnswer(
             question_id=question.id,

@@ -15,7 +15,10 @@ The judge is a DIFFERENT model from the one under test
 (`settings.judge_model`, default gemini-3.5-flash-lite):
 
 * models show a documented self-preference bias when grading their own output;
-* Gemma is both the weaker judge and the component being measured;
+* the model under test must not grade itself. The ANSWER comes from
+  `settings.answer_model` (gemini-3.6-flash); this judge is a different model,
+  and that separation is the invariant -- if the two are ever pointed at the
+  same id, Tier 2 measures self-preference rather than faithfulness;
 * the quota shapes suit the split. Judging sends the answer plus every
   retrieved chunk, which is large, and Flash Lite allows 250K tokens/minute
   against Gemma's 16K.

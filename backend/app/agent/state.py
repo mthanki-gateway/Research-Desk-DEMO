@@ -60,6 +60,10 @@ class ResearchState(TypedDict, total=False):
     # node, so a single compiled graph serves both modes and the choice is per
     # REQUEST -- which is what makes it comparable in the Lab.
     clarify: bool
+    # Gather evidence with the ReAct tool-calling loop instead of plan +
+    # retrieve. Per REQUEST, so one compiled graph serves both strategies and
+    # they stay comparable in the Lab.
+    react: bool
 
     # --- working state ---
     # Queries the next retrieve pass should run. `plan` fills it from the

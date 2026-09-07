@@ -17,7 +17,13 @@ from dataclasses import dataclass
 
 import structlog
 
-from app.services.llm import extract_int_list, extract_string, get_llm
+from app.config import get_settings
+from app.services.llm import (
+    extract_int_list,
+    extract_string,
+    get_llm,
+    is_repetitive,
+)
 from app.services.retrieval import build_context, retrieve
 from app.services.vectorstore import SearchHit
 
@@ -103,7 +109,7 @@ async def answer_question(
     # Gemma repetition loop runs until the token cap and truncates the JSON,
     # and a strict parse throws away an answer that was complete before the
     # loop started. See `strip_degeneration` in llm.py.
-    raw = await get_llm().generate(
+    raw = await get_llm(get_settings().answer_model).generate(
         PROMPT.format(context=build_context(hits), question=question),
         schema=ANSWER_SCHEMA,
         system=SYSTEM,
@@ -113,8 +119,11 @@ async def answer_question(
 
     answer = extract_string(raw, "answer")
     sources_used = extract_int_list(raw, "sources_used")
-    if not answer:
+    # `is_repetitive` as well as emptiness: cutting a trailing loop is not the
+    # same as judging what survived. See the draft node.
+    if not answer or is_repetitive(answer):
         answer = "The model did not return a usable answer. Try asking again."
+        sources_used = []
 
     log.info(
         "rag_answered",

@@ -124,6 +124,13 @@ export const IconQuote = (p: Props) => (
   </Svg>
 );
 
+/** Marks a citation that leaves the app — a web source, not a document chunk. */
+export const IconExternal = (p: Props) => (
+  <Svg {...p}>
+    <path d="M14 4h6v6M20 4l-8 8M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4" />
+  </Svg>
+);
+
 export const IconThumbUp = (p: Props) => (
   <Svg {...p}>
     <path d="M7 20V9m0 0 3.5-6a2 2 0 0 1 2.9 2.4L12.5 9H18a2 2 0 0 1 2 2.3l-1.1 6.4A2 2 0 0 1 17 19.4H7Z" />

@@ -42,6 +42,7 @@ from app.agent.nodes import (
 from app.agent.nodes import (
     clarify as clarify_node,
 )
+from app.agent.react import react
 from app.agent.state import ResearchState
 from app.config import get_settings
 from app.services import tracing
@@ -70,6 +71,17 @@ def should_continue(state: ResearchState) -> Literal["retrieve", "__end__"]:
     return "retrieve"
 
 
+def gather_strategy(state: ResearchState) -> Literal["react", "plan"]:
+    """Which evidence-gathering strategy this turn uses.
+
+    `plan` decomposes every lookup up front; `react` lets the model choose each
+    one after seeing the last result. The second is what multi-hop needs -- you
+    cannot look up a company before a search names it -- and the first is what
+    the evaluation harness measures, so both stay.
+    """
+    return "react" if state.get("react") else "plan"
+
+
 def needs_human(state: ResearchState) -> Literal["ask_human", "plan"]:
     """Ask the user only when `clarify` actually produced a question.
 
@@ -77,17 +89,21 @@ def needs_human(state: ResearchState) -> Literal["ask_human", "plan"]:
     written to state, and the router just reads the verdict. Routers stay pure
     so control flow is testable without a model.
     """
-    return "ask_human" if state.get("pending_clarification") else "plan"
+    if state.get("pending_clarification"):
+        return "ask_human"
+    return gather_strategy(state)  # type: ignore[return-value]
 
 
-def after_human(state: ResearchState) -> Literal["plan", "__end__"]:
+def after_human(state: ResearchState) -> Literal["react", "plan", "__end__"]:
     """The user declined to answer, so nothing is searched.
 
     Separate from `should_continue` because they answer different questions:
     this one is "did the user stop us", that one is "is the answer good
     enough".
     """
-    return END if state.get("cancelled") else "plan"
+    if state.get("cancelled"):
+        return END
+    return gather_strategy(state)
 
 
 def build_graph(checkpointer=None):
@@ -96,18 +112,24 @@ def build_graph(checkpointer=None):
     builder.add_node("clarify", clarify_node)
     builder.add_node("ask_human", ask_human)
     builder.add_node("plan", plan)
+    builder.add_node("react", react)
     builder.add_node("retrieve", retrieve_node)
     builder.add_node("draft", draft)
     builder.add_node("critique", critique)
 
     builder.add_edge(START, "clarify")
     builder.add_conditional_edges(
-        "clarify", needs_human, {"ask_human": "ask_human", "plan": "plan"}
+        "clarify",
+        needs_human,
+        {"ask_human": "ask_human", "plan": "plan", "react": "react"},
     )
     builder.add_conditional_edges(
-        "ask_human", after_human, {"plan": "plan", END: END}
+        "ask_human", after_human, {"plan": "plan", "react": "react", END: END}
     )
     builder.add_edge("plan", "retrieve")
+    # ReAct does its own retrieval through tools, so it goes STRAIGHT to
+    # drafting -- it produces the evidence that `retrieve` would have.
+    builder.add_edge("react", "draft")
     builder.add_edge("retrieve", "draft")
     builder.add_edge("draft", "critique")
     builder.add_conditional_edges(
@@ -195,6 +217,7 @@ def initial_state(
     multi_query: bool | None = None,
     chat_context: str = "",
     clarify: bool | None = None,
+    react: bool | None = None,
     resumable: bool = True,
 ) -> ResearchState:
     settings = get_settings()
@@ -218,6 +241,9 @@ def initial_state(
         "multi_query": multi_query,
         "chat_context": chat_context,
         "clarify": ask,
+        "react": (
+            settings.react_default if react is None else react
+        ),
         "cancelled": False,
         # These cannot be reset by passing []: `evidence`, `sub_questions`,
         # `tried_queries` and `trace` all have append-style reducers, and a
@@ -274,6 +300,7 @@ async def run_agent(
     chat_context: str = "",
     thread_id: str | None = None,
     clarify: bool | None = None,
+    react: bool | None = None,
 ) -> AgentResult:
     state = initial_state(
         question,
@@ -283,6 +310,7 @@ async def run_agent(
         multi_query=multi_query,
         chat_context=chat_context,
         clarify=clarify,
+        react=react,
         resumable=bool(thread_id),
     )
     final = await get_graph().ainvoke(state, config=thread_config(thread_id))
@@ -341,6 +369,7 @@ async def stream_agent(
     chat_context: str = "",
     thread_id: str | None = None,
     clarify: bool | None = None,
+    react: bool | None = None,
 ):
     """Yield (kind, node_name, payload) as each node completes.
 
@@ -360,6 +389,7 @@ async def stream_agent(
         multi_query=multi_query,
         chat_context=chat_context,
         clarify=clarify,
+        react=react,
         resumable=bool(thread_id),
     )
     async for item in _astream(state, thread_id):

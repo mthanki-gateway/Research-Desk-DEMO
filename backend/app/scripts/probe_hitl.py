@@ -84,7 +84,16 @@ async def probe(action: str, *, real: bool, owner: str | None, question: str) ->
         stub.start()
     try:
         first = await run_agent(
-            question, thread_id=thread_id, owner_id=owner, clarify=True
+            question,
+            thread_id=thread_id,
+            owner_id=owner,
+            clarify=True,
+            # Pinned: the stub above patches `app.agent.nodes.get_llm`, and the
+            # ReAct node holds its own reference in `app.agent.react`. Left to
+            # REACT_DEFAULT this probe would route through an UNSTUBBED model
+            # and start making real calls -- which is the opposite of what a
+            # `--real`-gated script should do by default.
+            react=False,
         )
 
         if not first.paused:

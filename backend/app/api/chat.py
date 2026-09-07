@@ -76,6 +76,8 @@ def _to_out(h) -> SearchHitOut:
         meta=h.meta,
         rrf_score=h.rrf_score,
         found_by=h.found_by,
+        source=h.source,
+        url=h.url,
     )
 
 
@@ -99,7 +101,7 @@ async def research(
     """The LangGraph agent: plan → retrieve → draft → critique → (loop).
 
     Same inputs as /ask, so the two can be compared directly on one question.
-    Costs ~3 Gemma calls, or ~5 if the critic sends it round again.
+    Costs ~3 model calls, or ~5 if the critic sends it round again.
     """
     try:
         result = await run_agent(
@@ -108,6 +110,11 @@ async def research(
             document_ids=req.document_ids,
             owner_id=user.owner_id,
             multi_query=req.multi_query,
+            # Pinned so this endpoint keeps meaning what its docstring says.
+            # It exists to be compared against /ask on one question, and a
+            # comparison whose shape moves with a config default is not a
+            # comparison. The chat UI is where ReAct is exposed.
+            react=False,
         )
     except LLMError as exc:
         log.warning("research_failed", error=str(exc))

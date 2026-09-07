@@ -30,13 +30,60 @@ class Settings(BaseSettings):
         return self.app_env == "dev"
 
     # --- Google AI Studio ---
+    #
+    # THREE models, and the split is measured rather than aesthetic. Free-tier
+    # request limits are per model, so the question is not "which model is
+    # best" but "which model can this call afford".
+    #
+    #   model                   rpm  schema      availability   used for
+    #   gemini-3.6-flash          5  strict      3/3            the ANSWER
+    #   gemini-3.5-flash-lite    15  strict      3/3            plan/clarify/critique
+    #   gemma-4-26b              30  strict      ok             query rewriting only
+    #   gemini-3.8-flash          5  strict      503 under load  --
+    #   gemini-3.7-flash          5  --          503             --
+    #   gemini-flash-latest       5  --          503 (0/3)       --
+    #   gemini-3.5-flash          5  VIOLATED    ok              --
+    #
+    # Two findings worth keeping, both measured live on this key rather than
+    # read off a docs page:
+    #
+    # 1. gemini-3.5-flash VIOLATES a responseSchema -- it returned "Here is the
+    #    JSON requested:" as prose -- so it is unusable for structured output
+    #    whatever its quota.
+    # 2. The newest is not the most available. 3.8-flash passed an isolated
+    #    schema test and then returned 503 for a real draft call; flash-latest
+    #    was 503 on all three attempts. 3.6-flash was 3/3 on both counts, which
+    #    is why it holds the one job a user actually reads.
     google_api_key: str = ""
-    llm_model: str = "models/gemma-4-26b-a4b-it"
-    llm_tokens_per_minute: int = 16_000
-    llm_requests_per_minute: int = 30
-    # Gemma 4 ignores tool/functionDeclarations (it narrates tool use as prose)
-    # but honours generationConfig.responseSchema. Every structured agent step
-    # goes through a schema; bare JSON mode leaks chain-of-thought.
+
+    # The workhorse: plan, clarify, critique, summarise. 15 rpm is what makes a
+    # 4-call agent turn possible -- at the full Flash models' 5 rpm, one turn
+    # would consume an entire minute of budget and a critique retry would stall
+    # in backoff.
+    llm_model: str = "models/gemini-3.5-flash-lite"
+    llm_tokens_per_minute: int = 250_000
+    llm_requests_per_minute: int = 15
+
+    # The stronger model, reserved for the text the user actually reads. One
+    # call per draft, two if the critic sends it back -- which fits inside 5
+    # rpm where a four-call turn would not.
+    answer_model: str = "models/gemini-3.6-flash"
+    answer_tokens_per_minute: int = 250_000
+    answer_requests_per_minute: int = 5
+
+    # Query rewriting stays on Gemma, deliberately. It is the one call where
+    # throughput beats quality: multi-query fires N rewrites per turn, the
+    # output is short phrases rather than prose, and Gemma's 30 rpm is the
+    # highest budget available. Nothing a user reads comes from this model.
+    rewriter_model: str = "models/gemma-4-26b-a4b-it"
+    rewriter_tokens_per_minute: int = 16_000
+    rewriter_requests_per_minute: int = 30
+
+    # Now accurate rather than aspirational: every Gemini Flash model on this
+    # key reports a 1,048,576-token input window and supports native
+    # functionDeclarations, verified live. Kept as response_schema because the
+    # graph's nodes are not tool calls -- switching is now a real option rather
+    # than something the model cannot do.
     llm_structured_mode: Literal["response_schema", "tool_calling"] = "response_schema"
 
     # --- judge model (evaluation Tier 2) ---
@@ -58,12 +105,30 @@ class Settings(BaseSettings):
     def limits_for(self, model: str) -> tuple[int, int]:
         """(requests_per_minute, tokens_per_minute) for a model name.
 
-        Each model gets its OWN limiter keyed on these numbers. Sharing one
-        budget across models with opposite shapes would throttle both on the
-        wrong limits and waste most of the combined quota.
+        Each model gets its OWN limiter keyed on these numbers, because the
+        free-tier request quota is per model -- 5/min for the full Flash
+        models, 15 for Flash Lite, 30 for Gemma. Sharing one budget across them
+        would throttle every call on the strictest limit and waste most of the
+        combined quota.
         """
-        if model.removeprefix("models/") == self.judge_model.removeprefix("models/"):
-            return self.judge_requests_per_minute, self.judge_tokens_per_minute
+        name = model.removeprefix("models/")
+        table = {
+            self.answer_model: (
+                self.answer_requests_per_minute,
+                self.answer_tokens_per_minute,
+            ),
+            self.rewriter_model: (
+                self.rewriter_requests_per_minute,
+                self.rewriter_tokens_per_minute,
+            ),
+            self.judge_model: (
+                self.judge_requests_per_minute,
+                self.judge_tokens_per_minute,
+            ),
+        }
+        for configured, limits in table.items():
+            if name == configured.removeprefix("models/"):
+                return limits
         return self.llm_requests_per_minute, self.llm_tokens_per_minute
 
     # --- embeddings ---
@@ -76,8 +141,17 @@ class Settings(BaseSettings):
     embedding_tokens_per_minute: int = 30_000
 
     # --- retrieval ---
-    # top_k stays small on purpose: Gemma 4's 16K tokens/minute means a fat
-    # context window would spend the whole minute's budget on one call.
+    # top_k of 5 is now a QUALITY choice, not a budget one.
+    #
+    # It was a budget one: Gemma allowed 16K tokens/minute, so a fat context
+    # spent the whole minute on a single call. Gemini Flash Lite allows 250K
+    # against a 1M window, so that constraint is gone and this could be raised.
+    #
+    # Left at 5 deliberately. Every recall/precision number in the evaluation
+    # harness is measured at k in (1, 3, 5, 10), and moving the default silently
+    # invalidates the comparison. Raise it when a measurement asks for it --
+    # recall@10 is 0.951 against recall@5, so the headroom is real, but the
+    # right fix for that gap is a reranker rather than a wider context.
     retrieval_top_k: int = 5
     chunk_size: int = 900
     chunk_overlap: int = 150
@@ -95,9 +169,94 @@ class Settings(BaseSettings):
     # the request can opt in per call.
     multi_query: bool = False
     query_variations: int = 3
+    # Classify request intent (specific vs broad) even when multi_query is OFF.
+    #
+    # Scope and the query rewrites come from the same model call, so this costs
+    # one Gemma call per turn. Worth it: without it, turning off multi-query
+    # also turned off understanding the question, and "summarize this document"
+    # fell back to a literal search for the word "summarize". The toggle now
+    # controls fan-out, not comprehension.
+    intent_always: bool = True
     # RRF's damping constant. 60 is the value from the original paper and the
     # default in Elasticsearch; larger flattens the weight given to rank 1.
     rrf_k: int = 60
+
+    # --- conversation history ---
+    # Send the WHOLE transcript rather than a rolling summary plus the last
+    # three exchanges.
+    #
+    # The old design existed because Gemma allowed 16K tokens per MINUTE across
+    # 3-5 calls per turn, leaving ~1.5K for history -- about 8 plain turns
+    # before compression became mandatory. Gemini Flash reports a 1,048,576
+    # token input window and 250K tokens/minute, so that constraint is gone.
+    #
+    # This matters for correctness, not just convenience: a summary is a lossy
+    # rewrite, and pronoun resolution ("and the prior year?") is exactly the
+    # thing that breaks when the referent was compressed away.
+    history_full: bool = True
+    # Budget, not a limit -- deliberately far below the 1M window so history
+    # can never crowd out retrieved passages, which are what the answer must
+    # actually cite. Falls back to summary + recent turns beyond this.
+    history_max_tokens: int = 200_000
+    # Verbatim exchanges kept when history DOES have to be compressed.
+    #
+    # Was 6 (three exchanges), sized for Gemma leaving ~1.5K tokens for
+    # history. On Gemini that floor is gone, so the fallback keeps twenty
+    # exchanges rather than three -- compression should lose the distant past,
+    # not last week.
+    verbatim_messages: int = 40
+
+    # --- web search (Serper) ---
+    # Empty key = web search OFF, and the agent behaves exactly as it did
+    # before: documents only, and an honest refusal when they do not cover the
+    # question. Same self-configuring pattern as SUPABASE_URL and Langfuse.
+    #
+    # This does NOT relax grounding. A web result is a SOURCE that must be
+    # cited, not licence to answer from memory -- the citation contract is
+    # unchanged, some sources are just URLs rather than chunks.
+    serper_api_key: str = ""
+    serper_requests_per_minute: int = 60
+    web_search_results: int = 5
+
+    @property
+    def web_search_enabled(self) -> bool:
+        return bool(self.serper_api_key)
+
+    # --- ReAct research mode ---
+    # A genuine tool-calling loop: the model chooses which tool to call, sees
+    # the result, and decides what to call next. That is what makes multi-hop
+    # work -- "find the competitors" then "look up each one" -- because the
+    # second query cannot be written until the first returns.
+    #
+    # Distinct from the plan/retrieve/draft/critique graph, which plans every
+    # lookup UP FRONT. Both are kept: the planned path is what every
+    # recall/faithfulness number in the evaluation harness measures, and
+    # replacing it would silently invalidate all of them.
+    #
+    # Hard cap on tool-calling rounds. Each round is one model call plus its
+    # tools, so this is the difference between a multi-hop answer and an
+    # unbounded loop spending quota.
+    # ON by default, which is a product decision rather than a measured one.
+    #
+    # The planned path can only search the documents, so with it as the default
+    # the corpus IS the boundary: any question the files do not cover comes
+    # back as "not in the provided documents", even when the answer is one web
+    # search away. ReAct is the only path that can route a question to where
+    # its answer actually lives, so the assistant has to default to it to
+    # behave as advertised.
+    #
+    # What this costs: one model call per round on top of the tools.
+    #
+    # What it must NOT cost is the evaluation baseline. The planned graph is
+    # still there and still the thing "agent" means in the harness, so every
+    # caller that measures or compares it now passes `react=False` EXPLICITLY
+    # -- tier2.py, /research and probe_hitl.py. Flipping this default without
+    # those would have quietly changed what the recorded numbers refer to.
+    react_default: bool = True
+    react_max_rounds: int = 6
+    # Cap on tools executed per round, so one greedy response cannot fan out
+    # into dozens of searches.
+    react_max_calls_per_round: int = 4
 
     # --- agent (step 4) ---
     # Hard cap on critique -> retrieve cycles. Each iteration costs ~2 Gemma

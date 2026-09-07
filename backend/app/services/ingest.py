@@ -6,7 +6,7 @@ Each stage is a plain function with typed in/out and no knowledge of its
 neighbours. That's deliberate: the planned LLM categorisation step is an
 `Enricher` appended to ENRICHERS below, and nothing else in the file changes.
 Enrichers must NOT call the embedding API -- they get their own rate limiter,
-because Gemma's request budget and the embedding budget are separate quotas.
+because generation and embedding are separate quotas.
 
 Runs as a background task because embedding is slow on the free tier (~133
 chunks/minute), so a large PDF takes minutes. The upload request returns

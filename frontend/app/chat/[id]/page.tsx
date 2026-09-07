@@ -17,8 +17,9 @@ import {
 } from "@/lib/api";
 import { useApp } from "../../providers";
 import { Answer } from "../../answer";
-import { Button, Chip, Fab, TextField } from "../../md";
+import { Button, Chip, Fab, LinkChip, TextField } from "../../md";
 import {
+  IconExternal,
   IconQuote,
   IconSpinner,
   IconThumbDown,
@@ -26,6 +27,21 @@ import {
 } from "../../icons";
 import Clarify from "./clarify";
 import Rail, { type TurnSettings } from "./rail";
+
+/**
+ * "https://www.reuters.com/x/y?q=1" -> "reuters.com".
+ *
+ * Wrapped in try/catch because the URL comes from a search API, not from us:
+ * a malformed one must degrade to showing the raw string, never throw during
+ * render and blank the whole message.
+ */
+function hostname(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+}
 
 /**
  * Session details, kept across navigations.
@@ -74,6 +90,9 @@ function Conversation({ id }: { id: string }) {
     topK: 5,
     multiQuery: false,
     clarify: true,
+    // On by default: the documents are one source, not the boundary, and this
+    // is the only mode that can also reach the web. Matches REACT_DEFAULT.
+    react: true,
   });
   /**
    * The graph paused and is waiting on the human-in-the-loop prompt.
@@ -186,6 +205,7 @@ function Conversation({ id }: { id: string }) {
           topK: settings.topK,
           multiQuery: settings.multiQuery,
           clarify: settings.clarify,
+          react: settings.react,
         },
         (_node, detail) => setProgress(detail),
       );
@@ -508,20 +528,41 @@ function Turn({
             style={{ borderColor: "var(--md-outline-variant)" }}
           >
             <IconQuote className="h-4 w-4 shrink-0 opacity-40" />
-            {cited.map((s) => (
-              <Chip
-                key={s.chunk_id}
-                size="sm"
-                selected={s.chunk_id === activeChunkId}
-                onClick={() => void onCite(s.chunk_id)}
-                title="Read the source passage"
-              >
-                <span className="font-semibold tabular-nums">{s.n}</span>
-                <span className="max-w-[15rem] truncate">
-                  {s.heading ? s.heading.replace(/^#+\s*/, "") : s.filename}
-                </span>
-              </Chip>
-            ))}
+            {cited.map((s) =>
+              // A web source has no chunk to open, so its chip links out
+              // instead. It shows the HOSTNAME rather than the page title:
+              // the title is already the citation's label, and what the
+              // reader needs before clicking is who published it.
+              s.source === "web" && s.url ? (
+                <LinkChip
+                  key={s.chunk_id}
+                  size="sm"
+                  href={s.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={s.url}
+                >
+                  <span className="font-semibold tabular-nums">{s.n}</span>
+                  <span className="max-w-[15rem] truncate">
+                    {hostname(s.url)}
+                  </span>
+                  <IconExternal className="h-3 w-3 shrink-0 opacity-60" />
+                </LinkChip>
+              ) : (
+                <Chip
+                  key={s.chunk_id}
+                  size="sm"
+                  selected={s.chunk_id === activeChunkId}
+                  onClick={() => void onCite(s.chunk_id)}
+                  title="Read the source passage"
+                >
+                  <span className="font-semibold tabular-nums">{s.n}</span>
+                  <span className="max-w-[15rem] truncate">
+                    {s.heading ? s.heading.replace(/^#+\s*/, "") : s.filename}
+                  </span>
+                </Chip>
+              ),
+            )}
           </div>
         )}
       </div>

@@ -60,6 +60,10 @@ class SearchHitOut(BaseModel):
     # Only populated for fused (multi-query) results.
     rrf_score: float | None = None
     found_by: list[str] | None = None
+    # "document" or "web". The UI opens a chunk for the former and the url
+    # for the latter, because a web result has no chunk to open.
+    source: str = "document"
+    url: str | None = None
 
     @property
     def citation(self) -> str:

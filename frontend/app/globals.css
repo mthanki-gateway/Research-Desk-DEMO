@@ -447,6 +447,20 @@ textarea:focus-visible {
     color: var(--md-on-primary);
   }
 
+  /* A web citation is a different KIND of source, not a different rank, so
+     it gets the tertiary role rather than a shade of the primary one. The
+     reader needs to know at a glance whether a claim rests on their own
+     document or on a public page they have never seen. */
+  .md-cite-web {
+    background: var(--md-tertiary-container);
+    color: var(--md-on-tertiary-container);
+    text-decoration: none;
+  }
+  .md-cite-web:hover {
+    background: var(--md-tertiary);
+    color: var(--md-on-tertiary);
+  }
+
   /* Answer prose. Gemma emits markdown-ish text -- blank-line paragraphs,
      `- ` bullets, `**bold**` -- which `whitespace-pre-wrap` rendered as one
      undifferentiated block. These rules style the elements the renderer

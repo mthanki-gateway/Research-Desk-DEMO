@@ -1,8 +1,13 @@
 """The four nodes. Each takes state, returns only the keys it changed.
 
-Every LLM call goes through a responseSchema, because Gemma 4 has no
-function-calling and no thinking channel -- asked for prose it writes its whole
-reasoning trace into the reply. Schemas are this app's substitute for tool use.
+Every LLM call goes through a responseSchema.
+
+That began as a necessity -- Gemma has no function calling and no thinking
+channel, so asked for prose it wrote its whole reasoning trace into the reply.
+It is now a CHOICE: every Gemini Flash model here supports native
+functionDeclarations, verified live. Schemas are kept because these nodes are
+not tool calls -- the graph decides control flow, the model fills in fields --
+and because a schema is what stops reasoning leaking into user-facing text.
 """
 
 from __future__ import annotations
@@ -15,12 +20,16 @@ from langgraph.types import interrupt
 
 from app.agent.state import ResearchState
 from app.config import get_settings
+from app.services import websearch
 from app.services.llm import (
     LLMError,
+    extract_bool,
     extract_int_list,
+    extract_object_list,
     extract_string,
     extract_string_list,
     get_llm,
+    is_repetitive,
 )
 from app.services.retrieval import build_context, document_outline, retrieve
 
@@ -62,9 +71,8 @@ PLAN_SCHEMA = {
 PLAN_SYSTEM = """You break a research question into the separate lookups needed \
 to answer it.
 
-A document search can only retrieve a few passages per query, so a question \
-asking about two different things must be split -- otherwise one of them is \
-never retrieved.
+A search can only retrieve a few passages per query, so a question asking about \
+two different things must be split -- otherwise one of them is never retrieved.
 
 Rules:
 - One sub-question per distinct fact being requested.
@@ -173,33 +181,49 @@ CLARIFY_SCHEMA = {
             },
         },
     },
-    "required": ["ambiguous"],
+    # All three REQUIRED. With only `ambiguous` required, the model emitted
+    # `{"ambiguous":true,"options":[...]}` and skipped `question` entirely --
+    # so the node had good options and no header sentence, and rejected the
+    # lot. A responseSchema is a contract; leaving a field optional is telling
+    # the model it may omit it.
+    "required": ["ambiguous", "question", "options"],
 }
 
-CLARIFY_SYSTEM = """You decide whether a request to a document search system is \
+CLARIFY_SYSTEM = """You decide whether a request to a research assistant is \
 specific enough to answer, and if not, what to ask.
 
-You are given the section headings of the documents available. Every option you \
-offer MUST correspond to something those headings show the documents actually \
-cover -- an option the corpus cannot answer wastes the user's choice.
+A request is NOT ambiguous merely because the user's own documents do not cover \
+it -- what is searchable is stated below.
+
+READ THE CONVERSATION FIRST. A follow-up is almost never ambiguous, because \
+its subject is whatever was just being discussed. "Now try the internet", "what \
+about the other one", "and the year before?" are all CLEAR: the topic carries \
+over. Judge the request in context, never in isolation.
 
 Set ambiguous=true ONLY when the request does not say enough to search on:
 - it names a broad topic with no particular aspect ("tell me about the report")
 - it explicitly defers the specifics ("the specific thing I want to know")
-- it could mean two clearly different things the documents treat separately
+- it could mean two clearly different things the sources treat separately
 - it asks for "details" or "information" without saying about what
 
-Set ambiguous=false when the request names a specific fact, figure, event, \
-section or entity -- even if it is short. "What was operating income?" is \
-specific. So is "summarize this document": that is a clear instruction, not an \
-ambiguous one.
+Set ambiguous=false when:
+- the request names a specific fact, figure, event, section or entity -- even \
+if it is short. "What was operating income?" is specific.
+- it is an INSTRUCTION rather than a question: "summarize this document", \
+"answer from the internet instead", "try again". An instruction about HOW to \
+answer is not an ambiguous request for WHAT to answer.
+- the conversation already establishes the subject.
 
 When ambiguous=true:
 - `question` is ONE short sentence asking what they want. Never apologise, \
 never restate their question back to them.
-- `options` are 2 to 4 CONCRETE choices, each a real aspect of the documents \
-drawn from the headings. `label` is 2-6 words. `description` is one short line \
-saying what that option would cover.
+- `options` are 2 to 4 CONCRETE choices, every one anchored in something REAL: \
+a section heading from their documents, or the specific subject already under \
+discussion. NEVER offer generic categories -- "Latest Technology Trends", \
+"Global Financial Markets", "Historical Architecture" are worthless, because \
+they tell the user nothing and the assistant cannot act on them. If you cannot \
+name 2 concrete, anchored options, return ambiguous=false and let the search \
+run.
 - Options must be genuinely different from each other, not rephrasings.
 
 When ambiguous=false, return ambiguous=false and nothing else."""
@@ -208,6 +232,9 @@ When ambiguous=false, return ambiguous=false and nothing else."""
 # reason `scope` is an enum in retrieval.py: an unrecognised value must have
 # one obvious, safe meaning.
 CLARIFY_ACTIONS = ("answer", "skip", "cancel")
+
+# Used when the model produced usable options but no question sentence.
+_DEFAULT_ASK = "What would you like to know about?"
 
 _MAX_OPTIONS = 4
 _MAX_LABEL = 60
@@ -294,31 +321,70 @@ async def clarify(state: ResearchState) -> dict:
     # model offers aspects that exist instead of inventing plausible ones.
     outline = await document_outline(document_ids, state.get("owner_id"))
     outline_block = (
-        "Sections in the documents being searched:\n"
+        "Sections in the user's own documents (not the only thing searchable):\n"
         + "\n".join(f"- {h}" for h in outline)
         + "\n\n"
         if outline
         else ""
     )
 
+    # Lenient parsing, NOT generate_json. Measured failure: Gemma degenerated
+    # inside the THIRD option{APOS}s description ("Information about the about
+    # the...") and truncated the document, so a strict parse discarded
+    # `ambiguous: true` AND two complete, usable options -- and the turn ran
+    # without pausing. A repetition loop in a field nobody reads silently
+    # disabled the whole feature.
+    # The conversation, which this node used to judge WITHOUT.
+    #
+    # That omission produced the worst clarifying question in the app's
+    # history. Asked "then answer from the internet!" as a follow-up about a
+    # pyramid, `clarify` saw six words and no topic, correctly concluded it
+    # could not tell what was wanted, and invented three categories out of thin
+    # air: "Latest Technology Trends", "Global Financial Markets", "Historical
+    # Architecture". Every other node already gets history -- `plan` needs it
+    # to resolve "the year before", `draft` to resolve pronouns -- and the one
+    # node whose entire job is judging whether a request is clear was the one
+    # node judging it out of context.
+    chat_context = state.get("chat_context") or ""
+    history_block = f"Conversation so far:\n{chat_context}\n\n" if chat_context else ""
+
+    # Stated, not assumed. An option about public information is useless if the
+    # web cannot actually be reached, and the clarifier has no other way to
+    # know -- it would offer "look it up online" on a deployment where that is
+    # impossible.
+    coverage = (
+        "Searchable: the user's own documents, and the public web.\n\n"
+        if websearch.enabled()
+        else "Searchable: the user's own documents ONLY -- web search is not "
+        "configured, so do not offer options that require public "
+        "information.\n\n"
+    )
+
     try:
-        result = await get_llm().generate_json(
-            f"{outline_block}Request: {question}",
+        raw = await get_llm().generate(
+            f"{history_block}{outline_block}{coverage}Latest request: {question}",
             schema=CLARIFY_SCHEMA,
             system=CLARIFY_SYSTEM,
             temperature=0.0,
-            max_output_tokens=700,
+            # 700 truncated mid-options on a five-document corpus. The
+            # descriptions are the bulk of the response and the model is
+            # verbose in them, so this is headroom rather than a fix -- the
+            # salvage above is what makes truncation survivable.
+            max_output_tokens=900,
         )
     except LLMError as exc:
         log.warning("clarify_failed", error=str(exc))
         return {"trace": [{"node": "clarify", "skipped": f"llm error: {exc}"}]}
 
-    options = _clean_options(result.get("options"))
-    ask = str(result.get("question", "")).strip()
+    options = _clean_options(extract_object_list(raw, "options"))
+    # Fall back rather than discard. If two or more grounded options survived,
+    # a missing header sentence is not a reason to throw them away -- the
+    # options ARE the question.
+    ask = extract_string(raw, "question") or _DEFAULT_ASK
 
     # Two options is the minimum that constitutes a choice. One option is not a
     # question, it is a guess with extra steps -- better to just search.
-    if not bool(result.get("ambiguous")) or len(options) < 2 or not ask:
+    if not extract_bool(raw, "ambiguous") or len(options) < 2 or not ask:
         log.info("clarify_not_needed", n_options=len(options))
         return {"trace": [{"node": "clarify", "ambiguous": False}]}
 
@@ -462,22 +528,87 @@ DRAFT_SCHEMA = {
     "required": ["answer", "sources_used"],
 }
 
-DRAFT_SYSTEM = """You answer questions using ONLY the numbered sources provided.
+DRAFT_SYSTEM = """You are a research assistant. You answer from the numbered \
+sources provided, and you are helpful about what they do and do not contain.
 
-Rules:
-- Cite the source number in square brackets after each claim, e.g. [1] or [2].
-- Quote figures exactly as they appear. Never round, adjust or infer a number.
-- Answer every part of the question that the sources support.
-- List any part you could NOT answer from the sources in `unanswered`. Do not \
-guess, and do not use knowledge from outside the sources.
-- Be concise."""
+Each source is marked with its KIND:
+- `document` -- one of the user's own uploaded files
+- `web` -- a public page, with its url
+
+Both are legitimate sources and neither outranks the other. Treat them as one \
+pool of evidence.
+
+WHAT MUST COME FROM THE SOURCES
+Every FACT you assert -- figures, dates, events, findings, quantities, names of \
+things that happened. Cite each one as [1], [2]. Never invent a fact, never \
+adjust a number, and never present your own knowledge as though a source said \
+it.
+
+WHAT YOU MAY USE YOUR OWN KNOWLEDGE FOR
+Understanding the question and connecting it to the sources. Specifically:
+- RECOGNISING THAT TWO NAMES MEAN THE SAME THING. If the user asks about \
+"Akhet Khufu" and a source describes the largest tomb built for Khufu at Giza, \
+those are the same monument -- say so and answer from that source. Refusing \
+because the exact string is absent is a failure, not caution.
+- Knowing what a term, acronym, place or person is, well enough to find the \
+relevant source.
+- One clause of framing so the answer makes sense.
+Mark this kind of statement as your own -- "commonly known as", "this is the \
+same structure as" -- and do NOT put a citation on it. A citation means "a \
+source said this".
+
+WHEN THE SOURCES FALL SHORT
+Never answer with a bare refusal. Say what IS there and what is missing, in \
+that order: "Your documents describe X and Y [1] but do not give Z." A reader \
+should learn something from every answer, including the answers that cannot be \
+complete. Put the genuinely missing parts in `unanswered`.
+
+ATTRIBUTION
+- Name the origin in the sentence. For the web, the site or publication ("per \
+the Postgres documentation [3]"); for their own files, the file or section \
+("the Q1 review [1]"). A reader must be able to tell which claims rest on \
+their own material and which on a public page, without opening anything.
+- Never blur the two. Do not let a web figure stand as if it came from their \
+documents, and do not present their internal numbers as public knowledge.
+
+Be concise."""
+
+
+# "[1]", "[2, 3]", "[1][4]" -- the shapes the drafter actually produces. The
+# frontend already parses the same markers to render citation chips, so keeping
+# this permissive is what stops the two views disagreeing.
+_CITE_MARKER = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
+
+
+def _cited_in_text(answer: str, n_sources: int) -> list[int]:
+    """Citation numbers appearing inline, in order, deduped.
+
+    Numbers out of range are DROPPED rather than kept: a [7] against six
+    sources is a hallucinated citation, and passing it on would have the UI
+    resolve it to nothing or -- worse -- to the wrong source.
+    """
+    out: list[int] = []
+    for group in _CITE_MARKER.findall(answer):
+        for part in group.split(","):
+            n = int(part.strip())
+            if 1 <= n <= n_sources and n not in out:
+                out.append(n)
+    return out
 
 
 async def draft(state: ResearchState) -> dict:
     evidence = state.get("evidence") or []
     if not evidence:
+        # Deliberately does NOT say "upload a document". That was right while
+        # the corpus was the whole universe, but a search can now come back
+        # empty with documents present and the web searched -- and telling
+        # someone to upload a file when the real problem was phrasing sends
+        # them off to fix the wrong thing.
         return {
-            "draft": "No documents have been indexed yet. Upload one first.",
+            "draft": (
+                "Nothing was found for this question. If no documents have "
+                "been uploaded yet, add one; otherwise try rephrasing."
+            ),
             "citations": [],
             "sufficient": True,  # nothing to retry with
             "trace": [{"node": "draft", "skipped": "no evidence"}],
@@ -491,11 +622,30 @@ async def draft(state: ResearchState) -> dict:
     history_block = (
         f"Conversation so far:\n{chat_context}\n\n" if chat_context else ""
     )
+    # Whether the web was even reachable, stated plainly.
+    #
+    # Without this the drafter cannot tell "searched the web and found nothing"
+    # from "never had a web tool", so an unconfigured deployment produces
+    # answers implying the information does not exist -- when the truth is that
+    # nobody looked. That was invisible from the UI: a user asking a general
+    # question got a flat "not in the provided sources" and no hint that web
+    # search was switched off.
+    reach = (
+        "Both the user's documents and the web were searchable for this "
+        "question."
+        if websearch.enabled()
+        else "Web search is NOT configured on this deployment, so only the "
+        "user's own documents could be searched. If part of the question "
+        "needs public information, say that it is not in their documents "
+        "AND that web search is not enabled -- do not imply the "
+        "information does not exist."
+    )
     prompt = (
         f"{history_block}"
         f"Sources:\n{build_context(evidence)}\n\n"
+        f"Search coverage: {reach}\n\n"
         f"Question: {state['question']}\n\n"
-        "Answer using only the sources above."
+        "Answer from the sources above, per your instructions."
     )
     # `generate` + lenient parsing, NOT `generate_json`.
     #
@@ -510,12 +660,30 @@ async def draft(state: ResearchState) -> dict:
     # This is the same trade `plan` already makes, and `draft` should have made
     # it first: it is the node whose output the user actually reads.
     try:
-        raw = await get_llm().generate(
+        # The ANSWER model -- the strongest one available, used only here and
+        # in baseline RAG. This is the text the user reads, and it is 1-2 calls
+        # per turn, which is what makes a 5 rpm budget affordable where the
+        # four-call agent would not fit.
+        raw = await get_llm(get_settings().answer_model).generate(
             prompt,
             schema=DRAFT_SCHEMA,
             system=DRAFT_SYSTEM,
             temperature=0.1,
-            max_output_tokens=900,
+            # 900 was too tight, and the failure was silent rather than loud.
+            #
+            # `sources_used` is emitted AFTER `answer`, so a long answer that
+            # hit the cap lost its citation list entirely -- lenient parsing
+            # salvaged the prose and returned `citations=[]`, which surfaces as
+            # "no sources cited" on an answer that cited things in every
+            # sentence. Measured on a two-part question spanning a document
+            # and a web page: the answer cut off at "According to the Root
+            # Cause section of acme-incident-2024".
+            #
+            # Asking the drafter to attribute each fact to its source made
+            # answers longer, which is what pushed a tight budget over. Both
+            # halves are fixed: more room here, and `_cited_in_text` below no
+            # longer depends on the tail of the JSON surviving.
+            max_output_tokens=2000,
         )
     except LLMError as exc:
         # Quota, safety block, recitation. Nothing to salvage, but a turn that
@@ -532,15 +700,38 @@ async def draft(state: ResearchState) -> dict:
     citations = extract_int_list(raw, "sources_used")
     unanswered = extract_string_list(raw, "unanswered")
 
-    if not answer:
-        # Parsed, but there is no answer in it -- degeneration from the first
-        # token, or the schema ignored entirely.
-        log.warning("draft_unusable", raw=raw[:200])
+    # The inline [n] markers are the ground truth, so derive from them when the
+    # declared list is missing.
+    #
+    # `sources_used` is a SUMMARY of what the prose already says, and it is the
+    # part most likely to be lost: it comes last in the JSON, so truncation
+    # takes it first. The markers, by contrast, are what the reader actually
+    # sees and what the UI turns into clickable citations -- an answer full of
+    # [1]s that reports citing nothing is just wrong, and the text is right
+    # there to check.
+    if not citations:
+        derived = _cited_in_text(answer, len(evidence))
+        if derived:
+            log.info("citations_derived_from_text", cited=derived)
+            citations = derived
+
+    # Two failure modes, one message.
+    #
+    # `not answer` -- nothing parsed, or degeneration from the first token.
+    #
+    # `is_repetitive` -- SECOND LINE OF DEFENCE, and it exists because the
+    # first one leaked. `strip_degeneration` cuts a trailing loop, but a
+    # response that is mostly loop still leaves a fragment behind, and one
+    # reached the UI as several hundred repetitions of "the-the". Cutting is
+    # not the same as judging: if what survives is still mostly repetition,
+    # there is no answer here and saying so is better than showing it.
+    if not answer or is_repetitive(answer):
+        log.warning("draft_unusable", raw=raw[:200], salvaged=answer[:120])
         return {
             "draft": "The model did not return a usable answer. Try asking again.",
             "citations": [],
             "sufficient": True,
-            "trace": [{"node": "draft", "error": "no answer field"}],
+            "trace": [{"node": "draft", "error": "no usable answer"}],
         }
 
     log.info("drafted", cited=citations, unanswered=unanswered)
@@ -586,14 +777,21 @@ CRITIQUE_SCHEMA = {
 CRITIQUE_SYSTEM = """You review a draft answer against the sources it was built \
 from.
 
-CRITICAL CONTEXT: the sources shown are ONLY the passages retrieved so far, not \
-the whole document library. More passages can still be fetched. So "the sources \
-do not contain X" does NOT mean X is unavailable -- it usually means the right \
-passage has not been retrieved yet.
+CRITICAL CONTEXT: the sources shown are ONLY what has been retrieved so far, \
+not everything that could be. More can still be fetched, from the user's \
+documents AND from the public web. So "the sources do not contain X" does NOT \
+mean X is unavailable -- it usually means the right search has not been run \
+yet.
+
+The user's documents are not a boundary. A gap that their files cannot fill may \
+still be answerable from public sources, so propose a query for it rather than \
+concluding the information does not exist.
 
 Judge two things:
 1. Completeness -- does the draft answer every part of the question?
-2. Support -- is every claim backed by the cited sources?
+2. Support -- is every claim backed by the cited sources? A claim attributed \
+to the wrong KIND of source -- a public figure presented as coming from the \
+user's own documents, or the reverse -- is NOT supported.
 
 Set sufficient=false when any part of the question is unanswered, and put \
 specific self-contained SEARCH QUERIES in `missing` that would retrieve the \
@@ -602,7 +800,7 @@ absent facts. Queries, not instructions.
 Set sufficient=true only when either:
 - every part of the question is answered and supported, or
 - the listed queries have already been tried and still returned nothing, so the \
-information genuinely is not in the library.
+information is genuinely unavailable from any source.
 
 If the draft cited NO sources at all, the retrieval phrasing almost certainly \
 failed rather than the information being absent. In that case set \

@@ -59,6 +59,10 @@ class TurnRequest(BaseModel):
     # None = use AGENT_CLARIFY from config. Explicit true lets this turn pause
     # to ask what the request means, if the request is too vague to search on.
     clarify: bool | None = None
+    # None = use REACT_DEFAULT. True gathers evidence with the tool-calling
+    # loop (multi-hop, can search the web) instead of planning every lookup
+    # up front.
+    react: bool | None = None
 
 
 class ResumeRequest(BaseModel):

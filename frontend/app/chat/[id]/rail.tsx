@@ -22,6 +22,8 @@ export type TurnSettings = {
   multiQuery: boolean;
   /** Let the agent ask what a vague question means before searching. */
   clarify: boolean;
+  /** Gather evidence with the tool-calling loop instead of a fixed plan. */
+  react: boolean;
 };
 
 /** Rail widths, shared so the page's padding animation matches exactly. */
@@ -96,6 +98,15 @@ function CollapsedRail({
           onClick={onExpand}
           active
           label="ASK"
+        />
+      )}
+
+      {settings.react && (
+        <RailStat
+          title="Research mode: searches your documents and the web"
+          onClick={onExpand}
+          active
+          label="TOOLS"
         />
       )}
 
@@ -499,6 +510,24 @@ function Controls({
               on={settings.clarify}
               onChange={(v) => onSettings({ ...settings, clarify: v })}
               aria-label="Ask if unclear"
+            />
+          </div>
+
+          <div className="flex items-center justify-between gap-3">
+            <span className="md-body-medium">
+              Research mode
+              <span
+                className="md-body-small mt-0.5 block"
+                style={{ color: "var(--md-on-surface-variant)" }}
+              >
+                Searches your documents and the web. Off restricts
+                answers to your documents only.
+              </span>
+            </span>
+            <Switch
+              on={settings.react}
+              onChange={(v) => onSettings({ ...settings, react: v })}
+              aria-label="Research mode"
             />
           </div>
         </div>

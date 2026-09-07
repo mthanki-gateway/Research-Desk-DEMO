@@ -227,6 +227,8 @@ export type SearchHit = {
   meta: Record<string, unknown>;
   rrf_score: number | null;
   found_by: string[] | null;
+  source?: "document" | "web";
+  url?: string | null;
 };
 
 export type Stats = {
@@ -398,6 +400,11 @@ export type MessageSource = {
   heading: string | null;
   page: number | null;
   score: number;
+  /** "document" or "web". Absent on turns stored before web search
+   *  existed, hence optional. */
+  source?: "document" | "web";
+  /** Present only for web sources — there is no chunk to open. */
+  url?: string | null;
 };
 
 export type ChatMessage = {
@@ -565,7 +572,12 @@ async function readTurnStream(
 export async function streamTurn(
   sessionId: string,
   question: string,
-  opts: { topK?: number; multiQuery?: boolean; clarify?: boolean } = {},
+  opts: {
+    topK?: number;
+    multiQuery?: boolean;
+    clarify?: boolean;
+    react?: boolean;
+  } = {},
   onProgress?: (node: string, detail: string) => void,
 ): Promise<TurnOutcome> {
   const res = await authedJson(`/sessions/${sessionId}/stream`, "POST", {
@@ -575,6 +587,7 @@ export async function streamTurn(
     // null = use the server's AGENT_CLARIFY default rather than asserting a
     // value the UI has no opinion about.
     clarify: opts.clarify ?? null,
+    react: opts.react ?? null,
   });
   return readTurnStream(res, onProgress);
 }

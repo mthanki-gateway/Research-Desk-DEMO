@@ -69,7 +69,7 @@ def _close_quietly(stack: contextlib.ExitStack, what: str) -> None:
     The cost is that the inner context managers are exited with no exception
     info, so Langfuse cannot mark a span as errored automatically. That is
     acceptable here because the places where it matters set `level="ERROR"`
-    explicitly -- see `GemmaClient.generate`.
+    explicitly -- see `GenAIClient.generate`.
     """
     try:
         stack.close()
@@ -120,7 +120,7 @@ def langchain_handler() -> Any:
     strongest practical argument for having built on LangGraph at all: the
     instrumentation points already exist and this just attaches a listener.
 
-    It does NOT see inside `GemmaClient`, which talks to the provider over raw
+    It does NOT see inside `GenAIClient`, which talks to the provider over raw
     httpx rather than through LangChain. Those are instrumented by hand in
     llm.py, which is why both exist.
     """
@@ -149,6 +149,7 @@ def turn(
     user_id: str | None = None,
     tags: list[str] | None = None,
     metadata: dict | None = None,
+    input: Any = None,
 ) -> Iterator[None]:
     """Trace-level attributes for one user turn.
 
@@ -198,8 +199,14 @@ def turn(
                 )
             )
             stack.enter_context(
-                tracer.start_as_current_observation(name=name, as_type="agent")
+                tracer.start_as_current_observation(
+                    name=name, as_type="agent", input=input
+                )
             )
+            # Also set it at TRACE level. The root observation carrying an
+            # input is not the same thing as the trace having one, and it is
+            # the trace that the list view renders.
+            tracer.set_current_trace_io(input=input)
         except Exception:
             log.exception("tracing_turn_failed")
 
@@ -268,6 +275,64 @@ def update(span: Any, **fields: Any) -> None:
         span.update(**fields)
     except Exception:
         log.warning("tracing_update_failed", exc_info=True)
+
+
+def set_turn_io(*, input: Any = None, output: Any = None) -> None:
+    """Set the TRACE-level input/output, i.e. the question and the answer.
+
+    Without this the trace list is unusable. Langfuse shows Input and Output as
+    columns, and they come from the trace, not from its nested observations --
+    so a root span opened with neither leaves every row blank and identical.
+    You then have to open each trace to discover what it was even about, which
+    defeats the point of a list.
+
+    Called twice per turn: the question on the way in, the answer on the way
+    out. Kept separate from `turn()` because the answer does not exist yet when
+    the context is entered.
+    """
+    tracer = get_tracer()
+    if tracer is None:
+        return
+    try:
+        tracer.set_current_trace_io(input=input, output=output)
+    except Exception:
+        log.warning("tracing_set_io_failed", exc_info=True)
+
+
+def annotate_turn(
+    *,
+    status: str | None = None,
+    metadata: dict | None = None,
+    level: str | None = None,
+) -> None:
+    """Record a status on the turn's root span.
+
+    Exists because of one upstream artifact worth knowing about.
+
+    When the graph interrupts for human-in-the-loop, LangGraph signals it
+    INTERNALLY AS AN EXCEPTION (GraphInterrupt). Langfuse's LangChain callback
+    handler sees `on_chain_error` and marks the `LangGraph` span
+    `level=ERROR` -- with an empty status message, because nothing actually
+    went wrong. So a perfectly successful pause is recorded as a failure, which
+    pollutes the "Observations by Level" chart and makes every clarification
+    look like a broken turn.
+
+    That child span belongs to the handler and cannot be corrected from here,
+    so instead the ROOT span is annotated explicitly. Anyone reading the trace
+    sees "paused for clarification" at the top, next to the misleading ERROR
+    underneath it.
+    """
+    tracer = get_tracer()
+    if tracer is None:
+        return
+    try:
+        tracer.update_current_span(
+            status_message=status,
+            metadata=metadata,
+            level=level,  # type: ignore[arg-type]
+        )
+    except Exception:
+        log.warning("tracing_annotate_failed", exc_info=True)
 
 
 def current_trace_id() -> str | None:

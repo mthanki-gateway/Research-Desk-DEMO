@@ -153,6 +153,8 @@ def _trace_turn(
             tags.append("multi-query")
         if req.clarify:
             tags.append("clarify")
+        if req.react:
+            tags.append("react")
 
     return tracing.turn(
         name="chat.resume" if resumed else "chat.turn",
@@ -160,6 +162,10 @@ def _trace_turn(
         user_id=user.owner_id,
         tags=tags,
         metadata={"top_k": getattr(req, "top_k", None)},
+        # The question, so the trace LIST is scannable. Without it every row
+        # shows a blank Input column and you have to open each trace to find
+        # out what it was about.
+        input=req.question,
     )
 
 
@@ -181,12 +187,20 @@ async def add_turn(
                 chat_context=prep["context"],
                 thread_id=prep["thread_id"],
                 clarify=req.clarify,
+                react=req.react,
             )
         except LLMError as exc:
             log.warning("turn_failed", error=str(exc))
             raise HTTPException(status_code=502, detail=f"Model error: {exc}") from exc
 
         prep["trace_id"] = tracing.current_trace_id()
+        tracing.set_turn_io(output=result.answer or result.interrupt)
+        if result.paused:
+            tracing.annotate_turn(
+                status="paused for clarification",
+                metadata={"paused": True},
+                level="DEFAULT",
+            )
         return await _finish_turn(session_id, req.question, result, prep, user)
 
 
@@ -217,6 +231,13 @@ async def resume_turn(
             raise HTTPException(status_code=502, detail=f"Model error: {exc}") from exc
 
         prep["trace_id"] = tracing.current_trace_id()
+        tracing.set_turn_io(output=result.answer or result.interrupt)
+        if result.paused:
+            tracing.annotate_turn(
+                status="paused for clarification",
+                metadata={"paused": True},
+                level="DEFAULT",
+            )
         return await _finish_turn(session_id, req.question, result, prep, user)
 
 
@@ -254,6 +275,7 @@ async def stream_turn(
                 chat_context=prep["context"],
                 thread_id=prep["thread_id"],
                 clarify=req.clarify,
+                react=req.react,
             ),
             session_id=session_id,
             question=req.question,
@@ -367,6 +389,18 @@ async def _stream_events(
                 # A pause is terminal FOR THIS STREAM. The turn is not
                 # finished, so nothing is persisted and the thread is not
                 # discarded -- it is the only way back to this state.
+                # A pause IS the outcome for this trace, so record it as the
+                # output -- otherwise a paused turn looks like a turn that
+                # produced nothing.
+                tracing.set_turn_io(output={"paused": payload})
+        # The LangGraph child span is marked ERROR by the callback handler
+                # because an interrupt is signalled as an exception. Say plainly
+                # on the ROOT span that this was a pause, not a failure.
+                tracing.annotate_turn(
+                    status="paused for clarification",
+                    metadata={"paused": True},
+                    level="DEFAULT",
+                )
                 yield _sse(
                     "interrupt",
                     {**payload, "thread_id": prep.get("thread_id")},
@@ -377,6 +411,7 @@ async def _stream_events(
         result = AgentResult(final_state)
         # Captured inside the trace context, before it closes.
         prep["trace_id"] = tracing.current_trace_id()
+        tracing.set_turn_io(output=result.answer)
         await _persist_turn(session_id, question, result, prep, user)
         _score_turn(result, prep["trace_id"])
         yield _sse(
@@ -649,6 +684,11 @@ async def _persist_turn(
                         "heading": h.heading,
                         "page": h.page,
                         "score": round(h.score, 4),
+                        # Provenance travels with the stored citation, so
+                        # a reloaded transcript still knows which sources
+                        # were web pages and can link them.
+                        "source": h.source,
+                        "url": h.url,
                     }
                     for i, h in enumerate(result.evidence)
                 ],
@@ -712,6 +752,8 @@ def _hit_out(h: SearchHit) -> SearchHitOut:
         meta=h.meta,
         rrf_score=h.rrf_score,
         found_by=h.found_by,
+        source=h.source,
+        url=h.url,
     )
 
 

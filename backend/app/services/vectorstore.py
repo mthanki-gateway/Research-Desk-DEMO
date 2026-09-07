@@ -56,6 +56,20 @@ class SearchHit:
     # strong evidence; this is also how you see whether rewriting helped.
     found_by: list[str] | None = None
 
+    # --- provenance ---
+    # "document" for a retrieved chunk, "web" for a search result.
+    #
+    # Web results reuse this dataclass rather than getting their own type, and
+    # that is deliberate: `merge_evidence`, `build_context`, RRF, citation
+    # numbering and message persistence all take `list[SearchHit]`, so a second
+    # type would mean touching every one of them. A web result fills
+    # `filename` with the page title, `text` with the snippet, and carries a
+    # synthetic `chunk_id` so dedupe-by-id keeps working.
+    source: str = "document"
+    # Set only for web results. The UI opens this instead of the chunk panel,
+    # because there is no chunk to open.
+    url: str | None = None
+
 
 class VectorStore:
     def __init__(self, dim: int) -> None:

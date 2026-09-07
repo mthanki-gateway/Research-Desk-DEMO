@@ -202,6 +202,28 @@ function Inline({
     } else {
       for (const n of resolved) {
         const source = byNumber.get(n)!;
+
+        // A web source opens its URL in a new tab; a document source opens
+        // the chunk in the rail. Rendered as a real <a> rather than a
+        // button calling window.open, so middle-click, ctrl-click and
+        // “copy link address” all behave — the same reason the nav uses
+        // <Link> instead of router.push.
+        if (source.source === "web" && source.url) {
+          out.push(
+            <a
+              key={`c${key++}`}
+              className="md-cite md-cite-web"
+              href={source.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              title={`${source.filename} — ${source.url}`}
+            >
+              {n}
+            </a>,
+          );
+          continue;
+        }
+
         out.push(
           <button
             key={`c${key++}`}

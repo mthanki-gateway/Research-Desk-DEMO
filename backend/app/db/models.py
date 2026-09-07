@@ -139,7 +139,7 @@ class Message(Base):
     the UI to LangGraph's internal state shape.
 
     Only the question and the answer are stored -- never the retrieved chunk
-    text. Re-embedding a query is cheap (100 RPM); Gemma tokens are the scarce
+    text. Re-embedding a query is cheap (100 RPM); generation tokens are the scarce
     resource, so replaying stored context into every later turn is the one
     thing that must not happen.
     """

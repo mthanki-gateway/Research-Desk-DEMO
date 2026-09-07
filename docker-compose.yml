@@ -48,6 +48,21 @@ services:
       # deployment which forgets to set it gets the restrictive behaviour.
       APP_ENV: dev
       DATABASE_URL: postgresql+asyncpg://rd:rd_local_dev@postgres:5432/research_desk
+      # MODEL SPLIT, set here rather than left to .env.
+      #
+      # Not interpolated (no ${...:-default}): compose's `environment` overrides
+      # `env_file`, and a stale LLM_MODEL=...gemma... in .env was silently
+      # keeping the old workhorse after the swap. The split encodes measured
+      # per-model quota and schema behaviour -- see config.py -- so it should
+      # not be overridden by a leftover variable nobody remembers setting.
+      #
+      # A deployment needs these set too; the config defaults match.
+      LLM_MODEL: models/gemini-3.5-flash-lite
+      ANSWER_MODEL: models/gemini-3.6-flash
+      REWRITER_MODEL: models/gemma-4-26b-a4b-it
+      # Web search. Empty = the search_web tool is never declared to the model,
+      # so the app behaves exactly as it did before web search existed.
+      SERPER_API_KEY: ${SERPER_API_KEY:-}
       QDRANT_URL: http://qdrant:6333
       CORS_ORIGINS: http://localhost:3000
       # Passed through from .env. Empty = auth disabled, and the app behaves

@@ -11,7 +11,9 @@ the user as `model returned invalid JSON`. Every test here exists because of it.
 import pytest
 
 from app.services.llm import (
+    extract_bool,
     extract_int_list,
+    extract_object_list,
     extract_string,
     extract_string_list,
     is_repetitive,
@@ -146,3 +148,97 @@ class TestIsRepetitive:
     )
     def test_detects_loops(self, text, expected):
         assert is_repetitive(text) is expected
+
+
+# The literal response that disabled clarification: `ambiguous` and two
+# complete options were present, the third description degenerated, and the
+# document never closed.
+TRUNCATED_CLARIFY = (
+    '{"ambiguous":true,"question":"What specifically would you like to know?",'
+    '"options":['
+    '{"label":"Acme Corporation 2024 Annual Report","description":"Yearly performance."},'
+    '{"label":"Financial Summary","description":"Revenue and segments."},'
+    '{"label":"Payments Cutover Outage","description":"Information about the about the'
+)
+
+
+class TestExtractObjectList:
+    def test_reads_well_formed_json(self):
+        raw = '{"options":[{"label":"a"},{"label":"b"}]}'
+        assert extract_object_list(raw, "options") == [{"label": "a"}, {"label": "b"}]
+
+    def test_salvages_complete_objects_from_the_real_failure(self):
+        """The bug: two good options were discarded with the truncated third."""
+        out = extract_object_list(TRUNCATED_CLARIFY, "options")
+        assert [o["label"] for o in out] == [
+            "Acme Corporation 2024 Annual Report",
+            "Financial Summary",
+        ]
+
+    def test_ignores_braces_inside_strings(self):
+        """A brace in a description must not shift the nesting depth."""
+        raw = '{"options":[{"label":"a","description":"uses {braces} inside"}]}'
+        assert extract_object_list(raw, "options")[0]["description"] == (
+            "uses {braces} inside"
+        )
+
+    def test_handles_escaped_quotes(self):
+        raw = '{"options":[{"label":"say \\"hi\\""}]}'
+        assert extract_object_list(raw, "options") == [{"label": 'say "hi"'}]
+
+    def test_missing_key(self):
+        assert extract_object_list('{"other":[]}', "options") == []
+
+    def test_not_json(self):
+        assert extract_object_list("prose", "options") == []
+
+    def test_stops_at_the_closing_bracket(self):
+        """Objects AFTER the array must not be swept in."""
+        raw = '{"options":[{"label":"a"}],"other":{"label":"not an option"}}'
+        assert extract_object_list(raw, "options") == [{"label": "a"}]
+
+
+class TestExtractBool:
+    def test_reads_well_formed_json(self):
+        assert extract_bool('{"ambiguous":true}', "ambiguous") is True
+        assert extract_bool('{"ambiguous":false}', "ambiguous") is False
+
+    def test_salvages_from_the_real_failure(self):
+        assert extract_bool(TRUNCATED_CLARIFY, "ambiguous") is True
+
+    def test_default_when_missing(self):
+        assert extract_bool('{"x":1}', "ambiguous") is False
+        assert extract_bool('{"x":1}', "ambiguous", default=True) is True
+
+
+class TestLongRunBeyondTheScanWindow:
+    """The regression that reached the UI.
+
+    `strip_degeneration` bounds its REGEX with a scan window, not the run. A
+    loop longer than the window begins before it, and cutting at the window
+    boundary left the earlier part in place -- measured 3364 chars in, 1363
+    out, with ~1200 characters of "the-the the-the ..." still in the answer a
+    user read. The fix extends the cut backwards while the unit keeps
+    repeating.
+    """
+
+    GOOD = (
+        "The provided sources do not contain information regarding an ACME "
+        "PYRAMID built in Egypt. The sources mention mummification practices "
+        "[1]. The sources also mention "
+    )
+
+    @pytest.mark.parametrize("repeats", [6, 400, 2000])
+    def test_cuts_the_whole_run_at_any_length(self, repeats):
+        text = self.GOOD + "the-the " * repeats
+        assert strip_degeneration(text) == self.GOOD.rstrip()
+
+    def test_run_far_longer_than_the_scan_window(self):
+        """16K of loop -- more than 8x the window."""
+        text = self.GOOD + "the-the " * 2000
+        out = strip_degeneration(text)
+        assert "the-the" not in out
+
+    def test_is_repetitive_catches_what_survives(self):
+        """Second line of defence: cutting is not judging."""
+        assert is_repetitive("the-the " * 50) is True

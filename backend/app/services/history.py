@@ -3,15 +3,21 @@
 Persistence and prompt context are separate concerns: every turn is stored
 forever in `messages`, but only a small slice of it goes into any prompt.
 
-The constraint is Gemma's **16K tokens per minute** -- throughput, not context
-window. Since the agent makes 3-5 calls per question, each call needs to stay
-around 3.5K tokens, which leaves roughly 1.5K for history. That's ~8-10 plain
-turns, so anything longer has to be compressed.
+HISTORY IS NOW SENT WHOLE. The compression machinery below is a fallback.
+
+It was mandatory under Gemma: 16K tokens per MINUTE across 3-5 calls per turn
+left roughly 1.5K for history, about 8-10 plain turns. Gemini Flash reports a
+1,048,576-token window and 250K tokens/minute, so the binding constraint is
+gone and `history_full` sends the entire transcript.
+
+The summary path is kept because the budget is a real ceiling, but it is
+strictly worse when avoidable -- a summary is a lossy rewrite, and pronoun
+resolution is precisely what breaks when the referent was compressed away.
 
 Layers, cheapest first:
 
   1. system prompt + retrieved chunks     (always, built elsewhere)
-  2. rolling summary of evicted turns     (1 Gemma call per eviction)
+  2. rolling summary of evicted turns     (1 model call per eviction)
   3. verbatim last N exchanges            (always, uncompressed)
   4. semantically retrieved old turns     (NOT IMPLEMENTED -- see below)
 
@@ -27,16 +33,23 @@ from __future__ import annotations
 
 import structlog
 
+from app.config import get_settings
 from app.db.models import ChatSession, Message, Role
+from app.services.limiter import estimate_tokens
 from app.services.llm import LLMError, get_llm
 
 log = structlog.get_logger()
 
-# 3 exchanges = 6 messages. Three rather than two because a clarification
-# often spans two turns ("do you mean 2023?" / "yes"), and this window is what
-# pronouns and follow-ups resolve against -- the one thing that must never be
-# compressed.
-VERBATIM_MESSAGES = 6
+# How many recent messages survive compression, when compression happens at
+# all. Configurable now rather than a constant, and much larger: 40 messages is
+# twenty exchanges against the old three.
+#
+# Three was sized for Gemma leaving roughly 1.5K tokens for history. This
+# window is what pronouns and follow-ups resolve against -- the one thing that
+# must never be compressed -- so with the token floor gone there is no reason
+# to keep it tight.
+def _verbatim() -> int:
+    return get_settings().verbatim_messages
 
 # Only summarise once there is a worthwhile amount to fold in; summarising one
 # stray message per turn would spend a Gemma call to save ~40 tokens.
@@ -86,7 +99,13 @@ async def update_summary(session: ChatSession, messages: list[Message]) -> tuple
     *the previous summary plus the newly evicted turns*, never the whole
     history again, so cost stays flat as the conversation grows.
     """
-    older = messages[:-VERBATIM_MESSAGES] if len(messages) > VERBATIM_MESSAGES else []
+    # Nothing to compress while the whole transcript fits the budget. This
+    # saves a model call per eviction on every ordinary conversation -- the
+    # summary only earns its cost once history stops fitting.
+    if get_settings().history_full:
+        return session.summary or "", session.summarised_upto or 0
+
+    older = messages[:-_verbatim()] if len(messages) > _verbatim() else []
     already = session.summarised_upto or 0
     newly_evicted = older[already:]
 
@@ -124,15 +143,39 @@ async def update_summary(session: ChatSession, messages: list[Message]) -> tuple
 
 
 def build_chat_context(session: ChatSession, messages: list[Message]) -> str:
-    """Assemble the history block for a prompt. Empty string on turn one."""
+    """Assemble the history block for a prompt. Empty string on turn one.
+
+    Sends the WHOLE transcript when it fits the budget, which on Gemini Flash
+    it almost always does -- a 200K-token budget against a 1M window is
+    hundreds of turns.
+
+    The summary path is kept as a fallback rather than deleted, because the
+    budget is a real ceiling and a conversation can eventually exceed it. It is
+    also strictly worse when avoidable: a summary is a lossy rewrite, and
+    pronoun resolution is exactly what breaks when the referent was compressed
+    away.
+    """
     if not messages:
         return ""
+
+    settings = get_settings()
+
+    if settings.history_full:
+        whole = _render(messages)
+        if estimate_tokens(whole) <= settings.history_max_tokens:
+            return f"Conversation so far:\n{whole}"
+        log.info(
+            "history_truncated",
+            n_messages=len(messages),
+            estimated_tokens=estimate_tokens(whole),
+            budget=settings.history_max_tokens,
+        )
 
     parts: list[str] = []
     if session.summary:
         parts.append(f"Earlier in this conversation:\n{session.summary}")
 
-    recent = messages[-VERBATIM_MESSAGES:]
+    recent = messages[-_verbatim():]
     if recent:
         parts.append(f"Recent exchanges:\n{_render(recent)}")
 
