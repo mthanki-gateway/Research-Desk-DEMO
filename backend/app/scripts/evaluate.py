@@ -112,7 +112,20 @@ def _print_tier2(report) -> None:
     print()
     print("=" * 72)
     print(f"TIER 2 — generation, judged by RAGAS    mode={cfg['mode']} top_k={cfg['top_k']}")
-    print(f"answering: {cfg['model']}    judge: {cfg['judge_model']}")
+    # The ANSWER model is what wrote the text being judged; the workhorse only
+    # plans and critiques. Printing the workhorse under "answering" made the
+    # report look like the judge grading its own output, because the workhorse
+    # and the judge share a model id -- a self-preference alarm on a run that
+    # was not self-grading at all.
+    print(f"answering:  {cfg.get('answer_model', '?')}")
+    print(f"planning:   {cfg['model']}")
+    print(f"judge:      {cfg['judge_model']}")
+    if cfg.get("answer_model") == cfg.get("judge_model"):
+        print()
+        print(
+            "!! SELF-GRADING — the answering and judging models are the same id. "
+            "These scores measure self-preference, not faithfulness."
+        )
     print(
         f"{cfg['n_questions']} questions · {report.n_generated} generated · "
         f"{report.n_from_cache} from cache · {report.elapsed_seconds:.1f}s"
@@ -121,6 +134,16 @@ def _print_tier2(report) -> None:
         bits = ", ".join(f"{k}={'|'.join(v)}" for k, v in cfg["filters"].items())
         print()
         print(f"!! SUBSET RUN — filtered by {bits}. Not comparable to a full-suite run.")
+    # Same warning, for metric coverage rather than question coverage. A
+    # --cheap-metrics run reports two of the four, and its table looks exactly
+    # like a full one except for two dashes -- easy to mistake for "those
+    # metrics failed" and easier still to paste into a comparison.
+    if set(cfg.get("metrics", [])) != set(ALL_METRICS):
+        print()
+        print(
+            f"!! PARTIAL METRICS — judged {', '.join(cfg['metrics'])}. "
+            "Not comparable to a full-quartet run."
+        )
     print("=" * 72)
     print()
 
@@ -203,12 +226,23 @@ async def main() -> int:
         help="tier 2 only: produce and cache answers without judging them",
     )
     parser.add_argument(
-        "--all-metrics",
+        "--cheap-metrics",
         action="store_true",
         help=(
-            "tier 2 only: add context precision and recall. SLOW -- RAGAS makes "
-            "roughly one call per context chunk for precision, and on a 15 rpm "
-            "judge all four metrics took ~9 minutes for ONE question"
+            "tier 2 only: judge faithfulness and answer relevancy ONLY, skipping "
+            "the two reference-based metrics. The full quartet is the default; "
+            "this trades coverage for time when iterating"
+        ),
+    )
+    parser.add_argument(
+        "--judge-concurrency",
+        type=int,
+        default=4,
+        help=(
+            "tier 2 only: how many questions to judge at once. The judge's rate "
+            "limiter is shared, so this packs requests into the same per-minute "
+            "budget rather than exceeding it; raise it if the run looks "
+            "latency-bound, lower it to 1 to serialise"
         ),
     )
     args = parser.parse_args()
@@ -243,7 +277,8 @@ async def main() -> int:
             owner_id=args.owner,
             use_cache=not args.no_cache,
             judge=not args.generate_only,
-            metrics=ALL_METRICS if args.all_metrics else CHEAP_METRICS,
+            metrics=CHEAP_METRICS if args.cheap_metrics else ALL_METRICS,
+            judge_concurrency=args.judge_concurrency,
             filters=filters,
         )
         if args.json:

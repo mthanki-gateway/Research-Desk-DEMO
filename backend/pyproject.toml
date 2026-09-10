@@ -55,13 +55,23 @@ dev = [
 # install with `uv sync --extra local-embeddings` if EMBEDDING_PROVIDER=fastembed.
 [project.optional-dependencies]
 local-embeddings = ["fastembed>=0.4"]
-# RAG evaluation via the standard library, used as a CROSS-CHECK on the
-# hand-rolled judge rather than as the only implementation. Optional because it
-# pulls pandas and datasets, and none of it is needed to serve a request --
-# keeping it out of the default set is what holds the prod image at 177MB.
+# RAG evaluation via the standard library. This is the ONLY generation-side
+# judge -- its definitions are the ones published numbers are reported against,
+# which is the whole reason for taking the dependency.
+#
+# Optional because it pulls pandas, datasets and pyarrow, and none of it is
+# needed to serve a request -- keeping it out of the default set is what holds
+# the prod image at 177MB. The DEV image installs it (see Dockerfile); prod
+# cannot judge anything, which is correct.
 #   uv sync --extra eval
 eval = [
-    "ragas>=0.2",
+    # Upper bound because 0.4.x already DEPRECATES everything judge.py imports:
+    # `ragas.metrics.Faithfulness` and friends resolve through a __getattr__
+    # shim warning "will be removed in v1.0. Please use
+    # 'ragas.metrics.collections' instead", and `LangchainLLMWrapper` likewise
+    # points at `llm_factory`. Without the bound, a routine relock could pull
+    # v1.0 and delete the judge with no commit touching this project.
+    "ragas>=0.2,<1.0",
     # RAGAS accepts a judge through LangChain wrappers. This was already a
     # declared dependency and never imported; using it here finally makes it
     # real.

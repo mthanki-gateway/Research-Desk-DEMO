@@ -33,7 +33,7 @@ import structlog
 from app.config import get_settings
 from app.services.golden import GoldenQuestion
 from app.services.judge import (
-    CHEAP_METRICS,
+    ALL_METRICS,
     JudgeScores,
     judge_answer,
     ragas_available,
@@ -242,10 +242,25 @@ async def run_tier2(
     owner_id: str | None = None,
     use_cache: bool = True,
     judge: bool = True,
-    metrics: tuple[str, ...] = CHEAP_METRICS,
+    metrics: tuple[str, ...] = ALL_METRICS,
+    judge_concurrency: int = 4,
     filters: dict | None = None,
 ) -> Tier2Report:
     """Generate answers (cached) then judge them with RAGAS.
+
+    TWO PHASES, and they are separate loops rather than one, because they have
+    different bottlenecks:
+
+    * GENERATION is answer-model bound (5 rpm) and mostly served from cache, so
+      it stays sequential -- simple, and the cache makes it free on re-runs.
+    * JUDGING is judge-model bound and latency-heavy: the full quartet is
+      ~10-15 calls per question, each a round-trip. Run sequentially, the run
+      spends most of its wall clock waiting rather than being throttled.
+
+    So judging is issued CONCURRENTLY, bounded by `judge_concurrency`. This is
+    only safe because the judge wrapper -- and therefore its rate limiter -- is
+    shared via `get_judge()`; with a limiter per question, concurrency would
+    multiply the request rate instead of packing it into the same budget.
 
     `judge=False` generates and caches only -- useful for paying the expensive
     phase once, in the background, before iterating on the judge.
@@ -256,6 +271,18 @@ async def run_tier2(
         "mode": mode,
         "top_k": fetch,
         "multi_query": multi_query,
+        # BOTH models, and `answer_model` is the one that was missing.
+        #
+        # The answer text comes from `answer_model` in both modes -- `draft`
+        # and baseline `answer_question` each call get_llm(answer_model). The
+        # key recorded only `llm_model`, so swapping the answer model left the
+        # key unchanged and the cache happily served answers written by the
+        # previous one. That is the exact failure this key's docstring claims
+        # to prevent, and it is invisible: the numbers stay plausible.
+        #
+        # `llm_model` still belongs here too -- it plans, critiques and rewrites
+        # in agent mode, which changes what evidence the answer is built from.
+        "answer_model": settings.answer_model,
         "model": settings.llm_model,
     }
 
@@ -264,6 +291,8 @@ async def run_tier2(
     results: list[Tier2QuestionResult] = []
     n_generated = n_cached = 0
 
+    # --- phase 1: answers (sequential, cached) ------------------------------
+    answers: list[tuple[GoldenQuestion, GeneratedAnswer, bool]] = []
     for question in questions:
         path = CACHE_DIR / _cache_key(question.id, gen_config)
         generated = await _load_cached(path) if use_cache else None
@@ -287,19 +316,37 @@ async def run_tier2(
         else:
             n_cached += 1
 
-        if judge and generated.answer and not generated.error:
-            scores = await judge_answer(
+        answers.append((question, generated, came_from_cache))
+
+    # --- phase 2: judging (concurrent, bounded) -----------------------------
+    gate = asyncio.Semaphore(max(1, judge_concurrency))
+
+    async def score_one(
+        question: GoldenQuestion, generated: GeneratedAnswer
+    ) -> JudgeScores:
+        if not judge:
+            return JudgeScores.failed("judging skipped")
+        if generated.error or not generated.answer:
+            return JudgeScores.failed(generated.error or "empty answer")
+        async with gate:
+            return await judge_answer(
                 question=question.question,
                 answer=generated.answer,
                 contexts=generated.contexts,
                 reference=question.expected_answer,
                 metrics=metrics,
             )
-        else:
-            scores = JudgeScores.failed(
-                generated.error or ("judging skipped" if not judge else "empty answer")
-            )
 
+    # gather preserves ORDER regardless of completion order, so rows still line
+    # up with the golden set -- which matters because the report is diffed
+    # between runs. judge_answer never raises, so no return_exceptions here.
+    scored = await asyncio.gather(
+        *(score_one(q, g) for q, g, _ in answers)
+    )
+
+    for (question, generated, came_from_cache), scores in zip(
+        answers, scored, strict=True
+    ):
         results.append(
             Tier2QuestionResult(
                 question_id=question.id,
@@ -323,6 +370,7 @@ async def run_tier2(
             "judge_model": settings.judge_model,
             "judged": judge,
             "metrics": list(metrics),
+            "judge_concurrency": judge_concurrency,
             "ragas_available": available,
             "ragas_note": why,
             "n_questions": len(questions),

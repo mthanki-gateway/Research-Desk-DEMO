@@ -27,8 +27,19 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # --- dev: source is bind-mounted by compose, so don't COPY it in -------------
 FROM base AS dev
+# `--extra eval` installs RAGAS, and its absence here was a silent hole.
+#
+# Tier 2 imports ragas function-locally and degrades to JudgeScores.failed()
+# when it is missing, which is the right behaviour for an optional extra --
+# except that it meant the whole judge reported "ragas is not installed" rather
+# than a score, in the one image where evaluation actually runs. Every Tier 2
+# number was None and the harness said so quietly, in a field nobody reads.
+#
+# DEV ONLY, deliberately. ragas pulls pandas, datasets and pyarrow; the prod
+# stage below stays at 177MB and cannot judge anything, which is correct --
+# evaluation is a development activity and serving a request never needs it.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --group dev
+    uv sync --frozen --no-install-project --group dev --extra eval
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 

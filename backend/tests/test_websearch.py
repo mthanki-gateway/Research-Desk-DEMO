@@ -37,7 +37,18 @@ ORGANIC = {
 
 
 def _settings(**overrides) -> Settings:
-    return Settings(**{"google_api_key": "x", **overrides})
+    """Settings with the ambient environment pinned out.
+
+    `serper_api_key=""` is EXPLICIT, and it has to be. Settings reads the
+    process environment, so once a real SERPER_API_KEY was configured in .env
+    every "unconfigured" test inherited it -- `test_off_without_a_key` failed,
+    and `test_search_returns_empty_when_unconfigured` went to the live Serper
+    API and searched for the string "anything". A test that changes behaviour
+    depending on whether a developer has a key is not a test.
+    """
+    return Settings(
+        **{"google_api_key": "x", "serper_api_key": "", **overrides}
+    )
 
 
 def _hit(n: int, *, source: str = "document") -> SearchHit:

@@ -27,6 +27,11 @@ RAGAS lives in the optional `eval` extra, so every import here is
 function-local. A module-level import would make this file -- and the whole
 evaluation package with it -- unimportable on a default install.
 
+The DEV image installs the extra (`uv sync --group dev --extra eval`, see
+backend/Dockerfile); prod does not, and cannot judge anything. That is correct:
+evaluation is a development activity, ragas pulls pandas/datasets/pyarrow, and
+serving a request never needs any of it. Outside Docker:
+
     uv sync --extra eval
 """
 
@@ -97,6 +102,9 @@ def _build_judge():
     RAGAS takes its LLM and embeddings through LangChain wrappers.
     `langchain-google-genai` was already a declared dependency in this project
     and never imported; this is the first thing that actually uses it.
+
+    Call `get_judge()` rather than this -- the wrapper must be shared across
+    questions or its rate limiter is meaningless. See the note there.
     """
     from langchain_core.rate_limiters import InMemoryRateLimiter
     from langchain_google_genai import (
@@ -159,11 +167,64 @@ def _build_judge():
     return llm, embeddings
 
 
-# Metrics that need no reference answer, and are the cheapest per question.
-# The default set, because they are also the two that matter most:
-# faithfulness IS the hallucination metric, and relevancy catches the
-# faithful-but-useless answer.
+# Cached, and this is load-bearing rather than an optimisation.
+#
+# `_build_judge` constructs an InMemoryRateLimiter, whose token bucket is
+# PER INSTANCE. Calling it once per question -- which is what `judge_answer`
+# used to do -- gave every question a fresh, full bucket, so a 20-question run
+# created 20 independent limiters and paced at 20x the intended rate. The
+# limiter existed, was configured correctly, and throttled nothing across the
+# run: exactly the trap `get_llm()` in llm.py documents for its own clients.
+#
+# Keyed on the settings that shape it, so changing the judge model or its quota
+# in a test or a REPL rebuilds rather than silently reusing the old one.
+_judge_cache: dict[tuple[str, int], tuple] = {}
+
+
+def get_judge():
+    """The shared judge wrapper: (llm, embeddings). Built once per config."""
+    settings = get_settings()
+    key = (settings.judge_model, settings.judge_requests_per_minute)
+    if key not in _judge_cache:
+        _judge_cache[key] = _build_judge()
+        log.info(
+            "judge_ready", model=settings.judge_model,
+            rpm=settings.judge_requests_per_minute,
+        )
+    return _judge_cache[key]
+
+
+def reset_judge_cache() -> None:
+    """Drop the cached wrapper. For tests, which must not share a limiter."""
+    _judge_cache.clear()
+
+
+REFERENCE_METRICS = ("context_precision", "context_recall")
+
+
+def reference_gap(metrics: tuple[str, ...], reference: str) -> str | None:
+    """Why the reference-based metrics cannot be scored, or None if they can.
+
+    Pure, and extracted for that reason: it is a precondition on the INPUTS,
+    with no dependency on ragas being installed, so it is testable on a default
+    install where every other path through `judge_answer` stops at the import.
+    """
+    if not set(REFERENCE_METRICS) & set(metrics):
+        return None  # not asked for; nothing to explain
+    if reference.strip():
+        return None
+    return "context_precision/recall: no reference answer"
+
+
+# Metrics needing no reference answer. Faithfulness IS the hallucination
+# metric, and relevancy catches the faithful-but-useless answer, so this pair
+# is what `--cheap-metrics` falls back to when a full run is too slow.
 CHEAP_METRICS = ("faithfulness", "answer_relevancy")
+# The DEFAULT, and the full RAGAS core quartet. The two reference-based metrics
+# were opt-in behind --all-metrics while ragas was not installed at all, which
+# meant the advertised "judged by RAGAS" was measuring half the suite at best
+# and nothing at worst. Every golden question carries an `expected_answer`, so
+# there is a reference for all of them and no reason to default to half.
 ALL_METRICS = (*CHEAP_METRICS, "context_precision", "context_recall")
 
 
@@ -173,7 +234,7 @@ async def judge_answer(
     answer: str,
     contexts: list[str],
     reference: str = "",
-    metrics: tuple[str, ...] = CHEAP_METRICS,
+    metrics: tuple[str, ...] = ALL_METRICS,
 ) -> JudgeScores:
     """Score one answer with RAGAS. Never raises.
 
@@ -189,6 +250,22 @@ async def judge_answer(
         return JudgeScores.failed(why)
 
     try:
+        # DEPRECATION, known and deliberate. The lock pins ragas 0.4.3, where
+        # every name below resolves through a `__getattr__` shim that warns
+        # "Importing X from 'ragas.metrics' is deprecated and will be removed
+        # in v1.0. Please use 'ragas.metrics.collections' instead." The same
+        # applies to LangchainLLMWrapper in _build_judge, which points at
+        # `llm_factory`.
+        #
+        # NOT migrated yet, for one concrete reason: 0.4's replacement path is
+        # built around an OpenAI client, and this judge is Gemini behind
+        # LangChain wrappers. Moving to it without being able to run the suite
+        # would trade a working deprecated API for an unverified one.
+        #
+        # What this needs is an upper bound (`ragas>=0.2,<1.0`) so a future
+        # relock cannot silently pull v1.0 and delete the judge. That is a
+        # pyproject change and therefore a uv.lock regeneration -- see the
+        # Dockerfile for why those two must move together.
         from ragas import SingleTurnSample
         from ragas.metrics import (
             Faithfulness,
@@ -197,7 +274,7 @@ async def judge_answer(
             ResponseRelevancy,
         )
 
-        llm, embeddings = _build_judge()
+        llm, embeddings = get_judge()
         sample = SingleTurnSample(
             user_input=question,
             response=answer,
@@ -246,11 +323,18 @@ async def judge_answer(
     # compute them without one.
     #
     # They are also the EXPENSIVE pair. LLMContextPrecisionWithReference makes
-    # roughly one call per context chunk, so its cost scales with top_k -- which
-    # is why they are opt-in. Measured on a 15 requests/minute judge: all four
-    # metrics took ~9 minutes for a single question, so a 20-question suite is
-    # a multi-hour job rather than something to run between edits.
-    if reference.strip():
+    # roughly one call per context chunk, so its cost scales with top_k.
+    # Measured on a 15 requests/minute judge, sequentially: all four metrics
+    # took ~9 minutes for a single question. `run_tier2` now issues questions
+    # concurrently against this shared limiter, which is what makes the full
+    # quartet a practical default rather than an overnight job.
+    # Recorded, not silent. Two Nones with no explanation is the same ambiguity
+    # JudgeScores exists to avoid -- a reader cannot tell a judge failure from a
+    # question that had no ground truth to compare against.
+    gap = reference_gap(metrics, reference)
+    if gap:
+        errors.append(gap)
+    elif reference.strip():
         if "context_precision" in metrics:
             precision = await score(
                 "context_precision", LLMContextPrecisionWithReference(llm=llm)
