@@ -16,15 +16,12 @@ import {
   IconQuote,
   IconTrash,
 } from "../../icons";
+import type { TurnSettings } from "@/lib/prefs";
 
-export type TurnSettings = {
-  topK: number;
-  multiQuery: boolean;
-  /** Let the agent ask what a vague question means before searching. */
-  clarify: boolean;
-  /** Gather evidence with the tool-calling loop instead of a fixed plan. */
-  react: boolean;
-};
+// Defined in lib/prefs.ts, next to the defaults and the validation that reads
+// stored values back. Re-exported here so existing importers are unaffected --
+// the rail is where every consumer already looks for this type.
+export type { TurnSettings };
 
 /** Rail widths, shared so the page's padding animation matches exactly. */
 export const RAIL_WIDTH = "20rem";

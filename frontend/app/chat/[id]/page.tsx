@@ -26,7 +26,13 @@ import {
   IconThumbUp,
 } from "../../icons";
 import Clarify from "./clarify";
-import Rail, { type TurnSettings } from "./rail";
+import Rail from "./rail";
+import {
+  DEFAULT_TURN_SETTINGS,
+  type TurnSettings,
+  loadTurnSettings,
+  saveTurnSettings,
+} from "@/lib/prefs";
 
 /**
  * "https://www.reuters.com/x/y?q=1" -> "reuters.com".
@@ -86,14 +92,14 @@ function Conversation({ id }: { id: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [railOpen, setRailOpen] = useState(false);
-  const [settings, setSettings] = useState<TurnSettings>({
-    topK: 5,
-    multiQuery: false,
-    clarify: true,
-    // On by default: the documents are one source, not the boundary, and this
-    // is the only mode that can also reach the web. Matches REACT_DEFAULT.
-    react: true,
-  });
+  // Starts at the defaults, then the saved values arrive in an effect below.
+  //
+  // NOT `useState(loadTurnSettings)`: this is a client component but Next still
+  // renders it on the server for the initial HTML, where `localStorage` does
+  // not exist. Reading it in the initialiser either throws during SSR or makes
+  // the server and client disagree about every toggle, which React reports as
+  // a hydration mismatch.
+  const [settings, setSettings] = useState<TurnSettings>(DEFAULT_TURN_SETTINGS);
   /**
    * The graph paused and is waiting on the human-in-the-loop prompt.
    *
@@ -107,6 +113,25 @@ function Conversation({ id }: { id: string }) {
   // The first scroll should jump, not glide. A smooth scroll on open read as
   // jank when moving between chats.
   const hasPainted = useRef(false);
+
+  // Restore saved settings once, after mount, for the SSR reason above.
+  useEffect(() => {
+    setSettings(loadTurnSettings());
+  }, []);
+
+  /**
+   * Change settings and remember them.
+   *
+   * Writes on the user's action rather than in an effect watching `settings`.
+   * Such an effect would also fire on the mount that still holds the defaults,
+   * overwriting the stored values a moment before the restore effect above
+   * replaced them -- correct in the end, but it puts the wrong thing in
+   * storage in between, and a tab closed in that window would lose the prefs.
+   */
+  const changeSettings = useCallback((next: TurnSettings) => {
+    setSettings(next);
+    saveTurnSettings(next);
+  }, []);
 
   useEffect(() => {
     setRailActive(true);
@@ -467,7 +492,7 @@ function Conversation({ id }: { id: string }) {
           onClose={() => setRailOpen(false)}
           onCollapse={setRailCollapsed}
           onToggleDoc={toggleDoc}
-          onSettings={setSettings}
+          onSettings={changeSettings}
           onClearChunk={closeChunk}
           onDeleteSession={remove}
         />
