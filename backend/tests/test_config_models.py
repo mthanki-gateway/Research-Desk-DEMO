@@ -60,25 +60,55 @@ class TestModelSplit:
         s = _profile_settings(name)
         assert s.judge_model != s.answer_model
 
-    def test_workhorse_has_more_request_budget_than_the_answer_model(self):
-        """The reason for the split at all.
+    @pytest.mark.parametrize("name", list(MODEL_PROFILES))
+    def test_no_request_path_model_is_on_the_5_rpm_tier(self, name):
+        """The constraint that actually bites.
 
-        The workhorse runs plan + clarify + critique -- three or more calls per
-        turn. The answer model runs one, occasionally two. Reversing these would
-        put a four-call sequence on a 5 rpm budget and stall every turn in
-        backoff.
+        A turn spends 3-5 model calls on the request path -- plan, rerank,
+        draft, critique. At 5 requests/minute that is one question every two
+        minutes, and a critique retry pushes it into backoff. The answer model
+        sat there until it was moved: measured, three of four evaluation
+        questions failed with 429 in a single run.
 
-        Gemini only: on the gemma profile they are the same model and therefore
-        the same budget, which is the point of that profile.
+        Verified empirically rather than read off a model name -- seven requests
+        inside a minute returning 200 is what separates the 15 rpm tier from
+        the 5 rpm one.
+        """
+        s = _profile_settings(name)
+        for role in (s.llm_model, s.answer_model, s.rewriter_model):
+            assert s.limits_for(role)[0] >= 15, role
+
+    def test_the_judge_is_at_least_as_strong_as_the_generator(self):
+        """A critic weaker than the generator rubber-stamps.
+
+        This was WRONG before and the test did not exist to catch it: the judge
+        was flash-lite and the answer model was 3.6-flash, so the weaker model
+        was grading the stronger one's output. Encoded here as "the judge is
+        not the cheap tier", which is the property that broke.
         """
         s = _profile_settings("gemini")
-        assert s.limits_for(s.llm_model)[0] > s.limits_for(s.answer_model)[0]
+        assert s.judge_model != s.answer_model
+        assert "lite" not in s.judge_model, "the judge must not be the cheaper tier"
 
-    def test_each_model_gets_its_own_limits(self):
-        """A shared bucket would throttle everything at the strictest limit."""
+    def test_a_slow_judge_is_acceptable_where_a_slow_answer_is_not(self):
+        """Judging is an offline batch job over cached answers, so its rate
+        costs wall-clock on an evaluation run rather than latency on a request.
+        That asymmetry is what makes a 5 rpm judge fine and a 5 rpm answer
+        model not."""
         s = _profile_settings("gemini")
-        seen = {s.limits_for(m) for m in (s.llm_model, s.answer_model, s.rewriter_model)}
-        assert len(seen) == 3, "two models resolved to identical limits"
+        assert s.limits_for(s.judge_model)[0] < s.limits_for(s.answer_model)[0]
+
+    def test_each_distinct_model_gets_its_own_limits(self):
+        """A shared bucket would throttle everything at the strictest limit.
+
+        Counted over DISTINCT model ids: the answer model and the workhorse are
+        now the same model, which correctly shares one limiter -- the free-tier
+        quota is per model, so two limiters on one id would permit double the
+        real allowance.
+        """
+        s = _profile_settings("gemini")
+        distinct = {s.llm_model, s.answer_model, s.rewriter_model, s.judge_model}
+        assert len({s.limits_for(m) for m in distinct}) == len(distinct)
 
     def test_roles_sharing_a_model_share_one_budget(self):
         """The gemma profile points several roles at one model, and that is

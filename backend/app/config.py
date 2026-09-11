@@ -36,9 +36,38 @@ MODEL_PROFILES: dict[str, dict[str, object]] = {
         "llm_model": "models/gemini-3.5-flash-lite",
         "llm_requests_per_minute": 15,
         "llm_tokens_per_minute": 250_000,
-        "answer_model": "models/gemini-3.6-flash",
-        "answer_requests_per_minute": 5,
+        # THE ANSWER MODEL IS ON THE 15 RPM TIER, not the 5 rpm one.
+        #
+        # It was gemini-3.6-flash, which is the stronger model and allows FIVE
+        # REQUESTS PER MINUTE. A turn spends 1-2 of them on the draft, so two
+        # questions in quick succession -- or one question plus a critique
+        # retry -- exhausted the budget and stalled in backoff. Measured
+        # repeatedly during development, including three of four evaluation
+        # questions failing with 429 in a single run.
+        #
+        # Verified rather than assumed: seven requests fired inside one minute
+        # returned 200 with zero 429s, which is what distinguishes this tier
+        # from the 5 rpm one. gemini-3.1-flash-lite was 503 (unavailable) and
+        # gemini-2.5-flash-lite flaked once in the same burst, so 3.5 is the
+        # pick. `gemini-flash-lite-latest` also passed and is deliberately NOT
+        # used: a moving alias cannot be the model an evaluation is reported
+        # against.
+        "answer_model": "models/gemini-3.5-flash-lite",
+        "answer_requests_per_minute": 15,
         "answer_tokens_per_minute": 250_000,
+        # Now the STRONGER model, which is the right way round and was not
+        # previously true. The critic must be at least as strong as the
+        # generator or it rubber-stamps, and the old split had flash-lite
+        # grading 3.6-flash -- the weaker model judging the stronger one.
+        #
+        # Its 5 rpm is affordable HERE in a way it was not for answering:
+        # judging is an offline batch job with answers already cached, so it
+        # costs wall-clock on an evaluation run rather than latency on a
+        # request. For fast iteration set JUDGE_MODEL=models/gemini-flash-lite-
+        # latest, at the cost of a judge no stronger than the generator.
+        "judge_model": "models/gemini-3.6-flash",
+        "judge_requests_per_minute": 5,
+        "judge_tokens_per_minute": 250_000,
         "rewriter_model": _GEMMA,
         "history_full": True,
         "history_max_tokens": 200_000,
@@ -64,6 +93,12 @@ MODEL_PROFILES: dict[str, dict[str, object]] = {
         "answer_model": _GEMMA,
         "answer_requests_per_minute": 30,
         "answer_tokens_per_minute": 16_000,
+        # Stays on Flash Lite: stronger than Gemma (so it does not rubber-stamp)
+        # and 15 rpm rather than 5, which matters because this profile exists to
+        # make evaluation runs affordable in the first place.
+        "judge_model": "models/gemini-3.5-flash-lite",
+        "judge_requests_per_minute": 15,
+        "judge_tokens_per_minute": 250_000,
         "rewriter_model": _GEMMA,
         # The whole transcript does not fit in a 16K/minute budget -- it was
         # the arrival of Gemini's 250K that made HISTORY_FULL possible at all.
@@ -440,6 +475,25 @@ class Settings(BaseSettings):
     # Passage characters shown to the reranker. Enough to judge relevance,
     # short enough that 20 candidates do not become a 9K-token prompt.
     rerank_excerpt_chars: int = 800
+
+    # --- parent-child retrieval ---
+    # Search matches small chunks; the model reads the whole SECTION containing
+    # them. Chunk size is otherwise one knob serving two opposed jobs --
+    # retrieval wants small and sharp, generation wants surrounding context.
+    #
+    # A parent is derived, not stored: `chunking.py` already makes headings hard
+    # boundaries, so (document_id, heading) identifies a section and no
+    # migration or re-ingest is needed.
+    #
+    # Off until measured on Tier 2. It cannot move Tier 1 -- that scores which
+    # CHUNKS were retrieved, and this changes the text handed to the model
+    # afterwards -- so the evidence has to come from faithfulness and context
+    # precision, which cost a judge run.
+    parent_retrieval: bool = False
+    # Ceiling on one assembled section. A cap is needed because sections vary
+    # wildly and five expanded parents could otherwise dwarf the token budget --
+    # on the gemma profile, a minute's entire allowance.
+    parent_max_chars: int = 6000
 
     # --- conversation history ---
     # Send the WHOLE transcript rather than a rolling summary plus the last

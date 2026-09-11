@@ -145,6 +145,17 @@ class ResearchState(TypedDict, total=False):
     # Set by `resolve` when it answers from partial evidence, so the UI and the
     # trace can tell a complete answer from a knowingly incomplete one.
     partial: bool
+    # The answer text is an ERROR MESSAGE, not an answer.
+    #
+    # `draft` degrades gracefully: a quota error or a 503 becomes readable text
+    # rather than a 502, which is right for a user staring at a chat window.
+    # But it makes the failure indistinguishable from success to anything
+    # downstream -- the evaluation harness cached one such message and scored
+    # it against RAGAS faithfulness, where "the answer could not be generated
+    # (503)" is supported by no passage and drags the mean down forever.
+    #
+    # So the degradation stays, and the fact of it is carried alongside.
+    generation_failed: bool
     # Node-by-node record of what happened, so the UI can show the graph's
     # path. This is the payoff of an explicit state machine: the reasoning is
     # inspectable data, not buried in logs.

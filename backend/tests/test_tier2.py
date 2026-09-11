@@ -397,6 +397,20 @@ class TestGenConfigCoversTheAnswerModel:
         )
 
     @pytest.mark.asyncio
+    async def test_the_retrieval_pipeline_is_in_the_key(self, harness):
+        """Every retrieval stage changes which passages the answer is built
+        from, so comparing "with reranking" against "without" would otherwise
+        score one cached set of answers against itself. An evaluation cache
+        that ignores the thing under test produces confident nonsense."""
+        async def ok(**kw):
+            return JudgeScores(1.0, 1.0, 1.0, 1.0)
+
+        harness.setattr(tier2_mod, "judge_answer", ok)
+        report = await tier2_mod.run_tier2([_question("a")])
+        for field in ("hybrid", "rerank", "floor", "parents"):
+            assert field in report.config, field
+
+    @pytest.mark.asyncio
     async def test_run_tier2_records_both_models(self, harness):
         async def ok(**kw):
             return JudgeScores(1.0, 1.0, 1.0, 1.0)
@@ -442,3 +456,145 @@ class TestGenConfigCoversTheAnswerModel:
         )
         await tier2_mod.run_tier2([_question("a")])
         assert generated == ["a", "a"], "reused an answer from a different model"
+
+
+class TestTheHarnessRecordsWhatTheModelSaw:
+    """The judge must be given the context the model was given.
+
+    The harness recorded bare `hit.text`, omitting the
+    `[n] document · filename › heading` label that `build_context` puts in
+    front of every passage. Because the drafter is REQUIRED to name its source
+    in the sentence, RAGAS then decomposed "According to acme-report.md, ..."
+    into a claim about a filename that appeared nowhere in the context it was
+    handed, and scored it unsupported.
+
+    Measured on four questions, same answers and same retrieval, changing only
+    what was recorded: faithfulness 0.125 -> 0.917.
+    """
+
+    def test_blocks_carry_the_source_label(self):
+        from app.services.retrieval import context_blocks
+
+        blocks = context_blocks([_search_hit()])
+        assert "acme-report.md" in blocks[0]
+        assert "Financial Summary" in blocks[0]
+
+    def test_blocks_are_what_build_context_joins(self):
+        """One renderer, so the two can never drift. If they did, this bug
+        would come back in a form nothing detects."""
+        from app.services.retrieval import build_context, context_blocks
+
+        hits = [_search_hit(), _search_hit(2)]
+        assert build_context(hits) == "\n\n".join(context_blocks(hits))
+
+    def test_one_block_per_hit(self):
+        from app.services.retrieval import context_blocks
+
+        assert len(context_blocks([_search_hit(), _search_hit(2)])) == 2
+
+
+@pytest.mark.asyncio
+class TestAFailedGenerationIsNotAnAnswer:
+    """`draft` turns a 503 or a 429 into readable text rather than raising --
+    right for a chat window, wrong for a harness.
+
+    `tier2` already refused to cache failures, but the guard checked for an
+    EXCEPTION and this path returns normally. So "The answer could not be
+    generated (503...)" was cached and scored for faithfulness, where no
+    passage supports it, dragging the mean down on every later run.
+    """
+
+    async def test_a_flagged_failure_is_recorded_as_an_error(self, monkeypatch, tmp_path):
+        import app.agent.graph as graph_mod
+
+        monkeypatch.setattr(tier2_mod, "CACHE_DIR", tmp_path / "cache")
+        monkeypatch.setattr(tier2_mod, "get_settings", lambda: _settings())
+
+        class Failed:
+            answer = "The answer could not be generated (503)."
+            evidence: list = []
+            iterations, sufficient = 0, True
+            sub_questions: list = []
+            citations: list = []
+            failed = True
+
+        async def fake_run_agent(question, **kw):
+            return Failed()
+
+        monkeypatch.setattr(graph_mod, "run_agent", fake_run_agent)
+        out = await tier2_mod._generate(
+            _question("a"), mode="agent", top_k=5, multi_query=False, owner_id=None
+        )
+        assert out.error and "generation failed" in out.error
+
+    async def test_it_is_not_cached(self, monkeypatch, tmp_path):
+        """Caching it would make every later run reuse the outage forever."""
+        import app.agent.graph as graph_mod
+
+        cache = tmp_path / "cache"
+        monkeypatch.setattr(tier2_mod, "CACHE_DIR", cache)
+        monkeypatch.setattr(tier2_mod, "get_settings", lambda: _settings())
+        monkeypatch.setattr(tier2_mod, "ragas_available", lambda: (True, ""))
+
+        class Failed:
+            answer = "The answer could not be generated (429)."
+            evidence: list = []
+            iterations, sufficient = 0, True
+            sub_questions: list = []
+            citations: list = []
+            failed = True
+
+        async def fake_run_agent(question, **kw):
+            return Failed()
+
+        async def ok(**kw):
+            return JudgeScores(1.0, 1.0, 1.0, 1.0)
+
+        monkeypatch.setattr(graph_mod, "run_agent", fake_run_agent)
+        monkeypatch.setattr(tier2_mod, "judge_answer", ok)
+
+        await tier2_mod.run_tier2([_question("a")])
+        second = await tier2_mod.run_tier2([_question("a")])
+        assert second.n_generated == 1, "an outage was cached as an answer"
+
+    async def test_a_real_answer_still_caches(self, monkeypatch, tmp_path):
+        import app.agent.graph as graph_mod
+
+        monkeypatch.setattr(tier2_mod, "CACHE_DIR", tmp_path / "cache")
+        monkeypatch.setattr(tier2_mod, "get_settings", lambda: _settings())
+
+        class Ok:
+            answer = "A real answer [1]."
+            evidence: list = []
+            iterations, sufficient = 1, True
+            sub_questions: list = []
+            citations = [1]
+            failed = False
+
+        async def fake_run_agent(question, **kw):
+            return Ok()
+
+        monkeypatch.setattr(graph_mod, "run_agent", fake_run_agent)
+        out = await tier2_mod._generate(
+            _question("a"), mode="agent", top_k=5, multi_query=False, owner_id=None
+        )
+        assert out.error is None
+
+
+def _search_hit(n: int = 1):
+    import uuid as _uuid
+
+    from app.services.vectorstore import SearchHit
+
+    return SearchHit(
+        chunk_id=_uuid.UUID(int=n),
+        document_id=_uuid.UUID(int=7),
+        filename="acme-report.md",
+        page=1,
+        chunk_index=n,
+        heading="## Financial Summary",
+        text="Gross margin improved to 62.1% from 58.7%.",
+        score=0.8,
+        meta={},
+        found_by=["q"],
+    )

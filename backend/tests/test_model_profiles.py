@@ -49,10 +49,20 @@ class TestProfileSuppliesDefaults:
         for field in ("llm_model", "answer_model", "rewriter_model"):
             assert "gemma" in profile[field], field
 
-    def test_gemini_profile_keeps_the_three_way_split(self):
+    def test_gemini_profile_splits_by_QUOTA_not_by_role(self):
+        """The split was never about roles, it was about capacity.
+
+        It used to put the answer on a stronger 5 rpm model and everything else
+        on a 15 rpm one. That inverted the actual constraint: the request path
+        spends 3-5 calls per turn, so the scarcest budget must not sit on it.
+        The answer and the workhorse are now ONE model sharing one limiter --
+        correct, because free-tier quota is per model -- and what is still split
+        out is the rewriter (higher rpm, throughput over quality) and the judge
+        (stronger, must not grade its own output).
+        """
         profile = MODEL_PROFILES["gemini"]
-        assert profile["answer_model"] != profile["llm_model"]
         assert "gemma" in profile["rewriter_model"], "rewriting stays on the 30 rpm model"
+        assert profile["judge_model"] != profile["answer_model"]
 
     def test_the_profile_reaches_unset_fields(self):
         """The merge mechanism itself, on a field nothing in the environment

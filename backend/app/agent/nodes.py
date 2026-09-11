@@ -735,6 +735,10 @@ async def draft(state: ResearchState) -> dict:
             "draft": f"The answer could not be generated ({exc}).",
             "citations": [],
             "sufficient": True,  # a retry would hit the same wall
+            # Flagged, so callers that are not a chat window can tell this
+            # apart from an answer. Without it the evaluation harness cached
+            # this string and scored it for faithfulness.
+            "generation_failed": True,
             "trace": [{"node": "draft", "error": str(exc)}],
         }
 
@@ -773,6 +777,7 @@ async def draft(state: ResearchState) -> dict:
             "draft": "The model did not return a usable answer. Try asking again.",
             "citations": [],
             "sufficient": True,
+            "generation_failed": True,
             "trace": [{"node": "draft", "error": "no usable answer"}],
         }
 

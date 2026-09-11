@@ -262,6 +262,10 @@ class AgentResult:
         # resolve produced the final answer -- without this the UI cannot tell a
         # complete answer from a knowingly incomplete one.
         self.partial: bool = bool(state.get("partial"))
+        # `answer` is an error message rather than an answer. Callers that are
+        # not a chat window -- the evaluation harness above all -- must be able
+        # to tell the difference; see `generation_failed` in state.py.
+        self.failed: bool = bool(state.get("generation_failed"))
         self.clarification: str | None = state.get("clarification")
         self.original_question: str | None = state.get("original_question")
         self.cancelled: bool = bool(state.get("cancelled"))

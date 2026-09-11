@@ -34,6 +34,8 @@ import asyncio
 import json
 import sys
 
+import structlog
+
 from app.services.eval_runner import DEFAULT_K_VALUES, run_tier1
 from app.services.golden import load_golden_set
 from app.services.judge import ALL_METRICS, CHEAP_METRICS, ragas_available
@@ -246,6 +248,18 @@ async def main() -> int:
         ),
     )
     args = parser.parse_args()
+
+    if args.json:
+        # Logs to STDERR, so `--json > report.json` yields a parseable file.
+        #
+        # structlog's default writes to stdout, so the report came out
+        # interleaved with progress lines and every attempt to parse it failed
+        # at "Extra data: line 1 column 5". The docstring below already promised
+        # "stdout only, so `> before.json` captures a clean document" -- it was
+        # true of the print and untrue of the process.
+        structlog.configure(
+            logger_factory=structlog.PrintLoggerFactory(file=sys.stderr)
+        )
 
     questions = load_golden_set()
     if args.tag:

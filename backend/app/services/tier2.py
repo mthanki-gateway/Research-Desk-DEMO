@@ -38,6 +38,7 @@ from app.services.judge import (
     judge_answer,
     ragas_available,
 )
+from app.services.retrieval import context_blocks
 
 log = structlog.get_logger()
 
@@ -159,7 +160,7 @@ async def _generate(
                 question_id=question.id,
                 question=question.question,
                 answer=result.answer,
-                contexts=[h.text for h in result.hits],
+                contexts=context_blocks(result.hits),
                 citations=list(result.sources_used),
             )
 
@@ -186,11 +187,20 @@ async def _generate(
             question_id=question.id,
             question=question.question,
             answer=result.answer,
-            contexts=[h.text for h in result.evidence],
+            contexts=context_blocks(result.evidence),
             iterations=result.iterations,
             sufficient=result.sufficient,
             sub_questions=list(result.sub_questions),
             citations=list(result.citations),
+            # `draft` turns a quota error or a 503 into readable text instead
+            # of raising -- right for a chat window, wrong here. Without this
+            # the harness cannot tell an outage from an answer: it cached
+            # "The answer could not be generated (503...)" and scored it for
+            # faithfulness, where no passage supports it, dragging the mean
+            # down on every later run.
+            error=(
+                f"generation failed: {result.answer[:200]}" if result.failed else None
+            ),
         )
     except Exception as exc:  # noqa: BLE001 - one failure must not end the run
         log.warning("tier2_generate_failed", question_id=question.id, error=str(exc))
@@ -284,6 +294,19 @@ async def run_tier2(
         # in agent mode, which changes what evidence the answer is built from.
         "answer_model": settings.answer_model,
         "model": settings.llm_model,
+        # THE RETRIEVAL PIPELINE, because every one of these changes which
+        # passages the answer is built from.
+        #
+        # Added after the same omission bit twice. The key started with only
+        # `model`, missed `answer_model` -- the model that actually writes the
+        # answer -- and would have missed all of these, so comparing "with
+        # reranking" against "without" would have silently scored one cached
+        # set of answers against itself. An evaluation cache that ignores the
+        # thing under test produces confident, meaningless numbers.
+        "hybrid": settings.hybrid_search,
+        "rerank": settings.rerank,
+        "floor": settings.retrieval_score_floor,
+        "parents": settings.parent_retrieval,
     }
 
     await asyncio.to_thread(CACHE_DIR.mkdir, parents=True, exist_ok=True)

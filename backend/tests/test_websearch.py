@@ -150,22 +150,42 @@ class TestToolSpecs:
 
     def test_web_is_omitted_when_unconfigured(self, monkeypatch):
         """A tool the model can see but cannot use is worse than no tool: it
-        keeps choosing it, gets nothing back, and burns rounds."""
+        keeps choosing it, gets nothing back, and burns rounds.
+
+        The other two are unconditional -- `search_documents` is the point of
+        the app, and `read_around` reads already-retrieved passages, so neither
+        depends on external configuration.
+        """
         monkeypatch.setattr(tools.websearch, "enabled", lambda: False)
-        assert self._names(tools.tool_specs()) == [tools.SEARCH_DOCUMENTS]
+        assert tools.SEARCH_WEB not in self._names(tools.tool_specs())
 
     def test_web_is_declared_when_configured(self, monkeypatch):
         monkeypatch.setattr(tools.websearch, "enabled", lambda: True)
-        assert self._names(tools.tool_specs()) == [
-            tools.SEARCH_DOCUMENTS,
-            tools.SEARCH_WEB,
-        ]
+        assert tools.SEARCH_WEB in self._names(tools.tool_specs())
 
-    def test_every_declaration_requires_a_query(self, monkeypatch):
+    def test_the_context_ladder_is_always_available(self, monkeypatch):
+        """`read_around` is the rung between "the matched passage" and "the
+        whole document". Without it the model's only move when a passage refers
+        to something it cannot see is to search again using terms from the very
+        sentence it does not understand -- which returns the same passage."""
+        monkeypatch.setattr(tools.websearch, "enabled", lambda: False)
+        assert tools.READ_AROUND in self._names(tools.tool_specs())
+
+    def test_every_declaration_is_usable(self, monkeypatch):
+        """A description and at least one required parameter. A tool the model
+        cannot tell when to use is one it will use wrongly."""
         monkeypatch.setattr(tools.websearch, "enabled", lambda: True)
         for decl in tools.tool_specs()[0]["functionDeclarations"]:
-            assert decl["parameters"]["required"] == ["query"]
-            assert decl["description"].strip()
+            assert decl["description"].strip(), decl["name"]
+            assert decl["parameters"]["required"], decl["name"]
+            for field in decl["parameters"]["required"]:
+                assert field in decl["parameters"]["properties"], decl["name"]
+
+    def test_the_search_tools_take_a_query(self, monkeypatch):
+        monkeypatch.setattr(tools.websearch, "enabled", lambda: True)
+        for decl in tools.tool_specs()[0]["functionDeclarations"]:
+            if decl["name"] in (tools.SEARCH_DOCUMENTS, tools.SEARCH_WEB):
+                assert decl["parameters"]["required"] == ["query"]
 
 
 @pytest.mark.asyncio

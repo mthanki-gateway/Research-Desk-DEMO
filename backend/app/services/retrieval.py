@@ -23,6 +23,7 @@ from app.services import tracing
 from app.services.embeddings import get_embeddings
 from app.services.lexical import lexical_search
 from app.services.llm import LLMError, extract_string_list, get_llm
+from app.services.parents import expand_to_parents
 from app.services.rerank import rerank_hits
 from app.services.vectorstore import SearchHit, get_vector_store
 
@@ -370,8 +371,22 @@ async def _finalise(
     """
     settings = get_settings()
     if settings.rerank and len(hits) > 1:
-        return await rerank_hits(query, hits[: settings.rerank_candidates], top_k=k)
-    return hits[:k] if narrows or len(hits) > k else hits
+        hits = await rerank_hits(query, hits[: settings.rerank_candidates], top_k=k)
+    elif narrows or len(hits) > k:
+        hits = hits[:k]
+
+    # LAST, deliberately, and after the cut to k.
+    #
+    # Expanding before the reranker would hand it whole sections to judge, which
+    # is both far more tokens and a worse judgement -- relevance is a property
+    # of the passage that matched, and a long section dilutes it exactly as it
+    # dilutes an embedding. Expanding before the slice would waste assembly on
+    # chunks about to be discarded.
+    #
+    # Dedupe on parent can return FEWER than k, which is correct: three children
+    # of one section are one source, and padding the list back to k would be
+    # inventing corroboration.
+    return await expand_to_parents(hits)
 
 
 # --------------------------------------------------------------------------
@@ -603,6 +618,23 @@ def build_context(hits: list[SearchHit]) -> str:
     middle"), so with a small top_k the strongest evidence leading is the
     simplest good default.
     """
+    return "\n\n".join(context_blocks(hits))
+
+
+def context_blocks(hits: list[SearchHit]) -> list[str]:
+    """The same rendered passages `build_context` joins, as a list.
+
+    Exists so the evaluation harness can record EXACTLY what the model was
+    shown. It previously stored bare `hit.text`, which omitted the
+    `[n] document · filename › heading` label -- and since the drafter is
+    required to name its source in the sentence, RAGAS then decomposed
+    "According to acme-report.md, ..." into a claim about a filename that
+    appeared nowhere in the context it was given.
+
+    Measured: faithfulness 0.0 on an answer whose substantive claim was fully
+    supported. Nothing was wrong with the answer or the retrieval; the judge was
+    handed a different context than the model.
+    """
     blocks: list[str] = []
     for i, hit in enumerate(hits, start=1):
         # EVERY source carries its kind, not just the web ones.
@@ -624,4 +656,4 @@ def build_context(hits: list[SearchHit]) -> str:
             if hit.page is not None:
                 where += f" › p.{hit.page}"
         blocks.append(f"[{i}] {where}\n{hit.text}")
-    return "\n\n".join(blocks)
+    return blocks

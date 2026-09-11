@@ -40,6 +40,7 @@ import structlog
 
 from app.config import get_settings
 from app.services import websearch
+from app.services.parents import read_around
 from app.services.retrieval import retrieve
 from app.services.vectorstore import SearchHit
 
@@ -47,6 +48,7 @@ log = structlog.get_logger()
 
 SEARCH_DOCUMENTS = "search_documents"
 SEARCH_WEB = "search_web"
+READ_AROUND = "read_around"
 
 
 def tool_specs() -> list[dict[str, Any]]:
@@ -83,6 +85,44 @@ def tool_specs() -> list[dict[str, Any]]:
             },
         }
     ]
+
+    # THE MIDDLE RUNG OF THE CONTEXT LADDER.
+    #
+    #   the matched passage        returned by search_documents
+    #   its whole section          automatic, when parent retrieval is on
+    #   a little more, bounded     read_around          <- this
+    #   the whole document         not offered: at this corpus size it would
+    #                              usually mean stuffing the entire file
+    #
+    # Without it the model's only move when a passage refers to something it
+    # cannot see ("this represented a sharp reversal") is to search again with
+    # terms taken from the very sentence it does not understand -- which
+    # retrieves the same passage back.
+    declarations.append(
+        {
+            "name": READ_AROUND,
+            "description": (
+                "Read the passages immediately before and after one you already "
+                "retrieved, in document order. Use when a passage refers to "
+                "something you cannot see -- 'this figure', 'the reversal "
+                "above', a pronoun with no antecedent -- and you need the "
+                "surrounding text rather than a different search. Crosses "
+                "section boundaries."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "chunk_id": {
+                        "type": "string",
+                        "description": "The id of a passage from an earlier search result.",
+                    },
+                    "before": {"type": "integer", "description": "Passages before. 0-3."},
+                    "after": {"type": "integer", "description": "Passages after. 0-3."},
+                },
+                "required": ["chunk_id"],
+            },
+        }
+    )
 
     if websearch.enabled():
         declarations.append(
@@ -146,6 +186,29 @@ async def run_tool(
                 )
             return hits, f"{_coverage_note(hits, top_k)}\n\n{_render_for_model(hits)}"
 
+        if name == READ_AROUND:
+            raw_id = str(args.get("chunk_id", "")).strip()
+            try:
+                anchor = uuid.UUID(raw_id)
+            except ValueError:
+                return [], (
+                    f"{raw_id!r} is not a passage id. Use an id shown in an "
+                    "earlier search result."
+                )
+            hits = await read_around(
+                anchor,
+                before=int(args.get("before", 1) or 0),
+                after=int(args.get("after", 1) or 0),
+                owner_id=owner_id,
+                document_ids=document_ids,
+            )
+            if not hits:
+                # Covers both "no such passage" and "not yours". Deliberately
+                # one message: confirming that an id exists but belongs to
+                # someone else is a leak even without the content.
+                return [], f"No passage with id {raw_id}. Use an id from a search result."
+            return hits, _render_for_model(hits)
+
         if name == SEARCH_WEB:
             if not websearch.enabled():
                 return [], "Web search is not configured."
@@ -195,7 +258,14 @@ def _render_for_model(hits: list[SearchHit]) -> str:
         where = hit.url or hit.filename
         if hit.source == "document" and hit.heading:
             where = f"{hit.filename} › {hit.heading.lstrip('# ').strip()}"
-        blocks.append(f"{where}\n{hit.text}")
+        # The id is a HANDLE, not a citation marker. Citation numbers are
+        # assigned once at drafting time over the accumulated evidence set --
+        # per-result numbers would mean something different every round. An id
+        # is stable and means the same thing everywhere, which is what makes
+        # `read_around` callable at all: without it the model has no way to
+        # name the passage it wants more context around.
+        prefix = f"[id {hit.chunk_id}] " if hit.source == "document" else ""
+        blocks.append(f"{prefix}{where}\n{hit.text}")
     return "\n\n".join(blocks)
 
 
