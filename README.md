@@ -62,6 +62,21 @@ docker compose up --build
 - Frontend — http://localhost:3000
 - API docs — http://localhost:8000/docs
 - Qdrant dashboard — http://localhost:6333/dashboard
+- Langfuse — http://localhost:3001 (needs `--profile obs`)
+- pgweb — http://localhost:8081 (needs `--profile tools`)
+
+Or open every one that is running, in your browser, in one go:
+
+```powershell
+.\scripts\dev-open.ps1        # open what is already up
+.\scripts\dev-open.ps1 -Up    # start the default stack first, then open
+```
+
+`scripts\dev-open.cmd` is the same thing, double-clickable from Explorer. It
+probes each port and opens only the services that answer — Langfuse and pgweb
+live behind compose profiles, so opening all five blindly would usually give
+you two connection-error tabs — and it prints the `docker compose` command for
+anything that is not running.
 
 Model ids drift between releases. Confirm the ones your key actually serves and
 paste real values into `.env`:
