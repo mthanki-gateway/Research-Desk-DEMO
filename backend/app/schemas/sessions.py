@@ -63,6 +63,17 @@ class TurnRequest(BaseModel):
     # loop (multi-hop, can search the web) instead of planning every lookup
     # up front.
     react: bool | None = None
+    # DEVELOPMENT ONLY -- ignored entirely unless APP_ENV=dev.
+    #
+    # Run this one turn on a different model family. "gemma" trades quality for
+    # a 30 rpm / 14,400-per-day budget, which is the only way to exercise the
+    # agent loop repeatedly; the answer model's 5 rpm allows about one question
+    # every two minutes.
+    #
+    # Ignored rather than rejected in prod: it is a developer convenience, and a
+    # client that sends it should get a normal answer on the configured model
+    # rather than a 400 telling it the field exists.
+    model_profile: Literal["gemini", "gemma"] | None = None
 
 
 class ResumeRequest(BaseModel):
@@ -115,6 +126,10 @@ class TurnResponse(BaseModel):
     sub_questions: list[str]
     critique: str
     sufficient: bool
+    # The answer is knowingly incomplete: `resolve` kept what the sources
+    # supported and named the gap. Distinct from `sufficient`, which is True by
+    # then precisely because resolve produced the final answer.
+    partial: bool = False
     iterations: int
     trace: list[dict]
     # Visibility into what history was actually sent, since that's the thing

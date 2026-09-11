@@ -139,8 +139,12 @@ async def run_tool(
         if name == SEARCH_DOCUMENTS:
             hits = await retrieve(query, top_k=top_k, document_ids=document_ids, owner_id=owner_id)
             if not hits:
-                return [], "No documents have been indexed yet."
-            return hits, _render_for_model(hits)
+                return [], (
+                    f"No passages matched {query!r}. Either nothing in the "
+                    "documents covers it, or the wording is too far from how "
+                    "the document puts it -- try different terms."
+                )
+            return hits, f"{_coverage_note(hits, top_k)}\n\n{_render_for_model(hits)}"
 
         if name == SEARCH_WEB:
             if not websearch.enabled():
@@ -155,6 +159,26 @@ async def run_tool(
     except Exception as exc:  # noqa: BLE001 - a tool failure must not end the loop
         log.warning("tool_failed", tool=name, query=query[:60], error=str(exc))
         return [], f"The {name} tool failed: {type(exc).__name__}. Try again or rephrase."
+
+
+def _coverage_note(hits: list[SearchHit], top_k: int) -> str:
+    """What this search did NOT return.
+
+    Surfacing the gap is the single cheapest way to get a second hop. A model
+    shown only results assumes it has them all and stops; a model told "these
+    are 5 passages from 2 of your 4 documents" has an obvious next move, and it
+    takes no extra call to say so.
+    """
+    files = sorted({h.filename for h in hits if h.source == "document"})
+    parts = [f"Showing {len(hits)} passages"]
+    if files:
+        parts.append("from " + ", ".join(files[:4]) + ("..." if len(files) > 4 else ""))
+    if len(hits) >= top_k:
+        # A full page is evidence there may be more behind it. Fewer than asked
+        # for means the pool was genuinely exhausted, and saying "there may be
+        # more" then would invite a pointless extra round.
+        parts.append("(more may exist -- narrow the query or ask for a different aspect)")
+    return " ".join(parts)
 
 
 def _render_for_model(hits: list[SearchHit]) -> str:

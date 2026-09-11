@@ -319,6 +319,8 @@ export type TraceStep = {
   cited?: number[];
   unanswered?: string[];
   sufficient?: boolean;
+  /** Answer is knowingly incomplete: resolve kept what was supported and named the gap. */
+  partial?: boolean;
   missing?: string[];
   assessment?: string;
   iteration?: number;
@@ -329,6 +331,7 @@ export type ResearchResult = AskResult & {
   sub_questions: string[];
   critique: string;
   sufficient: boolean;
+  partial?: boolean;
   iterations: number;
   trace: TraceStep[];
 };
@@ -417,6 +420,7 @@ export type ChatMessage = {
     sub_questions?: string[];
     iterations?: number;
     sufficient?: boolean;
+    partial?: boolean;
     critique?: string;
     /** Set only when the user was asked to clarify and answered. */
     clarification?: string | null;
@@ -577,6 +581,7 @@ export async function streamTurn(
     multiQuery?: boolean;
     clarify?: boolean;
     react?: boolean;
+    modelProfile?: string | null;
   } = {},
   onProgress?: (node: string, detail: string) => void,
 ): Promise<TurnOutcome> {
@@ -588,6 +593,8 @@ export async function streamTurn(
     // value the UI has no opinion about.
     clarify: opts.clarify ?? null,
     react: opts.react ?? null,
+    // Dev-only; the server ignores it unless APP_ENV=dev.
+    model_profile: opts.modelProfile ?? null,
   });
   return readTurnStream(res, onProgress);
 }

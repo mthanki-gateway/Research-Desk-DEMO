@@ -21,7 +21,9 @@ from app.db.models import Chunk, Document
 from app.db.session import SessionLocal
 from app.services import tracing
 from app.services.embeddings import get_embeddings
+from app.services.lexical import lexical_search
 from app.services.llm import LLMError, extract_string_list, get_llm
+from app.services.rerank import rerank_hits
 from app.services.vectorstore import SearchHit, get_vector_store
 
 log = structlog.get_logger()
@@ -289,6 +291,89 @@ def reciprocal_rank_fusion(
     return fused
 
 
+def exclude_seen(hits: list[SearchHit], seen: set[str] | None) -> list[SearchHit]:
+    """Drop chunks already served this turn.
+
+    Applied BEFORE the floor and the fusion, not after. Filtering at the end
+    would let already-seen chunks occupy the candidate pool and the reranker's
+    budget, so a retry would fetch 20, discard 15 it had already shown, and
+    rerank the 5 that were left -- which is how a "different angle" ends up
+    being the same angle with fewer options.
+    """
+    if not seen:
+        return hits
+    return [h for h in hits if str(h.chunk_id) not in seen]
+
+
+def apply_floor(hits: list[SearchHit], floor: float) -> list[SearchHit]:
+    """Drop hits below an absolute similarity floor.
+
+    THE POINT IS TO MAKE "NOTHING RELEVANT" REACHABLE. RRF reads rank and
+    discards magnitude, so it always produces a confident top-k: every
+    candidate could be a terrible match and the output would look exactly like
+    a perfect run. Without an absolute check somewhere, "the corpus cannot
+    answer this" is not an outcome the pipeline can ever produce.
+
+    Applied to the DENSE scores only, and deliberately before fusion. A BM25
+    score has no absolute meaning to compare against -- it is unbounded and
+    corpus-dependent -- and an RRF score is a rank artefact, so neither can
+    carry a threshold.
+    """
+    if floor <= 0.0:
+        return hits
+    kept = [h for h in hits if h.score >= floor]
+    if len(kept) != len(hits):
+        log.info("floor_rejected", floor=floor, dropped=len(hits) - len(kept))
+    return kept
+
+
+async def _lexical_hits(
+    query: str,
+    *,
+    limit: int,
+    document_ids: list[uuid.UUID] | None,
+    owner_id: str | None,
+    by_id: dict[uuid.UUID, SearchHit],
+) -> list[SearchHit]:
+    """BM25 results, expressed as SearchHits so RRF can fuse them.
+
+    Only chunks the DENSE side already returned are usable here: a SearchHit
+    carries text, heading and filename, and BM25 returns an id and a score.
+    Hydrating the rest would mean a second SQL round-trip per query.
+
+    That is a real limitation and worth naming: BM25 can currently only
+    RE-RANK the dense candidate pool, not introduce a chunk dense retrieval
+    missed entirely -- which is precisely the case it exists for
+    ("INC-2024-1183"). Widening the dense pool (`hybrid_candidates`) is what
+    makes that overlap likely enough to be useful for now; hydrating from
+    Postgres is the honest fix and is a small change to make later.
+    """
+    lexical = await lexical_search(
+        query, limit=limit, owner_id=owner_id, document_ids=document_ids
+    )
+    out: list[SearchHit] = []
+    for hit in lexical:
+        found = by_id.get(hit.chunk_id)
+        if found is not None:
+            out.append(found)
+    return out
+
+
+async def _finalise(
+    query: str, hits: list[SearchHit], *, k: int, narrows: bool
+) -> list[SearchHit]:
+    """The last stage shared by both retrieval paths: rerank, then cut to k.
+
+    `narrows` records whether anything upstream deliberately over-fetched. It
+    exists so the slice to k happens exactly once, in one place -- the earlier
+    shape sliced in two branches and made it easy to add a third that forgot.
+    """
+    settings = get_settings()
+    if settings.rerank and len(hits) > 1:
+        return await rerank_hits(query, hits[: settings.rerank_candidates], top_k=k)
+    return hits[:k] if narrows or len(hits) > k else hits
+
+
 # --------------------------------------------------------------------------
 # retrieval
 # --------------------------------------------------------------------------
@@ -350,11 +435,31 @@ async def retrieve(
     document_ids: list[uuid.UUID] | None = None,
     owner_id: str | None = None,
     multi_query: bool | None = None,
+    exclude_chunk_ids: set[str] | None = None,
 ) -> list[SearchHit]:
-    """Retrieve up to `top_k` chunks, optionally via multi-query + RRF."""
+    """Retrieve up to `top_k` chunks, optionally via multi-query + RRF.
+
+    The full pipeline, when everything is switched on:
+
+        query -> [expand] -> dense  -+-> floor -> RRF -> rerank -> top_k
+                              BM25  -+
+
+    Every stage after the dense search is opt-in and degrades to the stage
+    before it, so the default path is exactly the behaviour this function had
+    before any of them existed.
+    """
     settings = get_settings()
     k = top_k or settings.retrieval_top_k
     use_multi = settings.multi_query if multi_query is None else multi_query
+
+    # Fetch deeper than k when a later stage will narrow it again. A reranker
+    # can only reorder what it is handed, so retrieving exactly k and then
+    # "reranking" is an expensive no-op -- and RRF is worse, since a chunk one
+    # position past a list's end contributes nothing at all.
+    narrows = settings.rerank or (settings.hybrid_search and not use_multi)
+    fetch = max(k, settings.rerank_candidates if settings.rerank else k)
+    if settings.hybrid_search:
+        fetch = max(fetch, settings.hybrid_candidates)
 
     # INTENT IS CLASSIFIED EVEN WITH MULTI-QUERY OFF.
     #
@@ -386,12 +491,31 @@ async def retrieve(
     fan_out = use_multi or (expansion.broad and bool(expansion.variations))
 
     if not fan_out:
-        hits = await _search_one(
-            query, limit=k, document_ids=document_ids, owner_id=owner_id
+        dense = await _search_one(
+            query, limit=fetch, document_ids=document_ids, owner_id=owner_id
         )
+        dense = apply_floor(
+            exclude_seen(dense, exclude_chunk_ids), settings.retrieval_score_floor
+        )
+
+        hits = dense
+        if settings.hybrid_search and dense:
+            by_id = {h.chunk_id: h for h in dense}
+            sparse = await _lexical_hits(
+                query,
+                limit=settings.hybrid_candidates,
+                document_ids=document_ids,
+                owner_id=owner_id,
+                by_id=by_id,
+            )
+            # Fused even when sparse is empty, so `rrf_score` and `found_by`
+            # are populated consistently on both paths -- the UI reads them.
+            hits = reciprocal_rank_fusion({"dense": dense, "bm25": sparse})
+
+        hits = await _finalise(query, hits, k=k, narrows=narrows)
         log.info(
             "retrieved",
-            mode="single",
+            mode="hybrid" if settings.hybrid_search else "single",
             scope="broad" if expansion.broad else "specific",
             classified=classify,
             query=query[:60],
@@ -426,13 +550,37 @@ async def retrieve(
     # retrieved passage into one prompt.
     results = await asyncio.gather(
         *(
-            _search_one(q, limit=k, document_ids=document_ids, owner_id=owner_id)
+            _search_one(q, limit=fetch, document_ids=document_ids, owner_id=owner_id)
             for q in queries
         )
     )
+    results = [
+        apply_floor(exclude_seen(r, exclude_chunk_ids), settings.retrieval_score_floor)
+        for r in results
+    ]
 
-    rankings = {q: hits for q, hits in zip(queries, results, strict=True)}
-    fused = reciprocal_rank_fusion(rankings)[:k]
+    rankings: dict[str, list[SearchHit]] = {
+        q: hits for q, hits in zip(queries, results, strict=True)
+    }
+
+    # BM25 joins the fusion as ONE MORE LIST, not as a separate stage. That is
+    # the property that makes RRF the right fuser here: adding a retriever is
+    # adding a list, with no weights to tune and no scores to normalise.
+    if settings.hybrid_search:
+        by_id = {h.chunk_id: h for r in results for h in r}
+        for q in queries:
+            sparse = await _lexical_hits(
+                q,
+                limit=settings.hybrid_candidates,
+                document_ids=document_ids,
+                owner_id=owner_id,
+                by_id=by_id,
+            )
+            if sparse:
+                rankings[f"bm25:{q}"] = sparse
+
+    fused = reciprocal_rank_fusion(rankings)
+    fused = await _finalise(query, fused, k=k, narrows=narrows)
 
     log.info(
         "retrieved",

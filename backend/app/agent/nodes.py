@@ -486,6 +486,17 @@ async def retrieve_node(state: ResearchState) -> dict:
     raw_ids = state.get("document_ids")
     document_ids = [uuid.UUID(d) for d in raw_ids] if raw_ids else None
 
+    # Chunks already shown to the model this turn are EXCLUDED on a retry.
+    #
+    # Without this a second pass is close to wasted: the critique asks for a
+    # different angle, retrieval obliges with differently worded queries, and
+    # `merge_evidence` then dedupes the results back down to the set the first
+    # pass already had. The cycle costs a full round of calls and adds nothing.
+    # Excluding what was seen is what lets the retry actually differ.
+    #
+    # Only on a RETRY -- on the first pass the set is empty and this is a no-op.
+    seen = set(state.get("seen_chunk_ids") or ())
+
     gathered = []
     per_query = []
     for query in queries:
@@ -495,15 +506,23 @@ async def retrieve_node(state: ResearchState) -> dict:
             document_ids=document_ids,
             owner_id=state.get("owner_id"),
             multi_query=state.get("multi_query"),
+            exclude_chunk_ids=seen,
         )
         gathered.extend(hits)
         per_query.append({"query": query, "n": len(hits)})
 
-    log.info("retrieved_for_plan", n_queries=len(queries), n_hits=len(gathered))
+    log.info(
+        "retrieved_for_plan",
+        n_queries=len(queries),
+        n_hits=len(gathered),
+        n_excluded=len(seen),
+    )
     return {
         "evidence": gathered,  # merge_evidence dedupes against what we have
         "pending_queries": [],
-        "trace": [{"node": "retrieve", "queries": per_query}],
+        "trace": [
+            {"node": "retrieve", "queries": per_query, "excluded": len(seen)}
+        ],
     }
 
 
@@ -597,6 +616,7 @@ def _cited_in_text(answer: str, n_sources: int) -> list[int]:
 
 
 async def draft(state: ResearchState) -> dict:
+    settings = get_settings()
     evidence = state.get("evidence") or []
     if not evidence:
         # Deliberately does NOT say "upload a document". That was right while
@@ -640,10 +660,30 @@ async def draft(state: ResearchState) -> dict:
         "AND that web search is not enabled -- do not imply the "
         "information does not exist."
     )
+    # A REGENERATION carries the critic's objection, and nothing else changes.
+    #
+    # This is the remedy for `unsupported_claim`: the passages were right and
+    # the sentence overstated them, so the fix is to rewrite from the SAME
+    # evidence. Re-retrieving cannot help -- the words the draft needed were
+    # never in any source -- which is why this path exists separately from the
+    # critique -> retrieve cycle and has its own budget.
+    overclaims = state.get("unsupported_claims") or []
+    redo_block = ""
+    if overclaims:
+        listed = "\n".join(f"- {c}" for c in overclaims)
+        redo_block = (
+            "A reviewer found these statements go further than the sources "
+            f"support:\n{listed}\n\n"
+            "Rewrite the answer keeping everything the sources DO support, and "
+            "either drop each statement above or weaken it to what the source "
+            "actually says. Do not add new claims.\n\n"
+        )
+
     prompt = (
         f"{history_block}"
         f"Sources:\n{build_context(evidence)}\n\n"
         f"Search coverage: {reach}\n\n"
+        f"{redo_block}"
         f"Question: {state['question']}\n\n"
         "Answer from the sources above, per your instructions."
     )
@@ -664,26 +704,28 @@ async def draft(state: ResearchState) -> dict:
         # in baseline RAG. This is the text the user reads, and it is 1-2 calls
         # per turn, which is what makes a 5 rpm budget affordable where the
         # four-call agent would not fit.
-        raw = await get_llm(get_settings().answer_model).generate(
+        raw = await get_llm(settings.answer_model).generate(
             prompt,
             schema=DRAFT_SCHEMA,
             system=DRAFT_SYSTEM,
             temperature=0.1,
-            # 900 was too tight, and the failure was silent rather than loud.
+            # Profile-dependent, because the right ceiling differs by model.
             #
-            # `sources_used` is emitted AFTER `answer`, so a long answer that
-            # hit the cap lost its citation list entirely -- lenient parsing
-            # salvaged the prose and returned `citations=[]`, which surfaces as
-            # "no sources cited" on an answer that cited things in every
-            # sentence. Measured on a two-part question spanning a document
-            # and a web page: the answer cut off at "According to the Root
-            # Cause section of acme-incident-2024".
+            # 900 was too tight on Gemini, and the failure was silent rather
+            # than loud: `sources_used` is emitted AFTER `answer`, so a long
+            # answer that hit the cap lost its citation list entirely -- lenient
+            # parsing salvaged the prose and returned `citations=[]`, surfacing
+            # as "no sources cited" on an answer that cited in every sentence.
+            # Measured on a two-part question spanning a document and a web
+            # page: the answer cut off at "According to the Root Cause section
+            # of acme-incident-2024".
             #
-            # Asking the drafter to attribute each fact to its source made
-            # answers longer, which is what pushed a tight budget over. Both
-            # halves are fixed: more room here, and `_cited_in_text` below no
+            # On Gemma the pressure runs the other way -- 2000 tokens is a third
+            # of a minute's entire budget. See MODEL_PROFILES.
+            #
+            # Both halves are covered regardless: `_cited_in_text` below no
             # longer depends on the tail of the JSON surviving.
-            max_output_tokens=2000,
+            max_output_tokens=settings.draft_max_output_tokens,
         )
     except LLMError as exc:
         # Quota, safety block, recitation. Nothing to salvage, but a turn that
@@ -734,18 +776,136 @@ async def draft(state: ResearchState) -> dict:
             "trace": [{"node": "draft", "error": "no usable answer"}],
         }
 
-    log.info("drafted", cited=citations, unanswered=unanswered)
+    regen = state.get("regen_count", 0) + (1 if overclaims else 0)
+    log.info("drafted", cited=citations, unanswered=unanswered, regen=regen)
     return {
         "draft": answer,
         "citations": citations,
         "unanswered": unanswered,
+        # Everything the model was shown, whether or not it cited it. Cited-only
+        # would let an uncited chunk be retrieved again on the retry and count
+        # as a "new angle" when the drafter had already read it and passed.
+        "seen_chunk_ids": {str(h.chunk_id) for h in evidence},
+        "regen_count": regen,
+        # Cleared so the next critique starts fresh. Left in place, a fixed
+        # over-claim would be re-injected into every later draft as though it
+        # were still present.
+        "unsupported_claims": [],
         "trace": [
             {
                 "node": "draft",
                 "n_sources": len(evidence),
                 "cited": citations,
                 "unanswered": unanswered,
+                "regenerated": bool(overclaims),
             }
+        ],
+    }
+
+
+# --------------------------------------------------------------------------
+# 5. resolve  (partial answer / abstain)
+#
+# ABSTENTION IS FOR "NO EVIDENCE EXISTS", NOT FOR "THE QUESTION IS IMPERFECT".
+#
+# A system that refuses whenever a question is not perfectly shaped is
+# performing rigour rather than being useful, and people stop asking it things.
+# Every response should leave the user with a next move, so there is exactly one
+# hard stop -- nothing was retrieved at all -- and everything else is an answer
+# with its limits named.
+# --------------------------------------------------------------------------
+
+RESOLVE_SYSTEM = """You are finishing an answer that could not be completed.
+
+You are given a draft, the sources behind it, and what a reviewer said was \
+missing or unsupported.
+
+Produce the most useful honest answer available:
+- KEEP every claim the sources support, with its [n] citations intact.
+- REMOVE or weaken anything the reviewer flagged as unsupported.
+- Then state plainly, in one or two sentences at the end, what could not be \
+answered and why -- "your documents do not give X".
+
+Never apologise at length, never refuse outright when some of the question was \
+answerable, and never invent a fact to fill the gap. A partial answer with its \
+limits named is far more useful than a refusal."""
+
+RESOLVE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "answer": {"type": "string", "description": "The answer, [n] citations kept."},
+        "sources_used": {"type": "array", "items": {"type": "integer"}},
+    },
+    "required": ["answer"],
+}
+
+
+async def resolve(state: ResearchState) -> dict:
+    """Answer partially, or abstain if there is genuinely nothing."""
+    settings = get_settings()
+    evidence = state.get("evidence") or []
+    draft_text = state.get("draft") or ""
+    missing = state.get("missing") or state.get("unanswered") or []
+    overclaims = state.get("unsupported_claims") or []
+
+    # THE ONE HARD STOP. No passages at all means there is nothing to be
+    # partially right about.
+    if not evidence:
+        searched = state.get("tried_queries") or [state["question"]]
+        return {
+            "draft": (
+                "I could not find anything to answer this. Searched: "
+                + "; ".join(f"“{q}”" for q in searched[:3])
+                + ". Try naming a document or section, or rephrasing."
+            ),
+            "citations": [],
+            "sufficient": True,
+            "partial": False,
+            "trace": [{"node": "resolve", "outcome": "abstained"}],
+        }
+
+    gaps = "\n".join(f"- {m}" for m in (missing or ["(not specified)"]))
+    flagged = "\n".join(f"- {c}" for c in overclaims) if overclaims else "(none)"
+    prompt = (
+        f"Question: {state['question']}\n\n"
+        f"Sources:\n{build_context(evidence)}\n\n"
+        f"Draft answer:\n{draft_text}\n\n"
+        f"Reviewer says these are unsupported:\n{flagged}\n\n"
+        f"Reviewer says these are missing:\n{gaps}\n\n"
+        "Write the most useful honest answer available."
+    )
+
+    try:
+        raw = await get_llm(settings.answer_model).generate(
+            prompt,
+            schema=RESOLVE_SCHEMA,
+            system=RESOLVE_SYSTEM,
+            temperature=0.1,
+            max_output_tokens=settings.draft_max_output_tokens,
+        )
+        answer = extract_string(raw, "answer")
+        citations = extract_int_list(raw, "sources_used")
+    except LLMError as exc:
+        # Fall back to the draft that already exists rather than losing it. It
+        # is imperfect -- that is why we are here -- but an imperfect grounded
+        # answer beats an error message.
+        log.warning("resolve_failed", error=str(exc))
+        answer, citations = draft_text, state.get("citations") or []
+
+    if not answer or is_repetitive(answer):
+        answer, citations = draft_text, state.get("citations") or []
+
+    if not citations:
+        citations = _cited_in_text(answer, len(evidence))
+
+    log.info("resolved", cited=citations, n_gaps=len(missing))
+    return {
+        "draft": answer,
+        "citations": citations,
+        "sufficient": True,  # this IS the final answer; nothing follows
+        "partial": True,
+        "trace": [
+            {"node": "resolve", "outcome": "partial", "gaps": missing},
         ],
     }
 
@@ -753,6 +913,18 @@ async def draft(state: ResearchState) -> dict:
 # --------------------------------------------------------------------------
 # 4. critique
 # --------------------------------------------------------------------------
+
+# Failure modes, and they exist because the remedies are OPPOSITE.
+#
+# An over-claim needs the draft rewritten from the SAME evidence -- searching
+# again cannot fix it, because the passages were already correct. A gap needs
+# new evidence -- rewriting cannot fix it, because the words are not there.
+# A single `sufficient: false` collapsed both into "go and search again", so
+# the only remedy the graph had was the wrong one half the time.
+UNSUPPORTED_CLAIM = "unsupported_claim"
+MISSING_EVIDENCE = "missing_evidence"
+UNANSWERABLE = "unanswerable"
+FAILURE_MODES = (UNSUPPORTED_CLAIM, MISSING_EVIDENCE, UNANSWERABLE)
 
 CRITIQUE_SCHEMA = {
     "type": "object",
@@ -764,7 +936,22 @@ CRITIQUE_SCHEMA = {
                 "claim is supported."
             ),
         },
+        "failure_mode": {
+            "type": "string",
+            "enum": list(FAILURE_MODES),
+            "description": (
+                "Only when sufficient is false. unsupported_claim = the answer "
+                "says more than the sources support. missing_evidence = the "
+                "sources do not cover part of the question. unanswerable = no "
+                "search could help."
+            ),
+        },
         "assessment": {"type": "string", "description": "One or two sentences."},
+        "unsupported_claims": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Claims the cited sources do not actually support.",
+        },
         "missing": {
             "type": "array",
             "items": {"type": "string"},
@@ -793,9 +980,17 @@ Judge two things:
 to the wrong KIND of source -- a public figure presented as coming from the \
 user's own documents, or the reverse -- is NOT supported.
 
-Set sufficient=false when any part of the question is unanswered, and put \
-specific self-contained SEARCH QUERIES in `missing` that would retrieve the \
-absent facts. Queries, not instructions.
+When sufficient=false you MUST also name the `failure_mode`, because the fix \
+differs completely:
+
+- unsupported_claim -- the evidence is fine, the DRAFT overstates it. List the \
+offending sentences in `unsupported_claims`. Do NOT propose searches; more \
+passages cannot fix a sentence that says more than its source.
+- missing_evidence -- the draft is honest but part of the question is not \
+covered. Put self-contained SEARCH QUERIES in `missing`. Queries, not \
+instructions.
+- unanswerable -- no search would help: the question asks for something no \
+document could contain, or asks about a future or a private fact.
 
 Set sufficient=true only when either:
 - every part of the question is answered and supported, or
@@ -845,16 +1040,23 @@ async def critique(state: ResearchState) -> dict:
         )
         sufficient = bool(result.get("sufficient", True))
         assessment = str(result.get("assessment", ""))
+        mode = str(result.get("failure_mode", "") or "")
         missing = [
             str(m).strip()
             for m in result.get("missing", [])
             if isinstance(m, str) and m.strip()
         ]
+        overclaims = [
+            str(c).strip()
+            for c in result.get("unsupported_claims", [])
+            if isinstance(c, str) and c.strip()
+        ]
     except LLMError as exc:
         # If the critic fails, accept the draft. Better a good answer with no
         # review than a 502.
         log.warning("critique_failed", error=str(exc))
-        sufficient, assessment, missing = True, f"critique unavailable ({exc})", []
+        sufficient, assessment = True, f"critique unavailable ({exc})"
+        mode, missing, overclaims = "", [], []
 
     # The drafter's own `unanswered` list is more reliable than the critic's
     # inference -- it knows exactly what it couldn't support. If it reported
@@ -863,6 +1065,7 @@ async def critique(state: ResearchState) -> dict:
         missing = list(unanswered)
         if sufficient:
             sufficient = False
+            mode = mode or MISSING_EVIDENCE
             assessment += " (drafter reported unanswered parts)"
 
     # Never re-run a query that already came back empty-handed; that's how a
@@ -872,16 +1075,35 @@ async def critique(state: ResearchState) -> dict:
         : settings.agent_max_subquestions
     ]
 
-    # No new queries to run means nothing to retry with, whatever the verdict.
-    if not sufficient and not missing:
-        sufficient = True
-        assessment += " (no untried follow-up queries, accepting draft)"
+    # Infer the mode when the model left it out, rather than defaulting to one.
+    # Which remedy applies is the whole decision, and guessing wrong sends the
+    # graph to re-retrieve an answer that only needed rewording -- or to reword
+    # an answer that was honest about a real gap.
+    if not sufficient and mode not in FAILURE_MODES:
+        mode = UNSUPPORTED_CLAIM if overclaims and not missing else MISSING_EVIDENCE
 
-    log.info("critiqued", sufficient=sufficient, iterations=iterations, missing=missing)
+    # Nothing left to search for. Note this NO LONGER forces sufficient=True:
+    # an over-claim is still fixable by regenerating, and the old code accepted
+    # the draft here precisely when the critic had found a real problem it had
+    # no queries for.
+    if not sufficient and mode == MISSING_EVIDENCE and not missing:
+        mode = UNANSWERABLE
+        assessment += " (no untried follow-up queries)"
+
+    log.info(
+        "critiqued",
+        sufficient=sufficient,
+        failure_mode=mode or None,
+        iterations=iterations,
+        missing=missing,
+        n_overclaims=len(overclaims),
+    )
     return {
         "sufficient": sufficient,
         "critique": assessment,
+        "failure_mode": mode,
         "missing": missing,
+        "unsupported_claims": overclaims,
         "pending_queries": missing,
         "tried_queries": missing,
         "iterations": iterations,
@@ -889,8 +1111,10 @@ async def critique(state: ResearchState) -> dict:
             {
                 "node": "critique",
                 "sufficient": sufficient,
+                "failure_mode": mode or None,
                 "assessment": assessment,
                 "missing": missing,
+                "unsupported_claims": overclaims,
                 "iteration": iterations,
             }
         ],

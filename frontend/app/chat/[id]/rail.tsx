@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import type { Chunk, Document, SessionDetail } from "@/lib/api";
 import {
   Checkbox,
+  Chip,
   ConfirmButton,
   IconButton,
   Ripplable,
@@ -527,6 +528,49 @@ function Controls({
               aria-label="Research mode"
             />
           </div>
+
+          {/* DEVELOPMENT ONLY.
+              Gated on NODE_ENV rather than hidden with CSS, so the whole block
+              is dead-code-eliminated from a production bundle -- the same
+              treatment the accent picker gets. A shipped product does not let
+              the browser choose which model answers; this exists because the
+              answer model's 5 rpm makes the agent loop impractical to iterate
+              on, and Gemma's 30 rpm is the only budget that can. */}
+          {process.env.NODE_ENV !== "production" && (
+            <div
+              className="mt-1 border-t pt-3"
+              style={{ borderColor: "var(--md-outline-variant)" }}
+            >
+              <span className="md-body-medium">
+                Model
+                <span
+                  className="md-body-small mt-0.5 block"
+                  style={{ color: "var(--md-on-surface-variant)" }}
+                >
+                  Dev only. Gemma is far faster to iterate on (30/min vs 5/min)
+                  but cannot use tools, so research mode falls back to planning.
+                </span>
+              </span>
+              <div className="mt-2 flex flex-wrap gap-2">
+                {(
+                  [
+                    [null, "Server default"],
+                    ["gemini", "Gemini"],
+                    ["gemma", "Gemma"],
+                  ] as const
+                ).map(([value, label]) => (
+                  <Chip
+                    key={label}
+                    size="sm"
+                    selected={settings.modelProfile === value}
+                    onClick={() => onSettings({ ...settings, modelProfile: value })}
+                  >
+                    {label}
+                  </Chip>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </section>
 

@@ -25,7 +25,7 @@ from sqlalchemy import select
 
 from app.db.models import Chunk, Document
 from app.db.session import SessionLocal
-from app.services.evaluation import Aggregate, QuestionScores, recall_at_k
+from app.services.evaluation import Aggregate, QuestionScores
 from app.services.golden import ChunkSpec, GoldenQuestion, MatchResult, match
 from app.services.retrieval import retrieve
 
@@ -166,30 +166,47 @@ def _score_at(
 ) -> QuestionScores:
     """Build per-k scores from the two relevance vectors.
 
-    `QuestionScores.compute` takes one vector, but precision and recall need
-    different ones -- see MatchResult. So precision/MRR/NDCG are computed from
-    `precision_relevance`, then recall is recomputed from `recall_relevance`
-    and substituted, because a single spec matching three chunks must count
-    once towards recall and three times towards precision.
+    `QuestionScores.compute` takes one vector, but the metrics do not all want
+    the same one -- see MatchResult. The rule is whether the metric NORMALISES
+    AGAINST `total_relevant`:
+
+        precision, hit    precision_relevance   no denominator from specs; a
+                                                spec matching three chunks
+                                                legitimately fills three slots
+        recall, NDCG, MAP recall_relevance      denominator IS the spec count,
+                                                so each spec may contribute at
+                                                most one credit
+
+    Getting that wrong produced NDCG@10 = 1.007 -- impossible, since NDCG is
+    DCG/IDCG. Two retrieved chunks both satisfied one spec, so the actual DCG
+    counted two gains while the ideal DCG was built from `total_relevant` = 1.
+    MAP was inflated the same way and less visibly, having no hard ceiling to
+    violate.
+
+    The bug predates the reranker and was unreachable until retrieval got good
+    enough to return two chunks for one spec inside k.
+
+    MRR is unaffected by the choice: the first chunk matching any spec is
+    necessarily the first for that spec, so both vectors have their first True
+    at the same index.
     """
-    base = QuestionScores.compute(
+    precision_view = QuestionScores.compute(
         question.id, m.precision_relevance, k=k, total_relevant=question.total_relevant
     )
-    corrected_recall = recall_at_k(
-        m.recall_relevance, k=k, total_relevant=question.total_relevant
+    recall_view = QuestionScores.compute(
+        question.id, m.recall_relevance, k=k, total_relevant=question.total_relevant
     )
-    # `base` already truncates MRR and MAP at k; nothing to correct there.
     return QuestionScores(
-        question_id=base.question_id,
-        k=base.k,
-        n_retrieved=base.n_retrieved,
-        total_relevant=base.total_relevant,
-        hit=base.hit,
-        precision=base.precision,
-        recall=corrected_recall,
-        reciprocal_rank=base.reciprocal_rank,
-        average_precision=base.average_precision,
-        ndcg=base.ndcg,
+        question_id=precision_view.question_id,
+        k=precision_view.k,
+        n_retrieved=precision_view.n_retrieved,
+        total_relevant=precision_view.total_relevant,
+        hit=precision_view.hit,
+        precision=precision_view.precision,
+        recall=recall_view.recall,
+        reciprocal_rank=precision_view.reciprocal_rank,
+        average_precision=recall_view.average_precision,
+        ndcg=recall_view.ndcg,
     )
 
 

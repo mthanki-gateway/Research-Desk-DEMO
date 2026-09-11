@@ -39,6 +39,16 @@ def append(existing: list, incoming: list) -> list:
     return [*existing, *incoming]
 
 
+def _union(existing: set[str], incoming: set[str]) -> set[str]:
+    """Set union, for ids that accumulate across hops.
+
+    Commutative, which matters: LangGraph merges parallel branches in no
+    guaranteed order, so a reducer that cared about order would give different
+    results run to run.
+    """
+    return set(existing) | set(incoming)
+
+
 class ResearchState(TypedDict, total=False):
     # --- inputs, set once ---
     question: str
@@ -86,6 +96,10 @@ class ResearchState(TypedDict, total=False):
     critique: str
     sufficient: bool
     missing: list[str]
+    # Sentences the critic judged to say more than their source supports. Fed
+    # back into the regeneration so the rewrite knows what to drop, rather than
+    # being asked to guess which claim was the problem.
+    unsupported_claims: list[str]
 
     # --- human-in-the-loop ---
     # The question to put to the user, written by the `clarify` node:
@@ -104,7 +118,33 @@ class ResearchState(TypedDict, total=False):
     cancelled: bool
 
     # --- control ---
+    # Critique -> retrieve cycles. The oldest budget, and the one that stops a
+    # self-critiquing loop spending a daily quota to learn nothing.
     iterations: int
+    # Draft regenerations, which are a DIFFERENT budget from `iterations` and
+    # must not share one.
+    #
+    # Rewriting a draft to drop an unsupported claim needs NO new evidence, so
+    # it should not consume a retrieval cycle -- and re-retrieving cannot fix an
+    # over-claim, because the passages were already right. Counting them
+    # together meant the only remedy for "you cited something the source does
+    # not say" was to search again, which changes nothing.
+    regen_count: int
+    # Chunks already handed to the model this turn.
+    #
+    # Without it a retry re-retrieves what the first pass already returned: the
+    # critique asks for a different angle, retrieval obliges with a differently
+    # worded query, and `merge_evidence` silently dedupes the results back to
+    # the same set. The retry costs a full cycle and adds nothing. Excluding
+    # what was already seen is what makes a second pass able to differ.
+    seen_chunk_ids: Annotated[set[str], _union]
+    # What the critic decided, as a category rather than prose. This is what the
+    # router reads -- "the answer over-claims" and "the evidence is missing"
+    # need opposite remedies, and a free-text assessment cannot be branched on.
+    failure_mode: str
+    # Set by `resolve` when it answers from partial evidence, so the UI and the
+    # trace can tell a complete answer from a knowingly incomplete one.
+    partial: bool
     # Node-by-node record of what happened, so the UI can show the graph's
     # path. This is the payoff of an explicit state machine: the reasoning is
     # inspectable data, not buried in logs.

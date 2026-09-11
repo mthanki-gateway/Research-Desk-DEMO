@@ -33,10 +33,13 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 
 from app.agent.nodes import (
+    UNANSWERABLE,
+    UNSUPPORTED_CLAIM,
     ask_human,
     critique,
     draft,
     plan,
+    resolve,
     retrieve_node,
 )
 from app.agent.nodes import (
@@ -51,23 +54,58 @@ from app.services.vectorstore import SearchHit
 log = structlog.get_logger()
 
 
-def should_continue(state: ResearchState) -> Literal["retrieve", "__end__"]:
+def should_continue(
+    state: ResearchState,
+) -> Literal["retrieve", "draft", "resolve", "__end__"]:
     """The conditional edge: the model's own verdict decides control flow.
 
     This is the thing a static pipeline cannot express -- whether to loop is
     data produced at runtime, not a decision made when the code was written.
+
+    THE REMEDY DEPENDS ON THE FAILURE, and that is the whole reason `critique`
+    now returns a category instead of a boolean:
+
+        unsupported_claim  -> draft      rewrite from the SAME evidence.
+                                         Searching again cannot fix a sentence
+                                         that says more than its source.
+        missing_evidence   -> retrieve   find what is not there yet. Rewriting
+                                         cannot fix words that were never in
+                                         any passage.
+        unanswerable       -> resolve    say what IS known and name the gap.
+
+    Every exhausted budget also lands on `resolve` rather than END. Stopping at
+    END would ship whatever draft happened to exist, complete with the claims
+    the critic just rejected -- the budget running out is not a reason to
+    publish a criticised answer unchanged.
     """
     settings = get_settings()
 
     if state.get("sufficient", True):
         return END
+
+    mode = state.get("failure_mode", "")
+
+    if mode == UNSUPPORTED_CLAIM:
+        # One rewrite, not a conversation. A second pass at the same evidence
+        # rarely differs, and a critic that rejects it twice is usually
+        # disagreeing about tone rather than support.
+        if state.get("regen_count", 0) < settings.agent_max_regens:
+            return "draft"
+        log.info("regen_cap_reached", regens=state.get("regen_count"))
+        return "resolve"
+
+    if mode == UNANSWERABLE:
+        return "resolve"
+
+    # missing_evidence, and anything unrecognised -- the conservative default,
+    # since looking again is recoverable and asserting unanswerable is not.
     if state.get("iterations", 0) >= settings.agent_max_iterations:
-        # Cap, not a judgement of quality. Each cycle is ~2 Gemma calls, and an
-        # unbounded loop is the easiest way to spend a daily quota.
+        # Cap, not a judgement of quality. Each cycle costs ~2 model calls, and
+        # an unbounded loop is the easiest way to spend a daily quota.
         log.info("iteration_cap_reached", iterations=state.get("iterations"))
-        return END
+        return "resolve"
     if not state.get("pending_queries"):
-        return END  # nothing left to search for
+        return "resolve"  # nothing left to search for
     return "retrieve"
 
 
@@ -78,8 +116,21 @@ def gather_strategy(state: ResearchState) -> Literal["react", "plan"]:
     one after seeing the last result. The second is what multi-hop needs -- you
     cannot look up a company before a search names it -- and the first is what
     the evaluation harness measures, so both stay.
+
+    CAPABILITY BEATS PREFERENCE. ReAct is built on native functionCall parts,
+    and the Gemma profile's model emits none -- asked to use tools it narrates
+    its intentions as prose, which `generate_tools` reads as "no calls
+    requested". The loop would exit on round 1 with no evidence and `draft`
+    would answer from nothing: a silent wrong answer rather than a visible
+    misconfiguration. So a turn that asks for ReAct on a model that cannot do
+    it falls back to the planned path instead.
     """
-    return "react" if state.get("react") else "plan"
+    if not state.get("react"):
+        return "plan"
+    if not get_settings().supports_tool_calling:
+        log.info("react_unavailable", reason="model has no native tool calling")
+        return "plan"
+    return "react"
 
 
 def needs_human(state: ResearchState) -> Literal["ask_human", "plan"]:
@@ -116,6 +167,7 @@ def build_graph(checkpointer=None):
     builder.add_node("retrieve", retrieve_node)
     builder.add_node("draft", draft)
     builder.add_node("critique", critique)
+    builder.add_node("resolve", resolve)
 
     builder.add_edge(START, "clarify")
     builder.add_conditional_edges(
@@ -133,8 +185,15 @@ def build_graph(checkpointer=None):
     builder.add_edge("retrieve", "draft")
     builder.add_edge("draft", "critique")
     builder.add_conditional_edges(
-        "critique", should_continue, {"retrieve": "retrieve", END: END}
+        "critique",
+        should_continue,
+        {"retrieve": "retrieve", "draft": "draft", "resolve": "resolve", END: END},
     )
+    # `resolve` is terminal. It has already produced the final answer and set
+    # sufficient=True; routing it back to critique would re-review a draft that
+    # was written specifically to satisfy the objection, and a critic asked to
+    # review its own instructions being followed tends to find something new.
+    builder.add_edge("resolve", END)
 
     # checkpointer=None means no persistence -- fine for step 4, which is
     # single-turn. Step 6 passes AsyncPostgresSaver here and nothing else in
@@ -198,6 +257,11 @@ class AgentResult:
         # What the user said when asked to clarify. None on an ordinary turn,
         # so "the question was clear" stays distinguishable from "the user
         # clarified it".
+        # True when `resolve` answered from partial evidence and named the gap.
+        # Distinct from `sufficient`, which by then is True precisely because
+        # resolve produced the final answer -- without this the UI cannot tell a
+        # complete answer from a knowingly incomplete one.
+        self.partial: bool = bool(state.get("partial"))
         self.clarification: str | None = state.get("clarification")
         self.original_question: str | None = state.get("original_question")
         self.cancelled: bool = bool(state.get("cancelled"))

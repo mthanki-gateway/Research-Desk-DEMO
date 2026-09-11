@@ -43,12 +43,28 @@ async def lifespan(app: FastAPI):
         "starting",
         env=settings.app_env,
         docs=settings.docs_enabled,
+        profile=settings.model_profile,
         llm=settings.llm_model,
         answer_model=settings.answer_model,
         rewriter=settings.rewriter_model,
         embeddings=f"{settings.embedding_provider}:{settings.embedding_model}",
         qdrant=settings.qdrant_url,
     )
+
+    # A profile's fields are a coherent SET -- models, token ceiling, history
+    # strategy and hop budgets together. One stale environment variable
+    # overriding a single field produces a mixture that is worse than either
+    # profile, and it is invisible: every value looks plausible on its own.
+    # Explicit settings still win; this is what stops that being silent.
+    for field, actual, expected in settings.profile_conflicts():
+        log.warning(
+            "model_profile_overridden",
+            field=field,
+            configured=actual,
+            profile_expects=expected,
+            profile=settings.model_profile,
+            hint=f"unset {field.upper()} in .env to use the profile's value",
+        )
 
     await create_tables()
 

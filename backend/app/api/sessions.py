@@ -19,6 +19,7 @@ from app.agent.graph import (
     stream_resume,
 )
 from app.auth import User, current_user, forbid_if_not_owner
+from app.config import get_settings, use_model_profile
 from app.db.models import ChatSession, Message, Role
 from app.db.session import SessionLocal
 from app.schemas.documents import SearchHitOut
@@ -169,6 +170,18 @@ def _trace_turn(
     )
 
 
+def _requested_profile(req: TurnRequest) -> str | None:
+    """The model profile this turn asked for, or None to use the configured one.
+
+    The dev gate lives HERE rather than inside `use_model_profile`, so the rule
+    sits next to the request that carries the field. Buried in config it would
+    be an assumption; here it is one readable line at the boundary.
+    """
+    if get_settings().app_env != "dev":
+        return None
+    return req.model_profile
+
+
 @router.post("/{session_id}/messages", response_model=TurnResponse)
 async def add_turn(
     session_id: uuid.UUID, req: TurnRequest, user: User = Depends(current_user)
@@ -176,7 +189,10 @@ async def add_turn(
     """Ask a question inside a session. Blocking; see /stream for progress."""
     prep = await _prepare_turn(session_id, req, user)
 
-    with _trace_turn(session_id, req, user):
+    # Profile OUTSIDE the trace: the override changes which model every node
+    # calls, so it has to be active before anything reads settings -- including
+    # the trace metadata that records which model answered.
+    with use_model_profile(_requested_profile(req)), _trace_turn(session_id, req, user):
         try:
             result = await run_agent(
                 req.question,
@@ -257,33 +273,40 @@ async def stream_turn(
     prep = await _prepare_turn(session_id, req, user)
 
     async def events() -> AsyncIterator[str]:
-        async for chunk in _stream_events(
-            stream_agent(
-                req.question,
-                top_k=req.top_k,
-                document_ids=prep["scope"],
-                # MUST be passed. `stream_agent` defaults owner_id to None, and
-                # None means "do not filter by owner" in the vector store -- so
-                # omitting it here (as this call once did) made a streamed turn
-                # search EVERY user's chunks. The document scope masked it
-                # whenever a session had documents selected, but a session with
-                # no scope resolves to `scope=None`, and then nothing
-                # constrained retrieval at all. /messages passed it; /stream did
-                # not, and /stream is the path the UI uses.
-                owner_id=user.owner_id,
-                multi_query=req.multi_query,
-                chat_context=prep["context"],
-                thread_id=prep["thread_id"],
-                clarify=req.clarify,
-                react=req.react,
-            ),
-            session_id=session_id,
-            question=req.question,
-            prep=prep,
-            user=user,
-            trace=_trace_turn(session_id, req, user),
-        ):
-            yield chunk
+        # Set INSIDE the generator, not around it. `use_model_profile` sets a
+        # ContextVar, and a generator body runs in whatever context each
+        # `__anext__` is driven from -- entering the block around the call that
+        # merely CREATES the generator would set and reset the override before a
+        # single node ran.
+        with use_model_profile(_requested_profile(req)):
+            async for chunk in _stream_events(
+                stream_agent(
+                    req.question,
+                    top_k=req.top_k,
+                    document_ids=prep["scope"],
+                    # MUST be passed. `stream_agent` defaults owner_id to None,
+                    # and None means "do not filter by owner" in the vector
+                    # store -- so omitting it here (as this call once did) made
+                    # a streamed turn search EVERY user's chunks. The document
+                    # scope masked it whenever a session had documents
+                    # selected, but a session with no scope resolves to
+                    # `scope=None`, and then nothing constrained retrieval at
+                    # all. /messages passed it; /stream did not, and /stream is
+                    # the path the UI uses.
+                    owner_id=user.owner_id,
+                    multi_query=req.multi_query,
+                    chat_context=prep["context"],
+                    thread_id=prep["thread_id"],
+                    clarify=req.clarify,
+                    react=req.react,
+                ),
+                session_id=session_id,
+                question=req.question,
+                prep=prep,
+                user=user,
+                trace=_trace_turn(session_id, req, user),
+            ):
+                yield chunk
 
     return _sse_response(events())
 
@@ -423,6 +446,7 @@ async def _stream_events(
                 "sub_questions": result.sub_questions,
                 "critique": result.critique,
                 "sufficient": result.sufficient,
+                "partial": result.partial,
                 "iterations": result.iterations,
                 "trace": result.trace,
                 "context_chars": len(prep["context"]),
@@ -648,6 +672,7 @@ async def _finish_turn(
         sub_questions=result.sub_questions,
         critique=result.critique,
         sufficient=result.sufficient,
+        partial=result.partial,
         iterations=result.iterations,
         trace=result.trace,
         context_chars=len(prep["context"]),
@@ -697,6 +722,7 @@ async def _persist_turn(
                     "sub_questions": result.sub_questions,
                     "iterations": result.iterations,
                     "sufficient": result.sufficient,
+                    "partial": result.partial,
                     "critique": result.critique,
                     # Absent on an ordinary turn, so "the question was clear" and
                     # "the user clarified it" stay distinguishable after the

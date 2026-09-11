@@ -26,6 +26,7 @@ from app.db.models import Chunk, DocStatus, Document
 from app.db.session import SessionLocal
 from app.services.chunking import TextChunk, chunk_pages
 from app.services.embeddings import get_embeddings
+from app.services.lexical import invalidate_lexical_index
 from app.services.parsing import Page, parse
 from app.services.vectorstore import ChunkPayload, get_vector_store
 
@@ -160,6 +161,12 @@ async def ingest_document(document_id: uuid.UUID, data: bytes) -> None:
             doc.status = DocStatus.ready
             doc.error = None
             await session.commit()
+            # The BM25 index is built from these rows and cached per scope, so
+            # without this a document is searchable by vector the moment it is
+            # ready and invisible to lexical search until the process restarts.
+            # That asymmetry would be near-impossible to spot: hybrid results
+            # would simply be a little worse for the newest document.
+            invalidate_lexical_index()
             log_.info("ingest_complete", chunks=len(rows))
 
     except Exception as exc:
@@ -192,6 +199,12 @@ async def delete_document(document_id: uuid.UUID) -> bool:
         await get_vector_store().delete_document(document_id)
         await session.delete(doc)  # chunks cascade
         await session.commit()
+        # A stale lexical index would keep serving chunk ids for a deleted
+        # document. They no longer resolve to a dense hit so nothing would be
+        # shown -- but the BM25 half would be silently scoring against text that
+        # is gone, which is a worse bug than it looks: deletion should mean
+        # deletion everywhere.
+        invalidate_lexical_index()
         return True
 
 

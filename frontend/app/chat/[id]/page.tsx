@@ -231,6 +231,7 @@ function Conversation({ id }: { id: string }) {
           multiQuery: settings.multiQuery,
           clarify: settings.clarify,
           react: settings.react,
+          modelProfile: settings.modelProfile,
         },
         (_node, detail) => setProgress(detail),
       );
@@ -627,6 +628,15 @@ function Turn({
         {/* Zero citations means nothing in the library supported the answer —
             the shape a hallucination would take, so it gets the error role. */}
         {uncited && <span className="md-badge md-badge-error">no sources cited</span>}
+        {/* Deliberately NOT an error. The agent found part of the answer,
+            cited it, and said what was missing — which is the intended
+            outcome for a question the documents only partly cover. Marking
+            it red would train the reader to distrust the honest case. */}
+        {meta.partial && (
+          <span className="md-badge md-badge-tertiary" title="Some of the question could not be answered from the sources">
+            partial answer
+          </span>
+        )}
       </div>
     </li>
   );

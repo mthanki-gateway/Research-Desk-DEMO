@@ -1,7 +1,95 @@
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# --------------------------------------------------------------------------
+# Model profiles
+#
+# One switch that moves every model AND every budget that depends on it.
+#
+# WHY THIS EXISTS. The richer retrieval/agent design costs 9-10 model calls per
+# turn (multi-query, rerank, several agent hops, draft, critique). The answer
+# model allows FIVE REQUESTS PER MINUTE, so exercising that design on Gemini
+# means roughly one question every two minutes -- unusable for development.
+# Gemma allows 30 rpm and 14,400/day, which is the only budget on this key that
+# can actually run the loop repeatedly.
+#
+# The trade is real and the profile encodes both halves of it. Gemma is faster
+# and far more forgiving of quota, but it has a 16K tokens/MINUTE ceiling and
+# NO native tool calling -- so the profile also shrinks history, shortens the
+# draft, and turns ReAct off, because those are not independent choices.
+#
+# A profile only supplies DEFAULTS. An explicit env var always wins, so
+# LLM_MODEL=... in .env still overrides whatever the profile would have set.
+# --------------------------------------------------------------------------
+
+_GEMMA = "models/gemma-4-26b-a4b-it"
+
+MODEL_PROFILES: dict[str, dict[str, object]] = {
+    # The production shape. Three models split by per-model request quota.
+    "gemini": {
+        "llm_model": "models/gemini-3.5-flash-lite",
+        "llm_requests_per_minute": 15,
+        "llm_tokens_per_minute": 250_000,
+        "answer_model": "models/gemini-3.6-flash",
+        "answer_requests_per_minute": 5,
+        "answer_tokens_per_minute": 250_000,
+        "rewriter_model": _GEMMA,
+        "history_full": True,
+        "history_max_tokens": 200_000,
+        "verbatim_messages": 40,
+        "draft_max_output_tokens": 2000,
+        "react_default": True,
+        "react_max_rounds": 6,
+        "react_max_calls_per_round": 4,
+        "agent_max_iterations": 2,
+    },
+    # Development. ONE model for every role, because the quota is per model and
+    # Gemma's is the only one large enough to run this loop on repeat.
+    "gemma": {
+        "llm_model": _GEMMA,
+        "llm_requests_per_minute": 30,
+        # 16K tokens/MINUTE is the real ceiling here, and it is what every
+        # budget below is derived from. A single turn at 3-5 calls has roughly
+        # 3-5K tokens per call to spend on everything: history, retrieved
+        # passages, and the output.
+        "llm_tokens_per_minute": 16_000,
+        # Same model for the answer. Not a compromise on quality so much as an
+        # acknowledgement that there is no second Gemma to promote to.
+        "answer_model": _GEMMA,
+        "answer_requests_per_minute": 30,
+        "answer_tokens_per_minute": 16_000,
+        "rewriter_model": _GEMMA,
+        # The whole transcript does not fit in a 16K/minute budget -- it was
+        # the arrival of Gemini's 250K that made HISTORY_FULL possible at all.
+        # Back to the rolling summary plus a short verbatim tail.
+        "history_full": False,
+        "history_max_tokens": 6_000,
+        "verbatim_messages": 6,
+        # 2000 output tokens is a third of a minute's entire budget on Gemma,
+        # and it degenerates into repetition loops long before reaching it.
+        "draft_max_output_tokens": 900,
+        # OFF, and this one is not a budget decision -- it is a capability one.
+        # Gemma emits no functionCall parts; given tool declarations it narrates
+        # what it would do in prose, which the ReAct loop reads as "no tools
+        # requested" and exits on round 1. See `supports_tool_calling`.
+        "react_default": False,
+        "react_max_rounds": 3,
+        "react_max_calls_per_round": 2,
+        # One critique cycle, not two. Each costs ~2 calls and Gemma's token
+        # ceiling is the binding constraint, not its request count.
+        "agent_max_iterations": 1,
+    },
+}
+
+# Profiles whose model emits native functionCall parts. Verified live: every
+# Gemini Flash model on this key does; Gemma does not, at all.
+_TOOL_CALLING_PROFILES = frozenset({"gemini"})
 
 
 class Settings(BaseSettings):
@@ -17,6 +105,66 @@ class Settings(BaseSettings):
     # RESTRICTIVE behaviour. Fail closed. Local development sets it explicitly
     # in docker-compose.yml, where forgetting it is instantly obvious.
     app_env: Literal["dev", "prod"] = "prod"
+
+    # --- model profile ---
+    # Which bundle from MODEL_PROFILES supplies the model defaults. Switchable
+    # PER REQUEST in dev only -- see `use_model_profile` and the guard in the
+    # turn endpoints. In prod this is whatever the environment says and nothing
+    # can move it, which is why the override lives in the API layer rather than
+    # in this class.
+    model_profile: Literal["gemini", "gemma"] = "gemini"
+
+    @property
+    def supports_tool_calling(self) -> bool:
+        """Does the active profile's model emit native functionCall parts?
+
+        The ReAct loop is built on them. Gemma has none -- asked to use tools it
+        narrates its intentions as prose, which `generate_tools` correctly reads
+        as "no calls requested", so the loop exits on round 1 having retrieved
+        nothing and `draft` answers from an empty evidence set.
+
+        That failure is silent and looks like a bad answer rather than a
+        misconfiguration, so the graph consults this instead of trusting the
+        `react` flag. See `gather_strategy`.
+        """
+        return self.model_profile in _TOOL_CALLING_PROFILES
+
+    def profile_conflicts(self) -> list[tuple[str, object, object]]:
+        """Fields where an explicit setting contradicts the active profile.
+
+        A profile's value is that its fields move TOGETHER -- the models, the
+        token ceiling, the history strategy and the hop budgets are one coherent
+        set. A single stale environment variable overriding one of them produces
+        a mixture that is worse than either profile: measured here, a leftover
+        `LLM_MODEL=...gemma...` in .env gave a Gemma workhorse with Gemini's
+        250K-token budgets and Gemini's hop counts.
+
+        Explicit settings still WIN -- silently ignoring what someone deliberately
+        configured is the worse failure. But the contradiction is reported, so an
+        incoherent mix is a line in the log rather than a mystery.
+        """
+        profile = MODEL_PROFILES.get(self.model_profile, {})
+        return [
+            (field, getattr(self, field), expected)
+            for field, expected in profile.items()
+            if field in self.model_fields_set and getattr(self, field) != expected
+        ]
+
+    @model_validator(mode="after")
+    def _apply_model_profile(self) -> "Settings":
+        """Fill in the profile's values for anything not set explicitly.
+
+        `model_fields_set` is the load-bearing part: it holds the fields that
+        actually arrived from the environment or the constructor, so an explicit
+        LLM_MODEL in .env still beats the profile. Without that check, switching
+        profile would silently discard a developer's deliberate override -- and
+        the app would keep reporting the model they asked for while calling a
+        different one.
+        """
+        for field, value in MODEL_PROFILES.get(self.model_profile, {}).items():
+            if field not in self.model_fields_set:
+                setattr(self, field, value)
+        return self
 
     @property
     def docs_enabled(self) -> bool:
@@ -181,6 +329,118 @@ class Settings(BaseSettings):
     # default in Elasticsearch; larger flattens the weight given to rank 1.
     rrf_k: int = 60
 
+    # --- hybrid retrieval ---
+    # Fuse BM25 with the dense search. Each fails COMPLETELY in the other's
+    # territory -- dense cannot find "INC-2024-1183", BM25 cannot match
+    # "couldn't locate it" to "hard to find" -- so this is coverage, not a
+    # tie-break.
+    #
+    # ON, and measured on the golden set (17 answerable questions, floor on):
+    #
+    #     recall@k     dense   +hybrid
+    #     @1           0.520   0.490
+    #     @3           0.725   0.814
+    #     @5           0.873   0.931
+    #     @10          0.971   1.000
+    #
+    # Note the SHAPE, not just the direction: recall rises at every k except 1,
+    # where it falls. That is RRF behaving as designed -- it rewards agreement
+    # across retrievers, so a chunk only one method ranked first gets pushed
+    # down by two that agree on second. Hybrid buys breadth and costs a little
+    # precision at the very top, which is exactly the job the reranker below
+    # then does.
+    hybrid_search: bool = True
+    # Candidates each retriever contributes to the fusion. Deeper than the
+    # final k on purpose: RRF only sees what each list contains, so a chunk at
+    # rank 21 of a top-20 list contributes exactly nothing.
+    hybrid_candidates: int = 20
+
+    # --- absolute relevance floor ---
+    # Minimum cosine SIMILARITY for a chunk to be considered at all. Qdrant
+    # returns similarity (1.0 identical, 0.0 unrelated), which is the
+    # complement of the distance the literature usually quotes.
+    #
+    # WHY THIS IS NEEDED AT ALL: RRF discards magnitudes and reads only rank,
+    # so it always produces a confident top-k -- every candidate could be a
+    # terrible match and the top 5 would look identical to a perfect run. The
+    # floor is what makes "nothing relevant exists" a possible OUTCOME, which
+    # is what the abstention path depends on.
+    #
+    # 0.0 disables it. 0.60 is CALIBRATED, not guessed -- the two score
+    # distributions over the golden set, dense top-20:
+    #
+    #                 n    min    p05    median   max
+    #     relevant    27   0.619  0.633  0.722    0.821
+    #     irrelevant  313  0.514  0.541  0.616    0.781
+    #
+    #     floor   keeps relevant   drops irrelevant
+    #     0.55    100.0%            7.7%
+    #     0.60    100.0%           40.3%   <-- here
+    #     0.62     96.3%           51.4%
+    #     0.65     81.5%           67.1%
+    #
+    # 0.60 removes two fifths of the noise at zero recall cost; 0.62 starts
+    # discarding real answers to gain another tenth, which is the wrong trade --
+    # nothing downstream recovers from evidence that never arrived. Confirmed
+    # against Tier 1: recall@1/3/5/10 identical with the floor on.
+    #
+    # DO NOT copy this number to another corpus. It is a property of this
+    # embedding model at this dimension -- gemini-embedding-001 at 768 dims puts
+    # everything in a narrow high band, so a threshold quoted from a paper using
+    # a different model would either keep everything or discard everything.
+    # Re-run the calibration instead.
+    retrieval_score_floor: float = 0.60
+
+    # --- reranking ---
+    # An LLM reranker, listwise, with relevance GRADING merged into the same
+    # call.
+    #
+    # Retrieval is a bi-encoder: query and chunk are embedded separately and
+    # never meet, so the score is similarity between two summaries of meaning.
+    # A reranker sees them TOGETHER and judges whether the passage answers the
+    # question -- much better, far too slow to run over a whole corpus. Hence
+    # retrieve broadly and cheaply, then rerank precisely.
+    #
+    # Listwise (one call ranking all candidates) rather than pointwise (one
+    # call each): ranking is inherently comparative, and pointwise scoring
+    # gives eight chunks the same 7/10.
+    #
+    # ON. It is the single largest measured win in the retrieval stack, and it
+    # repairs the one thing hybrid made worse. Full ablation, golden set:
+    #
+    #                  dense   +floor   +hybrid   +rerank
+    #     recall@1     0.520   0.520    0.490     0.578
+    #     recall@3     0.725   0.725    0.814     0.951
+    #     recall@5     0.892   0.873    0.931     1.000
+    #     MRR@5        0.762   0.762    0.760     0.853
+    #     MAP@5        0.698   0.690    0.691     0.845
+    #     NDCG@5       0.763   0.752    0.769     0.890
+    #     precision@5  0.235   0.224    0.235     0.282
+    #
+    # TREAT THESE AS APPROXIMATE. Both the query rewriter and the reranker are
+    # model calls, and flash-lite ignores temperature=0 (the provider warns as
+    # much), so consecutive runs of the same configuration move by a few points.
+    # The ordering is stable across runs; a two-point difference is not a
+    # result.
+    #
+    # The grading half earns its place separately: on the golden set's
+    # UNANSWERABLE questions it returned an empty list ("CEO's total
+    # compensation", "revenue in fiscal 2026"), which is what makes abstention
+    # reachable at all. A reranker that always returns k cannot express "none of
+    # these help".
+    #
+    # COST: one extra model call per retrieval, and the planned path retrieves
+    # once per sub-question. That is affordable on the workhorse's budget and is
+    # the main reason the gemma profile exists.
+    rerank: bool = True
+    # Candidates fed to the reranker. The model reorders only what it is given,
+    # so this is the ceiling on recall; but models rank 100 items WORSE than 30
+    # as position bias intensifies, so deeper is not strictly better.
+    rerank_candidates: int = 20
+    # Passage characters shown to the reranker. Enough to judge relevance,
+    # short enough that 20 candidates do not become a 9K-token prompt.
+    rerank_excerpt_chars: int = 800
+
     # --- conversation history ---
     # Send the WHOLE transcript rather than a rolling summary plus the last
     # three exchanges.
@@ -265,6 +525,28 @@ class Settings(BaseSettings):
     # one missed.
     agent_max_iterations: int = 2
     agent_max_subquestions: int = 3
+    # Draft rewrites after an `unsupported_claim` verdict. A SEPARATE budget
+    # from `agent_max_iterations`: a rewrite costs one call and no retrieval,
+    # so charging it to the retrieval cycle would let one over-claim consume the
+    # turn's ability to search.
+    #
+    # One, not two. A second pass over the same evidence rarely differs, and a
+    # critic that rejects the rewrite twice is usually disagreeing about tone
+    # rather than about support.
+    agent_max_regens: int = 1
+
+    # Output ceiling for the drafted answer.
+    #
+    # Config rather than a literal in `draft`, because it is the setting most
+    # sensitive to which model is answering. On Gemini 2000 is comfortable; on
+    # Gemma it is a third of an entire minute's token budget, and Gemma falls
+    # into repetition loops that run until the cap -- so a generous ceiling
+    # there buys nothing but a longer loop to salvage.
+    #
+    # It was hardcoded at 2000, and 900 before that. 900 silently truncated
+    # answers past their `sources_used` list, which is emitted last, producing
+    # "no sources cited" on answers that cited in every sentence.
+    draft_max_output_tokens: int = 2000
 
     # --- human-in-the-loop ---
     # Ask the user a clarifying question when their request is too vague to
@@ -368,6 +650,56 @@ class Settings(BaseSettings):
         return "BAAI/bge-small-en-v1.5"
 
 
+# The active profile override, per request/task rather than per process.
+#
+# A ContextVar and not a module global: the API serves concurrent requests on
+# one event loop, so a global would let one developer's "run this on Gemma"
+# change the model for everybody else's in-flight turn. ContextVars are copied
+# into each task, so the override reaches every `get_settings()` call inside
+# that turn -- nodes, retrieval, the limiter -- and nothing outside it.
+_profile_override: ContextVar[str | None] = ContextVar(
+    "model_profile_override", default=None
+)
+
+
 @lru_cache
-def get_settings() -> Settings:
+def _base_settings() -> Settings:
     return Settings()
+
+
+@lru_cache(maxsize=len(MODEL_PROFILES) + 1)
+def _profile_settings(profile: str) -> Settings:
+    """Settings re-read under a different profile. Cached: constructing these
+    parses .env every time, and `get_settings()` is called several times per
+    node."""
+    return Settings(model_profile=profile)
+
+
+def get_settings() -> Settings:
+    override = _profile_override.get()
+    if override is not None and override != _base_settings().model_profile:
+        return _profile_settings(override)
+    return _base_settings()
+
+
+@contextmanager
+def use_model_profile(profile: str | None) -> Iterator[None]:
+    """Run a block under a different model profile.
+
+    DEV ONLY, and the caller enforces that -- this function deliberately has no
+    opinion about `app_env`, so the check sits at the API boundary where the
+    request is, rather than being buried here where it would be easy to assume
+    and hard to see.
+
+    A token is reset in `finally` rather than setting the var back to None: the
+    latter would clobber an enclosing override instead of restoring it.
+    """
+    if profile is None or profile not in MODEL_PROFILES:
+        yield
+        return
+
+    token = _profile_override.set(profile)
+    try:
+        yield
+    finally:
+        _profile_override.reset(token)

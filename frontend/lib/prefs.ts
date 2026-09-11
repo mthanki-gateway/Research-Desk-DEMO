@@ -22,6 +22,16 @@
  * default, one field at a time -- a single bad value must not discard the rest.
  */
 
+/**
+ * Which model family answers. DEVELOPMENT ONLY — the server ignores it unless
+ * APP_ENV=dev, and the control is not rendered in a production build.
+ *
+ * "gemma" trades quality for a 30 rpm / 14,400-per-day budget. The answer
+ * model allows FIVE requests per minute, which is about one question every two
+ * minutes once the agent loop is doing real work — unusable for development.
+ */
+export type ModelProfile = "gemini" | "gemma";
+
 export type TurnSettings = {
   topK: number;
   multiQuery: boolean;
@@ -29,6 +39,8 @@ export type TurnSettings = {
   clarify: boolean;
   /** Gather evidence with the tool-calling loop instead of a fixed plan. */
   react: boolean;
+  /** Dev-only model override. null = use whatever the server is configured for. */
+  modelProfile: ModelProfile | null;
 };
 
 /**
@@ -44,6 +56,10 @@ export const DEFAULT_TURN_SETTINGS: TurnSettings = {
   multiQuery: false,
   clarify: true,
   react: true,
+  // null, not "gemini": the UI should not assert which model the server runs.
+  // Sending an explicit profile on every turn would override a deployment's own
+  // configuration from the browser, which is exactly backwards.
+  modelProfile: null,
 };
 
 const KEY = "research-desk:turn-settings";
@@ -56,6 +72,13 @@ const MAX_TOP_K = 20;
 
 function readBool(value: unknown, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
+}
+
+function readProfile(value: unknown): ModelProfile | null {
+  // Validated against the known set rather than cast. A stored profile from an
+  // older build (or a hand-edited one) would otherwise be sent to the server
+  // and rejected on every turn.
+  return value === "gemini" || value === "gemma" ? value : null;
 }
 
 function readTopK(value: unknown, fallback: number): number {
@@ -93,6 +116,7 @@ export function loadTurnSettings(): TurnSettings {
       multiQuery: readBool(s.multiQuery, DEFAULT_TURN_SETTINGS.multiQuery),
       clarify: readBool(s.clarify, DEFAULT_TURN_SETTINGS.clarify),
       react: readBool(s.react, DEFAULT_TURN_SETTINGS.react),
+      modelProfile: readProfile(s.modelProfile),
     };
   } catch {
     return DEFAULT_TURN_SETTINGS;
