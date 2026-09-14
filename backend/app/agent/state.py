@@ -101,6 +101,31 @@ class ResearchState(TypedDict, total=False):
     # being asked to guess which claim was the problem.
     unsupported_claims: list[str]
 
+    # What KIND of turn this is, set by the route node. "remember" short-circuits
+    # the whole retrieval path: a standing instruction needs no search and no
+    # citations, and searching for it produces the "your documents do not
+    # mention your preferences" answer that made the router necessary.
+    intent: str
+    # Standing instructions in force for this turn, already rendered. Injected
+    # into the drafting and ReAct prompts so a stated preference actually
+    # changes behaviour rather than merely being stored.
+    preferences: str
+    # Preferences saved BY this turn, so the UI can say memory changed rather
+    # than leaving the user to infer it from the prose.
+    memory_saved: list[str]
+    # The conversation, so a preference can be scoped to it rather than to the
+    # user. Carried in state because nodes are pure functions of state.
+    session_id: str | None
+    # The ReAct agent answered in its own words, having called no search tool.
+    #
+    # An EXPLICIT flag rather than inferring it from "sufficient and no
+    # evidence": those are also true of a turn whose searches all came back
+    # empty, and that turn must still go to `draft` -- which is where "your
+    # documents cover X but not Z" gets written, and where `critique` reviews
+    # the result. Conflating the two would turn a failed search into licence to
+    # answer from memory.
+    answered_directly: bool
+
     # --- human-in-the-loop ---
     # The question to put to the user, written by the `clarify` node:
     # {"question": str, "options": [{"label": str, "description": str}]}.

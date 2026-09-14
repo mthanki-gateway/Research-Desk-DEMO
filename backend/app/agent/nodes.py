@@ -20,7 +20,7 @@ from langgraph.types import interrupt
 
 from app.agent.state import ResearchState
 from app.config import get_settings
-from app.services import websearch
+from app.services import preferences, websearch
 from app.services.llm import (
     LLMError,
     extract_bool,
@@ -31,6 +31,7 @@ from app.services.llm import (
     get_llm,
     is_repetitive,
 )
+from app.services.pool import get_pool
 from app.services.retrieval import build_context, document_outline, retrieve
 
 log = structlog.get_logger()
@@ -189,30 +190,49 @@ CLARIFY_SCHEMA = {
     "required": ["ambiguous", "question", "options"],
 }
 
-CLARIFY_SYSTEM = """You decide whether a request to a research assistant is \
-specific enough to answer, and if not, what to ask.
+CLARIFY_SYSTEM = """You decide whether to ASK THE USER A QUESTION instead of \
+answering. Almost always, the answer is no.
 
-A request is NOT ambiguous merely because the user's own documents do not cover \
-it -- what is searchable is stated below.
+ASKING IS A FAILURE MODE, NOT A COURTESY. It stops the user, costs them a \
+round trip, and makes the assistant feel obstructive. Searching and being \
+partly wrong is nearly always better: they can see what you did and correct it \
+in one line.
 
-READ THE CONVERSATION FIRST. A follow-up is almost never ambiguous, because \
-its subject is whatever was just being discussed. "Now try the internet", "what \
-about the other one", "and the year before?" are all CLEAR: the topic carries \
-over. Judge the request in context, never in isolation.
+THE TEST: could ANY reasonable answer be given without asking?
+If yes -- ambiguous=false. Always.
 
-Set ambiguous=true ONLY when the request does not say enough to search on:
-- it names a broad topic with no particular aspect ("tell me about the report")
-- it explicitly defers the specifics ("the specific thing I want to know")
-- it could mean two clearly different things the sources treat separately
-- it asks for "details" or "information" without saying about what
+APPLY THESE FIRST, and they settle nearly every case:
 
-Set ambiguous=false when:
-- the request names a specific fact, figure, event, section or entity -- even \
-if it is short. "What was operating income?" is specific.
-- it is an INSTRUCTION rather than a question: "summarize this document", \
-"answer from the internet instead", "try again". An instruction about HOW to \
-answer is not an ambiguous request for WHAT to answer.
-- the conversation already establishes the subject.
+1. TWO POSSIBLE MEANINGS AND BOTH ARE ANSWERABLE -> ANSWER BOTH.
+   Never ask someone to choose between things you could simply cover.
+   "tell me about pyramids and also the pain points" -> answer both.
+   "you never answered the other question" -> answer the outstanding one.
+
+2. A BROAD REQUEST IS NOT AMBIGUOUS, it is broad. Summarise, cover the main \
+aspects, and say what you covered.
+   "tell me about the report" -> summarise the report.
+
+3. A FOLLOW-UP TAKES ITS SUBJECT FROM THE CONVERSATION. Read the history.
+   "and the year before?", "what about the other one", "now try the internet".
+
+4. AN INSTRUCTION ABOUT HOW TO ANSWER IS NOT A QUESTION ABOUT WHAT TO ANSWER.
+   "summarise that", "answer from the web instead", "try again", "be shorter".
+
+5. IF YOU WOULD HAVE TO INVENT THE OPTIONS, there is nothing to ask about.
+
+ambiguous=true ONLY when BOTH of these hold:
+- there is genuinely NO sensible default -- not merely several possibilities, \
+but no way to pick or combine them; AND
+- answering the wrong reading would be COSTLY or MISLEADING, not just \
+imperfect. Deleting something, a figure that would be wrong in a way the user \
+could not spot, or a question that names an entity you cannot identify at all.
+
+Concretely, that is nearly only this shape: the request defers its own \
+specifics ("the specific thing I want to know", "you know the one") and the \
+conversation does not say which.
+
+When in doubt, ambiguous=false. A user who wanted something narrower will say \
+so; a user who was stopped for no reason just loses time.
 
 When ambiguous=true:
 - `question` is ONE short sentence asking what they want. Never apologise, \
@@ -535,7 +555,23 @@ DRAFT_SCHEMA = {
     "properties": {
         "answer": {
             "type": "string",
-            "description": "The answer, with [n] citations inline.",
+            # The newline sentence is load-bearing, not decoration.
+            #
+            # Under a JSON schema the model writes the answer as a STRING
+            # LITERAL, and a literal newline is not legal there -- so a model
+            # that has not been told to escape them simply stops emitting them,
+            # and every structural instruction in DRAFT_SYSTEM silently
+            # evaporates. Measured: answers arrived reading "...pain points:
+            # - Customer concentration... - Hardware supply chain..." -- the
+            # list markers the prompt asked for, with zero \n in the whole
+            # field, so the renderer had nothing to split on and showed one
+            # wall of text. The prompt was right; the envelope ate it.
+            "description": (
+                "The answer in MARKDOWN, with [n] citations inline. This is a "
+                "JSON string, so every line break MUST be written as the "
+                "two-character escape \\n -- a paragraph break is \\n\\n. An "
+                "answer containing no \\n at all is wrong."
+            ),
         },
         "sources_used": {"type": "array", "items": {"type": "integer"}},
         "unanswered": {
@@ -590,7 +626,79 @@ their own material and which on a public page, without opening anything.
 - Never blur the two. Do not let a web figure stand as if it came from their \
 documents, and do not present their internal numbers as public knowledge.
 
-Be concise."""
+SAY WHAT YOU DID, FIRST
+
+Open with ONE short sentence reporting the work, then a blank line, then the \
+answer. The reader cannot see the retrieval, so without this they cannot tell \
+a thin answer from a thin corpus -- "I don't know" reads identically whether \
+nothing was searched or everything was.
+
+Report only what the "Search coverage" line and the source list actually show, \
+naming both halves when both were used:
+
+    I searched your documents and the web.
+
+    I searched your documents; the web was not available for this answer.
+
+    I searched your documents and found nothing on this, so the answer below \
+is from the web.
+
+If a memory update is reported to you below, SAY SO in that same opening -- \
+plainly, and quoting what was stored:
+
+    I've remembered that you always want a table when comparing numbers, and \
+searched your documents and the web.
+
+Never claim a search you were not told about, never pad this into a paragraph, \
+and never repeat it at the end.
+
+FORMAT IT SO IT CAN BE READ
+
+Write markdown, and structure it. A correct answer delivered as one unbroken \
+block is a worse answer -- nobody reads it, and the parts they wanted are \
+buried.
+
+You reply as JSON, so the answer is a string literal: write every line break \
+as the escape \\n, and a paragraph break as \\n\\n. Structure that is not \
+separated by \\n does not survive -- "intro: - first - second" on one line is \
+the failure this is warning you about.
+
+- PARAGRAPHS FIRST. This matters more than everything below it combined. One \
+idea per paragraph, separated by a blank line, and never more than about five \
+sentences before a break. Prose broken into paragraphs is the DEFAULT shape of \
+an answer; lists, tables and headings are exceptions you reach for when the \
+content genuinely has that shape.
+- ONE PARAGRAPH PER PART OF THE QUESTION. If the user asked two things, answer \
+the first, break, then answer the second -- in the order they asked. Do not \
+weave the parts together into one paragraph, and do not answer them in one \
+paragraph just because both answers are short. A question with three parts \
+gets at least three paragraphs.
+- A LIST when you are enumerating. If you catch yourself writing "(1) ... (2) \
+... (3)" inside a sentence, those are list items -- put each on its own line \
+starting with "- " or "1. ". Do not inline them. But do not reach for a list \
+where two sentences would do: a list of three fragments is harder to read \
+than the paragraph it replaced.
+- A TABLE when you are comparing things across the same dimensions -- figures \
+by period, options against criteria, documents against what each covers. Use \
+markdown pipes:
+
+    | Metric | 2023 | 2024 |
+    | --- | --- | --- |
+    | Gross margin | 58.7% [1] | 62.1% [1] |
+
+- A `### heading` only when the answer covers genuinely separate topics. Two \
+paragraphs do not need headings.
+- **Bold** for a figure or term the reader is looking for. Sparingly; bolding \
+everything is the same as bolding nothing.
+
+Citations go INSIDE the structure -- at the end of the sentence, the list item, \
+or the table cell they support. A list of citations at the end tells the reader \
+nothing about which claim came from where.
+
+Be concise: structure is not permission to write more. Prefer a short answer \
+with three clear paragraphs over a long one with three headings.
+
+When in doubt, use a paragraph break."""
 
 
 # "[1]", "[2, 3]", "[1][4]" -- the shapes the drafter actually produces. The
@@ -660,6 +768,22 @@ async def draft(state: ResearchState) -> dict:
         "AND that web search is not enabled -- do not imply the "
         "information does not exist."
     )
+    # What was stored this turn, so the answer can say so.
+    #
+    # Only the BOTH path needs this. A remember-only turn never reaches `draft`
+    # -- `route` writes its own confirmation and ends -- but a turn that stored
+    # an instruction AND asked something came out as a bare answer with no
+    # acknowledgement, so the user could not tell the instruction had landed.
+    # Telling them to check the profile page is not the same as confirming it.
+    saved = state.get("memory_saved") or []
+    memory_block = ""
+    if saved:
+        listed = "\n".join(f"- {s}" for s in saved)
+        memory_block = (
+            "Memory updated this turn -- you stored the following, and must "
+            f"say so in your opening sentence:\n{listed}\n\n"
+        )
+
     # A REGENERATION carries the critic's objection, and nothing else changes.
     #
     # This is the remedy for `unsupported_claim`: the passages were right and
@@ -683,6 +807,7 @@ async def draft(state: ResearchState) -> dict:
         f"{history_block}"
         f"Sources:\n{build_context(evidence)}\n\n"
         f"Search coverage: {reach}\n\n"
+        f"{memory_block}"
         f"{redo_block}"
         f"Question: {state['question']}\n\n"
         "Answer from the sources above, per your instructions."
@@ -704,10 +829,10 @@ async def draft(state: ResearchState) -> dict:
         # in baseline RAG. This is the text the user reads, and it is 1-2 calls
         # per turn, which is what makes a 5 rpm budget affordable where the
         # four-call agent would not fit.
-        raw = await get_llm(settings.answer_model).generate(
+        raw = await get_pool("answer").generate(
             prompt,
             schema=DRAFT_SCHEMA,
-            system=DRAFT_SYSTEM,
+            system=DRAFT_SYSTEM + (state.get("preferences") or ""),
             temperature=0.1,
             # Profile-dependent, because the right ceiling differs by model.
             #
@@ -881,10 +1006,10 @@ async def resolve(state: ResearchState) -> dict:
     )
 
     try:
-        raw = await get_llm(settings.answer_model).generate(
+        raw = await get_pool("answer").generate(
             prompt,
             schema=RESOLVE_SCHEMA,
-            system=RESOLVE_SYSTEM,
+            system=RESOLVE_SYSTEM + (state.get("preferences") or ""),
             temperature=0.1,
             max_output_tokens=settings.draft_max_output_tokens,
         )
@@ -1122,5 +1247,310 @@ async def critique(state: ResearchState) -> dict:
                 "unsupported_claims": overclaims,
                 "iteration": iterations,
             }
+        ],
+    }
+
+
+# --------------------------------------------------------------------------
+# 0a. route  (what KIND of turn is this)
+#
+# THE GAP THIS CLOSES.
+#
+# Every turn used to be treated as a retrieval question. Asked "remember my
+# preference to always search both the internet and my documents", the graph
+# dutifully searched the documents FOR THAT PREFERENCE and answered "your
+# documents do not mention personal preferences regarding search behaviour" --
+# which is both true and completely useless.
+#
+# `clarify` could not catch it: it decides whether a request is specific enough
+# to SEARCH, which already assumes searching is the right response. The missing
+# question was one level up: is this a question at all?
+# --------------------------------------------------------------------------
+
+ASK = "ask"
+REMEMBER = "remember"
+BOTH = "both"
+
+ROUTE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "intent": {
+            "type": "string",
+            "enum": [ASK, REMEMBER, BOTH],
+            "description": (
+                "ask = a question only. remember = an instruction only. "
+                "both = the message does both at once."
+            ),
+        },
+        "preference": {
+            "type": "string",
+            "description": (
+                "The standing instruction, in the second person, keeping the "
+                "user's own specifics. Empty when intent=ask."
+            ),
+        },
+        "scope": {
+            "type": "string",
+            "enum": ["user", "session"],
+            "description": "user = always. session = this conversation only.",
+        },
+        "question": {
+            "type": "string",
+            "description": (
+                "The part that is actually a QUESTION, with the instruction "
+                "removed. Empty when intent=remember."
+            ),
+        },
+    },
+    "required": ["intent"],
+}
+
+ROUTE_SYSTEM = """You decide what KIND of message this is. You do not answer it.
+
+intent = "remember" when the user is telling you HOW to behave from now on, \
+rather than asking for information. Signals: "remember", "always", "from now \
+on", "never", "going forward", "in future", "make sure you", "stop doing".
+
+    "always search the web too"                      -> remember
+    "remember I prefer short answers"                 -> remember
+    "from now on cite page numbers"                   -> remember
+    "never mention the incident report"               -> remember
+
+intent = "ask" for everything else -- questions, follow-ups, instructions about \
+THIS answer only, and anything you are unsure about.
+
+    "what drove the margin improvement?"              -> ask
+    "summarise that in one line"                      -> ask   (this answer only)
+    "what do my documents say about preferences?"     -> ask   (a real question)
+
+intent = "both" when ONE message does BOTH -- a question AND a standing \
+instruction. This is common and must not be collapsed into either one:
+
+    "tell me about pyramids and always say which facts came from the web"
+        -> both. question: "tell me about pyramids"
+                 preference: "Always say which facts came from the web."
+
+    "what was revenue? and from now on give me the figure first"
+        -> both. question: "what was revenue?"
+                 preference: "Give the figure first."
+
+Picking one would silently drop the other half of what they asked for.
+
+BIAS TOWARDS ANSWERING. If a message contains anything question-shaped, the \
+intent is "ask" or "both", never "remember" alone -- losing the answer is far \
+worse than losing the instruction, which they can restate.
+
+When there is a preference ("remember" or "both"):
+- `preference` is ONE imperative sentence addressed to you, keeping every \
+specific the user gave. "always search both the documents and the web, and say \
+which facts came from which" -- not "the user prefers thorough search".
+- `scope` is "user" unless they clearly limited it to this conversation \
+("for this chat", "just here"). Default to "user": people say "always" and mean \
+it.
+
+When intent = "both":
+- `question` is the message with the instruction REMOVED, and nothing else \
+changed. It becomes the search query, so leaving "and remember to always..." in \
+it would send that phrase to a retrieval engine as if it were a topic.
+
+ALREADY-REMEMBERED INSTRUCTIONS may be listed below. If the user is restating \
+one of them -- in any wording -- leave `preference` EMPTY. People repeat \
+themselves when they think they were not heard, and storing a second copy makes \
+the instruction look twice as emphatic while telling them nothing new. Only \
+emit a preference that ADDS something: a new rule, or a genuine change to an \
+existing one (including reversing it).
+
+A RESTATEMENT WITH NO QUESTION IN IT is intent="remember" with `preference` \
+empty. Do NOT call it "ask": there is nothing to look up, and searching the \
+documents for an instruction the user just gave finds nothing and wastes their \
+time. If the restatement is bundled with a real question, use "both" and put \
+the question in `question`."""
+
+
+async def route(state: ResearchState) -> dict:
+    """Classify the turn, and capture a preference when that is what it is.
+
+    Fails soft to `ask` in every direction. A broken router must never stop a
+    question being answered -- that is a far worse failure than missing a
+    preference the user can restate.
+    """
+    question = state["question"]
+    settings = get_settings()
+    if not settings.agent_route:
+        return {}
+
+    chat_context = state.get("chat_context") or ""
+    history = f"Conversation so far:\n{chat_context}\n\n" if chat_context else ""
+
+    # The router already sees what is stored, so the "is this new?" judgement
+    # is made by a model that understands synonyms rather than by token
+    # overlap. Measured: lexical dedupe kept "always tell me what's from the
+    # internet" and "always let me know what info is from the internet" as two
+    # rows, because they share almost no content words despite being one
+    # instruction.
+    known = state.get("preferences") or ""
+    already = (
+        f"ALREADY REMEMBERED:\n{known}\n\n"
+        if known
+        else "Nothing is remembered for this user yet.\n\n"
+    )
+
+    try:
+        raw = await get_llm().generate(
+            f"{history}{already}Message: {question}",
+            schema=ROUTE_SCHEMA,
+            system=ROUTE_SYSTEM,
+            temperature=0.0,
+            max_output_tokens=300,
+        )
+    except LLMError as exc:
+        log.warning("route_failed", error=str(exc))
+        return {"trace": [{"node": "route", "intent": ASK, "error": str(exc)}]}
+
+    intent = (extract_string(raw, "intent") or ASK).strip().lower()
+    if intent not in (REMEMBER, BOTH):
+        return {"trace": [{"node": "route", "intent": ASK}]}
+
+    text = extract_string(raw, "preference").strip()
+    scope = (extract_string(raw, "scope") or "user").strip().lower()
+    asked = extract_string(raw, "question").strip()
+
+    if not text:
+        # No preference to store. Two quite different reasons, and they need
+        # different endings.
+        if intent == BOTH or asked:
+            # A restatement bundled with a real question. Answer the question;
+            # the instruction is already in force.
+            log.info("route_restated_with_question", question=(asked or question)[:60])
+            return {
+                "question": asked or question,
+                "intent": BOTH,
+                "trace": [{"node": "route", "intent": BOTH, "saved": False}],
+            }
+        # A pure restatement. Confirming beats searching for it -- which is
+        # exactly the failure this node exists to prevent -- and beats silence,
+        # which reads as not having listened.
+        log.info("route_restated", question=question[:60])
+        return {
+            "draft": (
+                "Already remembered, so nothing changed. You can see everything "
+                "I have stored in your profile."
+            ),
+            "citations": [],
+            "sufficient": True,
+            "intent": REMEMBER,
+            "memory_saved": [],
+            "trace": [{"node": "route", "intent": REMEMBER, "saved": False}],
+        }
+
+    raw_session = state.get("session_id")
+    session_uuid = uuid.UUID(raw_session) if raw_session else None
+
+    # Checked against what is STORED, not against the block in the prompt.
+    #
+    # `state["preferences"]` is the rendered instruction block, and
+    # `render_for_prompt` caps it at MAX_IN_PROMPT. Deduping against that would
+    # make every preference past the cap invisible to this check -- so a user
+    # with a long list would start accumulating duplicates of exactly the older
+    # instructions they had most likely forgotten stating.
+    stored = await preferences.preferences_in_force(
+        owner_id=state.get("owner_id"), session_id=session_uuid
+    )
+    if await preferences.already_covered(text, [p.text for p in stored]):
+        log.info("route_duplicate_preference", text=text[:60])
+        if intent == BOTH or asked:
+            # Already in force, so there is nothing to store -- but there IS a
+            # question, and it still gets answered.
+            return {
+                "question": asked or question,
+                "intent": BOTH,
+                "trace": [
+                    {"node": "route", "intent": BOTH, "saved": False, "duplicate": True}
+                ],
+            }
+        return {
+            "draft": (
+                "Already remembered, so nothing changed. You can see everything "
+                "I have stored in your profile."
+            ),
+            "citations": [],
+            "sufficient": True,
+            "intent": REMEMBER,
+            "memory_saved": [],
+            "trace": [
+                {
+                    "node": "route",
+                    "intent": REMEMBER,
+                    "saved": False,
+                    "duplicate": True,
+                }
+            ],
+        }
+
+    pref = await preferences.remember(
+        text,
+        owner_id=state.get("owner_id"),
+        session_id=session_uuid,
+        scope="session" if scope == "session" else "user",
+        source_message=question,
+    )
+    saved = [text] if pref is not None else []
+
+    # APPLIED TO THIS TURN, not merely stored for the next one.
+    #
+    # "tell me about X and always say which facts came from the web" plainly
+    # means "including now". Storing it and answering without it would ignore
+    # the instruction in the very message that gave it, which reads as the
+    # assistant not listening.
+    merged = (state.get("preferences") or "") + preferences.render_for_prompt(
+        [pref] if pref is not None else []
+    )
+
+    if intent == BOTH:
+        # The question with the instruction stripped out. It becomes the search
+        # query, and leaving "and remember to always..." in would send that
+        # phrase to a retrieval engine as though it were a topic.
+        target = asked or question
+        log.info("routed_both", scope=scope, saved=bool(pref), question=target[:60])
+        return {
+            # Rewritten, so every node downstream sees the question alone. The
+            # original is still in the transcript.
+            "question": target,
+            "original_question": question,
+            "intent": BOTH,
+            "preferences": merged,
+            "memory_saved": saved,
+            "trace": [
+                {
+                    "node": "route",
+                    "intent": BOTH,
+                    "scope": scope,
+                    "saved": bool(pref),
+                    "question": target,
+                }
+            ],
+        }
+
+    where = "this conversation" if scope == "session" else "all conversations"
+    answer = (
+        f"Noted, and saved for {where}:\n\n> {text}\n\nI will apply this from now on."
+        if pref is not None
+        else f"Already remembered, so nothing changed:\n\n> {text}"
+    )
+
+    log.info("routed_remember", scope=scope, saved=pref is not None)
+    return {
+        # Terminal ONLY for a pure instruction: there is no question to answer,
+        # nothing to retrieve, and running the search path would produce exactly
+        # the "your documents do not mention your preferences" answer this node
+        # exists to prevent.
+        "draft": answer,
+        "citations": [],
+        "sufficient": True,
+        "intent": REMEMBER,
+        "preferences": merged,
+        "memory_saved": saved,
+        "trace": [
+            {"node": "route", "intent": REMEMBER, "scope": scope, "saved": bool(pref)}
         ],
     }

@@ -34,7 +34,7 @@ import random
 import structlog
 
 from app.config import get_settings
-from app.services import tracing
+from app.services import progress, tracing
 from app.services.llm import LLMError, extract_int_list, get_llm
 from app.services.vectorstore import SearchHit
 
@@ -112,6 +112,7 @@ async def rerank_hits(
         input=query,
         metadata={"n_candidates": len(hits), "top_k": top_k},
     ) as span:
+        progress.emit("rerank", n=len(hits))
         try:
             raw = await get_llm().generate(
                 prompt,

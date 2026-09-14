@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from app.agent.checkpointer import close_checkpointer, init_checkpointer
 from app.agent.graph import build_graph, set_graph
 from app.api import auth as auth_api
-from app.api import chat, documents, evaluation, sessions
+from app.api import chat, documents, evaluation, profile, sessions
 from app.config import get_settings
 from app.db.session import create_tables
 from app.services import tracing
@@ -160,6 +160,7 @@ app.include_router(documents.router)
 app.include_router(chat.router)
 app.include_router(sessions.router)
 app.include_router(evaluation.router)
+app.include_router(profile.router)
 
 
 class Health(BaseModel):

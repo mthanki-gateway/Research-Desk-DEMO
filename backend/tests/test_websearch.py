@@ -563,7 +563,7 @@ class TestDraftKnowsItsCoverage:
         from app.agent import nodes
 
         llm = CapturingLLM('{"answer": "x [1]", "sources_used": [1]}')
-        monkeypatch.setattr(nodes, "get_llm", lambda *a, **k: llm)
+        monkeypatch.setattr(nodes, "get_pool", lambda role: _StubPool(llm))
         monkeypatch.setattr(nodes.websearch, "enabled", lambda: web_enabled)
         await nodes.draft({"question": "q", "evidence": [_hit(1)], "chat_context": ""})
         return llm.prompt
@@ -625,3 +625,28 @@ class TestClarifySeesTheConversation:
 
         await nodes.clarify({"question": "q", "clarify": True, "chat_context": ""})
         assert "web search is not configured" in llm.prompt
+
+
+class _StubPool:
+    """Stands in for ModelPool so a test can stub the model behind it.
+
+    The nodes now go through a pool rather than calling get_llm directly -- the
+    pool spreads load across models sharing one role. Tests stub the pool at the
+    same seam so they exercise the production path rather than a bypass.
+    """
+
+    def __init__(self, client):
+        self._client = client
+
+    def for_prompt(self, *a, **kw):
+        return self._client
+
+    def pick(self, tokens):
+        return self._client
+
+    async def generate(self, prompt, **kwargs):
+        # The pool now owns the call so it can hand off to another model on a
+        # 429. Delegating keeps the stub a seam rather than a second
+        # implementation.
+        kwargs.pop("max_attempts", None)
+        return await self._client.generate(prompt, **kwargs)

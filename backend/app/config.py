@@ -68,6 +68,27 @@ MODEL_PROFILES: dict[str, dict[str, object]] = {
         "judge_model": "models/gemini-3.6-flash",
         "judge_requests_per_minute": 5,
         "judge_tokens_per_minute": 250_000,
+        # The pool belongs to the PROFILE, not to a standalone default.
+        #
+        # Left as a plain default it would follow the gemma profile across and
+        # put a Gemini model in a Gemma pool, which `ModelPool` refuses at
+        # construction -- so switching profile would raise instead of switching.
+        # Pools and models have to move together for the same reason the token
+        # budgets do.
+        "answer_model_pool": (
+            "models/gemini-3.1-flash-lite,"
+            "models/gemini-3.1-flash-lite-preview,"
+            "models/gemini-2.5-flash-lite"
+        ),
+        # The workhorse makes the MOST calls per turn -- plan, clarify,
+        # critique, rerank -- so it pools the same set. They share limiters
+        # with the answer role, which is correct: quota is per model, and a
+        # bursty role borrowing from a quiet one is the point.
+        "llm_model_pool": (
+            "models/gemini-3.1-flash-lite,"
+            "models/gemini-3.1-flash-lite-preview,"
+            "models/gemini-2.5-flash-lite"
+        ),
         "rewriter_model": _GEMMA,
         "history_full": True,
         "history_max_tokens": 200_000,
@@ -99,6 +120,12 @@ MODEL_PROFILES: dict[str, dict[str, object]] = {
         "judge_model": "models/gemini-3.5-flash-lite",
         "judge_requests_per_minute": 15,
         "judge_tokens_per_minute": 250_000,
+        # NO POOL. gemma-4-31b-it is the only other Gemma on this key and it
+        # returns 500 on every call (measured). A pool member that always
+        # fails is worse than none: it consumes a pick and then fails the call
+        # it was picked for.
+        "answer_model_pool": "",
+        "llm_model_pool": "",
         "rewriter_model": _GEMMA,
         # The whole transcript does not fit in a 16K/minute budget -- it was
         # the arrival of Gemini's 250K that made HISTORY_FULL possible at all.
@@ -125,6 +152,38 @@ MODEL_PROFILES: dict[str, dict[str, object]] = {
 # Profiles whose model emits native functionCall parts. Verified live: every
 # Gemini Flash model on this key does; Gemma does not, at all.
 _TOOL_CALLING_PROFILES = frozenset({"gemini"})
+
+# Requests/minute per model, MEASURED rather than assumed.
+#
+# The API does not report rate limits -- `GET /models/{name}` returns token
+# sizes only -- so these come from `python -m app.scripts.probe_limits`, which
+# trips each model's limit once and reads `quotaValue` out of the 429 body.
+#
+# Re-run it when models change. The numbers are per key and Google moves them.
+#
+# Omitted deliberately, with the reason, so nobody re-adds them hopefully:
+#   gemini-3.8-flash, gemini-3.7-flash   503 -- published but not serving
+#   gemini-3.1-pro-preview, -pro-latest  429 with NULL quota -- 0/0, unusable
+#   gemini-2.5-pro                       404 -- withdrawn for new keys
+#   gemma-4-31b-it                       500 -- internal error on every call
+#   *-latest aliases                     work, but a moving target cannot be
+#                                        pinned, and an alias resolving to the
+#                                        primary would double-count one quota
+MEASURED_RPM: dict[str, int] = {
+    # 15 rpm tier
+    "gemini-3.5-flash-lite": 15,
+    "gemini-3.1-flash-lite": 15,
+    "gemini-3.1-flash-lite-preview": 15,
+    # 10, not 15 -- the exception that made a per-model table necessary
+    "gemini-2.5-flash-lite": 10,
+    # 5 rpm tier
+    "gemini-3.6-flash": 5,
+    "gemini-3.5-flash": 5,
+    "gemini-3-flash-preview": 5,
+    # Gemma never tripped at 26 requests, so 30 is a floor rather than a
+    # measurement. Left at the documented value.
+    "gemma-4-26b-a4b-it": 30,
+}
 
 
 class Settings(BaseSettings):
@@ -285,7 +344,59 @@ class Settings(BaseSettings):
     judge_requests_per_minute: int = 15
     judge_tokens_per_minute: int = 250_000
 
+    # --- model pools ---
+    # Extra models a role may ALSO use, comma-separated. Free-tier quota is per
+    # model, so two models are two budgets and a role that can use either has
+    # the sum -- this is addition for throughput, not failover for reliability.
+    #
+    # The primary is always tried first and only spills over when its own
+    # budget is momentarily spent, so the secondary answers rarely and quality
+    # stays consistent on the common path.
+    #
+    # Verified on this key (see `python -m app.scripts.probe_limits`):
+    #   gemini-2.5-flash-lite     15 rpm, schema ok, one transient 503
+    #   gemini-flash-lite-latest  15 rpm, schema ok
+    #
+    # `-latest` is deliberately NOT the shipped default. It is an alias, and if
+    # it resolves to the primary the pool would hold two entries against ONE
+    # real quota -- appearing to double the budget while doubling nothing.
+    #
+    # NEVER mix Gemma and Gemini in one pool. `ModelPool` refuses it at
+    # construction: Gemma emits no functionCall parts, so a ReAct round landing
+    # on a Gemma member retrieves nothing and reports success.
+    answer_model_pool: str = "models/gemini-2.5-flash-lite"
+    llm_model_pool: str = ""
+
+    @property
+    def answer_pool(self) -> list[str]:
+        return [m.strip() for m in self.answer_model_pool.split(",") if m.strip()]
+
+    @property
+    def llm_pool(self) -> list[str]:
+        return [m.strip() for m in self.llm_model_pool.split(",") if m.strip()]
+
     def limits_for(self, model: str) -> tuple[int, int]:
+        # Measured per-model quota takes precedence over any role default.
+        #
+        # Pool members were previously given their ROLE's budget on the
+        # assumption that same-family members share a tier. The probe disproved
+        # it: gemini-2.5-flash-lite allows 10 requests/minute where every other
+        # flash-lite allows 15, so inheriting the role's 15 handed it half again
+        # its real quota and it would have collected the 429s the pool exists to
+        # avoid.
+        measured = MEASURED_RPM.get(model.removeprefix("models/"))
+        if measured is not None:
+            # Tokens still come from the role: the probe measures REQUEST rate,
+            # and every Gemini model here reports the same 250K/minute.
+            tokens = (
+                self.rewriter_tokens_per_minute
+                if model == self.rewriter_model
+                else self.answer_tokens_per_minute
+            )
+            return measured, tokens
+        return self._role_limits(model)
+
+    def _role_limits(self, model: str) -> tuple[int, int]:
         """(requests_per_minute, tokens_per_minute) for a model name.
 
         Each model gets its OWN limiter keyed on these numbers, because the
@@ -300,6 +411,27 @@ class Settings(BaseSettings):
                 self.answer_requests_per_minute,
                 self.answer_tokens_per_minute,
             ),
+            # POOL MEMBERS INHERIT THEIR ROLE'S BUDGET.
+            #
+            # Without this a member falls through to the `llm_*` default, which
+            # is the WORKHORSE's budget and has nothing to do with it. Measured:
+            # gemini-2.5-flash-lite (really 15 rpm) was being limited at 30,
+            # because that is what the workhorse allowed -- so the pool member
+            # would have been handed twice its real quota and collected the 429s
+            # the pool exists to avoid.
+            #
+            # Inheriting the role's numbers is right because membership already
+            # asserts interchangeability: a pool is same-family, same-tier by
+            # construction. If a member ever genuinely differs, give it its own
+            # entry rather than widening this.
+            **{
+                m: (self.answer_requests_per_minute, self.answer_tokens_per_minute)
+                for m in self.answer_pool
+            },
+            **{
+                m: (self.llm_requests_per_minute, self.llm_tokens_per_minute)
+                for m in self.llm_pool
+            },
             self.rewriter_model: (
                 self.rewriter_requests_per_minute,
                 self.rewriter_tokens_per_minute,
@@ -485,10 +617,29 @@ class Settings(BaseSettings):
     # boundaries, so (document_id, heading) identifies a section and no
     # migration or re-ingest is needed.
     #
-    # Off until measured on Tier 2. It cannot move Tier 1 -- that scores which
-    # CHUNKS were retrieved, and this changes the text handed to the model
-    # afterwards -- so the evidence has to come from faithfulness and context
-    # precision, which cost a judge run.
+    # OFF, and now off for a MEASURED reason rather than an unmeasured one.
+    #
+    # Full golden set, both arms on the gemma profile, zero judge errors:
+    #
+    #                        off     on
+    #     faithfulness       0.882   0.873
+    #     answer_relevancy   0.704   0.742
+    #     context_precision  0.701   0.725
+    #     context_recall     0.850   0.825
+    #
+    # Two up, two down, every delta <= 0.04 -- and consecutive runs of the SAME
+    # configuration already move by a few points, because the rewriter and the
+    # reranker are model calls and flash-lite ignores temperature=0. This is
+    # noise, not a result. A four-question pilot had shown +0.215 on answer
+    # relevancy; it collapsed to +0.038 over twenty, which is the ordinary fate
+    # of a promising small sample.
+    #
+    # WHY IT DOES NOTHING HERE, AND WHEN IT WOULD. The corpus is 39 chunks and
+    # most sections are one or two of them, so the chunk usually IS the section
+    # and there is nothing to assemble: the retrieved-context counts barely
+    # moved. Parent-child pays off on documents whose sections are many chunks
+    # long -- build it for the tail, not the median. Re-measure when the corpus
+    # grows; the mechanism is tested and ready.
     parent_retrieval: bool = False
     # Ceiling on one assembled section. A cap is needed because sections vary
     # wildly and five expanded parents could otherwise dwarf the token budget --
@@ -579,6 +730,17 @@ class Settings(BaseSettings):
     # one missed.
     agent_max_iterations: int = 2
     agent_max_subquestions: int = 3
+    # Classify each turn's INTENT before treating it as a search.
+    #
+    # Without it every message is a retrieval question, so 'remember to always
+    # search the web too' gets answered by searching the documents FOR that
+    # preference -- measured, and the answer was 'your documents do not mention
+    # personal preferences regarding search behaviour'.
+    #
+    # Costs one workhorse call per turn. Cheap against the 55 rpm pool, and it
+    # fails soft to 'ask', so a broken router never stops a question being
+    # answered.
+    agent_route: bool = True
     # Draft rewrites after an `unsupported_claim` verdict. A SEPARATE budget
     # from `agent_max_iterations`: a rewrite costs one call and no retrieval,
     # so charging it to the retrieval cycle would let one over-claim consume the

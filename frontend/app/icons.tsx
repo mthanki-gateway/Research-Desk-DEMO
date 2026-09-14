@@ -49,6 +49,13 @@ export const IconLab = (p: Props) => (
   </Svg>
 );
 
+export const IconProfile = (p: Props) => (
+  <Svg {...p}>
+    <circle cx="12" cy="8" r="3.5" />
+    <path d="M5 20a7 7 0 0 1 14 0" />
+  </Svg>
+);
+
 export const IconPlus = (p: Props) => (
   <Svg {...p}>
     <path d="M12 5v14M5 12h14" />

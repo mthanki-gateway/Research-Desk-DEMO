@@ -26,7 +26,7 @@ import httpx
 import structlog
 
 from app.config import get_settings
-from app.services import tracing
+from app.services import progress, tracing
 from app.services.limiter import RateLimiter
 from app.services.vectorstore import SearchHit
 
@@ -136,6 +136,7 @@ async def search_web(query: str, *, limit: int | None = None) -> list[SearchHit]
         input=query,
         metadata={"limit": n, "provider": "serper"},
     ) as span:
+        progress.searching("web", query)
         try:
             client = _get_client()
             if _limiter is not None:
@@ -180,5 +181,6 @@ async def search_web(query: str, *, limit: int | None = None) -> list[SearchHit]
             output=[{"title": h.filename, "url": h.url} for h in hits],
             metadata={"n_hits": len(hits), "answer_box": bool(direct)},
         )
+        progress.searched("web", query, len(hits))
         log.info("web_searched", query=query[:60], n=len(hits), answer_box=bool(direct))
         return hits

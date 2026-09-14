@@ -2,7 +2,16 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, String, Text, func
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -162,3 +171,54 @@ class Message(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     session: Mapped[ChatSession] = relationship(back_populates="messages")
+
+
+class Preference(Base):
+    """A durable instruction the user gave about HOW to answer.
+
+    Distinct from the conversation summary on ChatSession, and the distinction
+    matters. A summary is COMPRESSION -- a lossy rewrite of turns that scrolled
+    out of the window, regenerated as the conversation grows, and it is about
+    the subject matter. A preference is an INSTRUCTION: stated once, kept
+    verbatim, applied to every later turn, and about behaviour rather than
+    content.
+
+    Conflating them is why "always search the web too" gets forgotten -- it
+    would be summarised into "the user asked about search behaviour" and lose
+    exactly the imperative that made it useful.
+    """
+
+    __tablename__ = "preferences"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    owner_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+
+    # NULL = applies to every conversation this user has. Set = this
+    # conversation only.
+    #
+    # One column rather than two tables, because the only difference is scope
+    # and every read wants both: "the preferences in force right now" is
+    # user-level plus this session's, which is one query with an OR.
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("chat_sessions.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+
+    # The instruction, in the user's own words. NOT paraphrased: a rewrite is
+    # where "always cite the page number" becomes "cite sources", and the
+    # specific thing they asked for is gone.
+    text: Mapped[str] = mapped_column(Text)
+
+    # What the user actually typed when this was captured, so the profile view
+    # can show provenance and someone can tell an inferred preference from an
+    # explicit one.
+    source_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

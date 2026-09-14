@@ -4,7 +4,6 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { createSession } from "@/lib/api";
-import AccentPicker from "./accent-picker";
 import { useApp } from "./providers";
 import CommandPalette from "./command-palette";
 import ChunkPanel from "./chunk-panel";
@@ -26,10 +25,20 @@ import {
   IconMenu,
   IconPlus,
   IconSearch,
+  IconProfile,
   IconSignOut,
   IconSpinner,
 } from "./icons";
 
+/**
+ * The work: the three places you go to do something.
+ *
+ * Profile is deliberately NOT in this list. It is not a fourth workspace --
+ * it is about you rather than about documents, and sitting it under Lab made
+ * it read as one, which is part of why it went unnoticed. It lives at the
+ * bottom with the account row instead, where settings-shaped things are
+ * looked for.
+ */
 const NAV = [
   { href: "/chat", label: "Chat", Icon: IconChat },
   { href: "/library", label: "Library", Icon: IconLibrary },
@@ -73,7 +82,8 @@ export default function Shell({ children }: { children: React.ReactNode }) {
 
   // /login and /auth/* must render without the drawer, and must never be
   // gated — gating them would loop.
-  const isAuthRoute = pathname.startsWith("/login") || pathname.startsWith("/auth");
+  const isAuthRoute =
+    pathname.startsWith("/login") || pathname.startsWith("/auth");
 
   // Client-side gate. Middleware would avoid the brief flash, but it would
   // also need its own cookie plumbing; this is one condition and behaves
@@ -168,7 +178,11 @@ export default function Shell({ children }: { children: React.ReactNode }) {
       )}
 
       <aside
-        className={`fixed inset-y-0 left-0 z-40 flex w-[20rem] flex-col p-3 transition-transform md:translate-x-0 ${
+        // gap-3 rather than a margin on each child: the spacing BETWEEN the
+        // groups is the thing doing the separating, so it belongs to the
+        // container that owns the relationship, not to whichever child
+        // happens to be above.
+        className={`fixed inset-y-0 left-0 z-40 flex w-[20rem] flex-col gap-4 p-4 transition-transform md:translate-x-0 ${
           open ? "translate-x-0" : "-translate-x-full"
         }`}
         style={{
@@ -181,7 +195,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
           transitionTimingFunction: "var(--md-ease-emphasized)",
         }}
       >
-        <div className="mb-4 flex items-center justify-between px-4 pt-3">
+        <div className="flex items-center justify-between px-4 pt-3">
           <Link href="/chat" className="block">
             <span
               className="md-title-large block"
@@ -209,13 +223,13 @@ export default function Shell({ children }: { children: React.ReactNode }) {
         <Button
           onClick={() => void startSession()}
           disabled={creating}
-          className="mb-4 w-full"
+          className="w-full"
         >
           {creating ? <IconSpinner /> : <IconPlus />}
           {creating ? "Creating" : "New chat"}
         </Button>
 
-        <nav className="mb-4 space-y-1">
+        <nav className="md-nav-group space-y-1">
           {NAV.map(({ href, label, Icon }) => {
             const active = pathname.startsWith(href);
             return (
@@ -251,7 +265,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
 
         {ingesting && (
           <div
-            className="mb-4 space-y-2 rounded-[var(--md-shape-md)] p-3"
+            className="space-y-2 rounded-[var(--md-shape-md)] p-3"
             style={{ background: "var(--md-nav-surface-container)" }}
           >
             <p
@@ -270,9 +284,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
                 </p>
                 <div className="mt-1.5">
                   <LinearProgress
-                    value={
-                      d.n_chunks ? (d.n_embedded / d.n_chunks) * 100 : 4
-                    }
+                    value={d.n_chunks ? (d.n_embedded / d.n_chunks) * 100 : 4}
                   />
                 </div>
               </div>
@@ -280,122 +292,147 @@ export default function Shell({ children }: { children: React.ReactNode }) {
           </div>
         )}
 
-        <div className="scroll-thin min-h-0 flex-1 overflow-y-auto">
+        {/* Conversations: their own block, and the only one that scrolls.
+            The group is the flex child that takes the leftover height, with
+            the scroll on the list INSIDE it -- so the label and the search row
+            stay put while the titles move, and the tinted block does not
+            visibly shrink as sessions are added. */}
+        <div className="md-nav-group flex min-h-0 flex-1 flex-col">
           <p
-            className="md-label-medium mb-1 px-4"
+            className="md-label-medium mb-1 px-3 pt-1"
             style={{ color: "var(--md-nav-on-surface-variant)" }}
           >
             Sessions
           </p>
-          {loading && sessions.length === 0 ? (
-            <ul className="space-y-2 px-4 pt-2" aria-hidden>
-              {[80, 64, 72].map((w) => (
-                <li
-                  key={w}
-                  className="h-3 rounded"
-                  style={{
-                    width: `${w}%`,
-                    // Also a leftover from the navy drawer: white-at-5% was
-                    // invisible the moment the surface went light.
-                    background: "var(--md-surface-container-high)",
-                  }}
-                />
-              ))}
-            </ul>
-          ) : sessions.length === 0 ? (
-            <p
-              className="md-body-small px-4"
-              style={{ color: "var(--md-nav-on-surface-variant)" }}
-            >
-              No sessions yet
-            </p>
-          ) : (
-            <ul>
-              {sessions.map((s) => {
-                const active = pathname === `/chat/${s.id}`;
-                return (
-                  <li key={s.id}>
-                    <Ripplable
-                      as="div"
-                      className="md-nav-item md-nav-item-dense"
-                      data-active={active}
-                      onClick={() => router.push(`/chat/${s.id}`)}
-                      title={s.title}
-                      role="link"
-                      tabIndex={0}
-                    >
-                      <span className="min-w-0 flex-1 truncate">{s.title}</span>
-                      <span className="md-label-small shrink-0 opacity-70">
-                        {s.n_messages}
-                      </span>
-                    </Ripplable>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </div>
+          <div className="scroll-thin min-h-0 flex-1 overflow-y-auto">
+            {loading && sessions.length === 0 ? (
+              <ul className="space-y-2 px-3 pt-2" aria-hidden>
+                {[80, 64, 72].map((w) => (
+                  <li
+                    key={w}
+                    className="h-3 rounded"
+                    style={{
+                      width: `${w}%`,
+                      // Also a leftover from the navy drawer: white-at-5% was
+                      // invisible the moment the surface went light.
+                      background: "var(--md-surface-container-high)",
+                    }}
+                  />
+                ))}
+              </ul>
+            ) : sessions.length === 0 ? (
+              <p
+                className="md-body-small px-3"
+                style={{ color: "var(--md-nav-on-surface-variant)" }}
+              >
+                No sessions yet
+              </p>
+            ) : (
+              <ul>
+                {sessions.map((s) => {
+                  const active = pathname === `/chat/${s.id}`;
+                  return (
+                    <li key={s.id}>
+                      <Ripplable
+                        as="div"
+                        className="md-nav-item md-nav-item-dense"
+                        data-active={active}
+                        onClick={() => router.push(`/chat/${s.id}`)}
+                        title={s.title}
+                        role="link"
+                        tabIndex={0}
+                      >
+                        <span className="min-w-0 flex-1 truncate">
+                          {s.title}
+                        </span>
+                        <span className="md-label-small shrink-0 opacity-70">
+                          {s.n_messages}
+                        </span>
+                      </Ripplable>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
 
-        <Ripplable
-          as="div"
-          className="md-nav-item md-nav-item-dense mt-2"
-          onClick={() => setPalette(true)}
-          role="button"
-          tabIndex={0}
-        >
-          <IconSearch className="h-5 w-5 shrink-0" />
-          <span className="flex-1">Search sessions</span>
-          {/* A token, not `rgba(255,255,255,0.10)`. That was tuned for the old
+          <Ripplable
+            as="div"
+            className="md-nav-item md-nav-item-dense mt-1"
+            onClick={() => setPalette(true)}
+            role="button"
+            tabIndex={0}
+          >
+            <IconSearch className="h-5 w-5 shrink-0" />
+            <span className="flex-1">Search sessions</span>
+            {/* A token, not `rgba(255,255,255,0.10)`. That was tuned for the old
               navy drawer and became invisible the moment the drawer went
               light. */}
-          <kbd
-            className="md-label-small rounded px-1.5 py-0.5"
-            style={{
-              background: "var(--md-surface-container-high)",
-              color: "var(--md-on-surface-variant)",
-            }}
-          >
-            ⌘K
-          </kbd>
-        </Ripplable>
-
-        <AccentPicker />
-
-        {account && (
-          <div
-            className="mt-1 flex items-center gap-3 rounded-[var(--md-shape-full)] px-3 py-2"
-            style={{ background: "var(--md-nav-surface-container)" }}
-          >
-            <span
-              className="md-label-large grid h-8 w-8 shrink-0 place-items-center rounded-[var(--md-shape-full)] uppercase"
+            <kbd
+              className="md-label-small rounded px-1.5 py-0.5"
               style={{
-                background: "var(--md-primary)",
-                color: "var(--md-on-primary)",
+                background: "var(--md-surface-container-high)",
+                color: "var(--md-on-surface-variant)",
               }}
             >
-              {(account.email ?? "?").charAt(0)}
+              ⌘K
+            </kbd>
+          </Ripplable>
+        </div>
+
+        {/* You: profile, then the account row. Last block in the column, which
+            is where a settings-shaped destination is looked for -- and next to
+            the identity it belongs to rather than beside Lab. */}
+        <div className="md-nav-group space-y-1">
+          <Ripplable
+            as={Link}
+            href="/profile"
+            prefetch
+            className="md-nav-item"
+            data-active={pathname.startsWith("/profile")}
+          >
+            <span className="md-nav-icon">
+              <IconProfile className="h-6 w-6" />
             </span>
-            <span
-              className="md-body-small min-w-0 flex-1 truncate"
-              style={{ color: "var(--md-nav-on-surface)" }}
-              title={account.email ?? account.id}
+            Profile
+          </Ripplable>
+
+          {account && (
+            <div
+              className="flex items-center gap-3 rounded-[var(--md-shape-full)] px-3 py-2"
+              style={{ background: "var(--md-nav-surface)" }}
             >
-              {account.email ?? "Signed in"}
-            </span>
-            <button
-              onClick={async () => {
-                await signOut();
-                router.replace("/login");
-              }}
-              title="Sign out"
-              aria-label="Sign out"
-              className="md-icon-btn md-icon-btn-sm md-state shrink-0"
-              style={{ color: "var(--md-nav-on-surface-variant)" }}
-            >
-              <IconSignOut className="h-4 w-4" />
-            </button>
-          </div>
-        )}
+              <span
+                className="md-label-large grid h-8 w-8 shrink-0 place-items-center rounded-[var(--md-shape-full)] uppercase"
+                style={{
+                  background: "var(--md-primary)",
+                  color: "var(--md-on-primary)",
+                }}
+              >
+                {(account.email ?? "?").charAt(0)}
+              </span>
+              <span
+                className="md-body-small min-w-0 flex-1 truncate"
+                style={{ color: "var(--md-nav-on-surface)" }}
+                title={account.email ?? account.id}
+              >
+                {account.email ?? "Signed in"}
+              </span>
+              <button
+                onClick={async () => {
+                  await signOut();
+                  router.replace("/login");
+                }}
+                title="Sign out"
+                aria-label="Sign out"
+                className="md-icon-btn md-icon-btn-sm md-state shrink-0"
+                style={{ color: "var(--md-nav-on-surface-variant)" }}
+              >
+                <IconSignOut className="h-4 w-4" />
+              </button>
+            </div>
+          )}
+        </div>
       </aside>
 
       {/* THE scroll container for the app.

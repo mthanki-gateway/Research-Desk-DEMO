@@ -2,15 +2,73 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { createSession } from "@/lib/api";
+import { createSession, deleteSession } from "@/lib/api";
 import { useApp } from "../providers";
-import { Button, Ripplable } from "../md";
-import { IconChat, IconLibrary, IconPlus, IconSpinner } from "../icons";
+import { Button, Checkbox, ConfirmButton, Ripplable } from "../md";
+import {
+  IconChat,
+  IconClose,
+  IconLibrary,
+  IconPlus,
+  IconSpinner,
+  IconTrash,
+} from "../icons";
 
 export default function ChatIndex() {
   const { sessions, readyDocuments, loading, refreshSessions } = useApp();
   const router = useRouter();
   const [creating, setCreating] = useState(false);
+  /**
+   * Ids ticked for deletion. An empty set means selection mode is OFF and
+   * a row click navigates as usual.
+   *
+   * Selection mode is entered explicitly rather than by long-press or by
+   * the first checkbox click doubling as a mode switch: on a list whose
+   * rows are links, a click that sometimes navigates and sometimes selects
+   * is the kind of ambiguity that deletes the wrong conversation.
+   */
+  const [selecting, setSelecting] = useState(false);
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [deleting, setDeleting] = useState(false);
+
+  const toggle = (id: string) =>
+    setPicked((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const exitSelect = () => {
+    setSelecting(false);
+    setPicked(new Set());
+  };
+
+  const allPicked = sessions.length > 0 && picked.size === sessions.length;
+
+  // One control that toggles both ways rather than separate "Select all" and
+  // "Clear" buttons. Once everything is ticked the only thing anyone wants
+  // from that spot is to untick it, and a dead "Select all" sitting there is
+  // a button that stopped meaning anything.
+  const toggleAll = () =>
+    setPicked(allPicked ? new Set() : new Set(sessions.map((s) => s.id)));
+
+  async function removePicked() {
+    setDeleting(true);
+    try {
+      // Concurrent, not sequential: these are independent DELETEs and
+      // twelve round trips in series is a visible wait for no reason.
+      //
+      // allSettled, not all: one failure must not abandon the rest, and
+      // the list refresh below shows exactly what survived -- which is a
+      // truer report than any message this could write.
+      await Promise.allSettled([...picked].map((id) => deleteSession(id)));
+      exitSelect();
+      await refreshSessions();
+    } finally {
+      setDeleting(false);
+    }
+  }
 
   async function start() {
     setCreating(true);
@@ -83,15 +141,50 @@ export default function ChatIndex() {
             Pick up where you left off, or start something new.
           </p>
         </div>
-        <Button
-          variant="tonal"
-          onClick={() => void start()}
-          disabled={creating}
-          className="shrink-0"
-        >
-          {creating ? <IconSpinner /> : <IconPlus />}
-          New
-        </Button>
+        <div className="flex shrink-0 items-center gap-2">
+          {selecting ? (
+            <>
+              <Button variant="text" onClick={exitSelect} disabled={deleting}>
+                <IconClose />
+                Cancel
+              </Button>
+              <Button variant="text" onClick={toggleAll} disabled={deleting}>
+                <Checkbox on={allPicked} />
+                {allPicked ? "Clear" : "All"}
+              </Button>
+              {/* Rendered only when something is ticked, rather than shown
+                  disabled. A disabled destructive button invites clicking it
+                  to find out why it is dead; absent, it simply is not an
+                  option yet. */}
+              {picked.size > 0 && (
+                <ConfirmButton
+                  label={deleting ? "Deleting…" : `Delete (${picked.size})`}
+                  icon={deleting ? <IconSpinner /> : <IconTrash />}
+                  title={`Delete ${picked.size} conversation${
+                    picked.size === 1 ? "" : "s"
+                  }?`}
+                  // Names the consequence rather than asking "are you sure".
+                  // Deleting a chat also deletes its messages, and that is the
+                  // part someone would not think of.
+                  body="Their questions, answers and citations are deleted too. This cannot be undone."
+                  confirmLabel={`Delete ${picked.size}`}
+                  onConfirm={() => void removePicked()}
+                />
+              )}
+            </>
+          ) : (
+            <>
+              <Button variant="text" onClick={() => setSelecting(true)}>
+                <IconTrash />
+                Select
+              </Button>
+              <Button variant="tonal" onClick={() => void start()} disabled={creating}>
+                {creating ? <IconSpinner /> : <IconPlus />}
+                New
+              </Button>
+            </>
+          )}
+        </div>
       </header>
 
       <ul className="space-y-3">
@@ -100,10 +193,22 @@ export default function ChatIndex() {
             <Ripplable
               as="div"
               className="md-card md-card-outlined md-card-interactive flex items-center gap-4 p-4"
-              onClick={() => router.push(`/chat/${s.id}`)}
-              role="link"
+              // In selection mode the WHOLE ROW toggles rather than only the
+              // checkbox. A 20px target inside a 72px row that is otherwise
+              // clickable is the classic way to make people miss and open the
+              // chat they were trying to delete.
+              onClick={() =>
+                selecting ? toggle(s.id) : router.push(`/chat/${s.id}`)
+              }
+              role={selecting ? "checkbox" : "link"}
+              aria-checked={selecting ? picked.has(s.id) : undefined}
               tabIndex={0}
             >
+              {/* Presentational only -- it is aria-hidden and has no handler.
+                  The ROW carries role="checkbox" and aria-checked, so a screen
+                  reader announces one control rather than a checkbox sitting
+                  inside a separate clickable thing. */}
+              {selecting && <Checkbox on={picked.has(s.id)} />}
               <span
                 className="grid h-10 w-10 shrink-0 place-items-center rounded-[var(--md-shape-full)]"
                 style={{

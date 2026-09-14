@@ -19,7 +19,7 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.db.models import Chunk, Document
 from app.db.session import SessionLocal
-from app.services import tracing
+from app.services import progress, tracing
 from app.services.embeddings import get_embeddings
 from app.services.lexical import lexical_search
 from app.services.llm import LLMError, extract_string_list, get_llm
@@ -413,10 +413,12 @@ async def _search_one(
         input=query,
         metadata={"limit": limit, "scoped": bool(document_ids)},
     ) as span:
+        progress.searching("documents", query)
         vector = await get_embeddings().embed_query(query)
         hits = await get_vector_store().search(
             vector, limit=limit, document_ids=document_ids, owner_id=owner_id
         )
+        progress.searched("documents", query, len(hits))
         tracing.update(
             span,
             # Chunk ids and scores, NOT the chunk text. Two reasons: the text

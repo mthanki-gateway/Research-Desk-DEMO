@@ -35,7 +35,7 @@ from app.schemas.sessions import (
     TurnRequest,
     TurnResponse,
 )
-from app.services import tracing
+from app.services import preferences, tracing
 from app.services.history import build_chat_context, update_summary
 from app.services.llm import LLMError
 from app.services.vectorstore import SearchHit
@@ -201,6 +201,8 @@ async def add_turn(
                 owner_id=user.owner_id,
                 multi_query=req.multi_query,
                 chat_context=prep["context"],
+                session_id=str(session_id),
+                preferences=prep.get("preferences", ""),
                 thread_id=prep["thread_id"],
                 clarify=req.clarify,
                 react=req.react,
@@ -296,6 +298,8 @@ async def stream_turn(
                     owner_id=user.owner_id,
                     multi_query=req.multi_query,
                     chat_context=prep["context"],
+                    session_id=str(session_id),
+                    preferences=prep.get("preferences", ""),
                     thread_id=prep["thread_id"],
                     clarify=req.clarify,
                     react=req.react,
@@ -429,6 +433,14 @@ async def _stream_events(
                     {**payload, "thread_id": prep.get("thread_id")},
                 )
                 return
+            if kind == "progress":
+                # Fine-grained, from inside a node: which search is running,
+                # which rerank. Passed through with its own shape rather than
+                # squeezed into the node event -- the UI phrases these
+                # differently ("Searching the web for ...") and needs the
+                # fields, not a pre-rendered sentence.
+                yield _sse("activity", payload)
+                continue
             yield _sse("progress", {"node": node, "detail": _describe(node, payload)})
 
         result = AgentResult(final_state)
@@ -447,6 +459,8 @@ async def _stream_events(
                 "critique": result.critique,
                 "sufficient": result.sufficient,
                 "partial": result.partial,
+                "intent": result.intent,
+                "memory_saved": result.memory_saved,
                 "iterations": result.iterations,
                 "trace": result.trace,
                 "context_chars": len(prep["context"]),
@@ -545,11 +559,18 @@ async def _prepare_turn(
         turn = len(messages) // 2
         thread_id = f"{session_id}:{turn}:{uuid.uuid4().hex[:8]}"
 
+        prefs = await preferences.preferences_in_force(
+            owner_id=user.owner_id, session_id=session_id
+        )
         return {
             "context": context,
             "scope": scope,
             "was_empty": not messages,
             "thread_id": thread_id,
+            # Rendered here rather than in a node so both the blocking and the
+            # streaming path get it from one place -- they have diverged before.
+            "preferences": preferences.render_for_prompt(prefs),
+            "n_preferences": len(prefs),
         }
 
 
@@ -723,6 +744,8 @@ async def _persist_turn(
                     "iterations": result.iterations,
                     "sufficient": result.sufficient,
                     "partial": result.partial,
+                    "intent": result.intent,
+                    "memory_saved": result.memory_saved,
                     "critique": result.critique,
                     # Absent on an ordinary turn, so "the question was clear" and
                     # "the user clarified it" stay distinguishable after the

@@ -63,7 +63,89 @@ export function Answer({ content, sources, activeChunkId, onCite }: Props) {
 type BlockNode =
   | { kind: "p"; text: string }
   | { kind: "h3"; text: string }
-  | { kind: "ul" | "ol"; items: string[] };
+  | { kind: "ul" | "ol"; items: string[] }
+  | { kind: "table"; head: string[]; rows: string[][] };
+
+/**
+ * `| a | b |` -> ["a", "b"]. Null when the line is not a table row.
+ *
+ * The outer pipes are optional because models emit both forms, often in the
+ * same answer.
+ */
+function cells(line: string): string[] | null {
+  const trimmed = line.trim();
+  if (!trimmed.includes("|")) return null;
+  return trimmed
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((c) => c.trim());
+}
+
+/** The `| --- | --- |` line that turns the row above it into a header. */
+function isDivider(line: string): boolean {
+  const parts = cells(line);
+  return (
+    !!parts && parts.length > 1 && parts.every((c) => /^:?-{2,}:?$/.test(c))
+  );
+}
+
+/**
+ * Put structure back on its own line when the model emitted it inline.
+ *
+ * The drafter replies under a JSON schema, so its answer is a string literal
+ * and a line break has to be escaped as \n. A model that does not escape them
+ * tends to emit NONE -- producing real markdown markers run together on a
+ * single line: "the main pain points: - Customer concentration... - Hardware
+ * supply chain...". Every marker the prompt asked for is present; only the
+ * newlines are missing, so `blocks` below has nothing to split on and renders
+ * the whole answer as one paragraph.
+ *
+ * The schema description now tells the model to escape them, which fixes new
+ * answers. This fixes the ones ALREADY STORED, and stays as the net for any
+ * model that slips -- the alternative, rewriting rows in the database, would
+ * still leave the next unescaped answer broken.
+ *
+ * Deliberately narrow. It only breaks before a marker that is preceded by
+ * whitespace and, for bullets, followed by one -- so a hyphenated phrase
+ * ("well-known"), a negative number, and an inline "1." in a date survive
+ * untouched. A document that already contains newlines is left alone
+ * entirely, because then the model escaped correctly and any inline dash it
+ * wrote is prose, not a list.
+ */
+const MARKER = /^(?:[-*]\s|\d{1,2}\.\s|#{1,6}\s|\|)/;
+
+function reflow(content: string): string {
+  if (content.includes("\n")) return content;
+  const lines = content
+    // "text - item" -> break before the bullet. Requires the space AFTER the
+    // dash, which is what separates a list marker from a hyphen.
+    .replace(/\s+([-*])\s+/g, "\n$1 ")
+    // "text 1. item" -> ordered item. Anchored on a space before the digit so
+    // "v1. " inside a word is not caught.
+    .replace(/\s+(\d{1,2})\.\s+/g, "\n$1. ")
+    // Headings and table rows, which are unambiguous wherever they appear.
+    .replace(/\s+(#{1,6}\s+)/g, "\n$1")
+    .replace(/\s+(\|)/g, "\n$1")
+    .trim()
+    .split("\n");
+
+  // A blank line before the FIRST marker only.
+  //
+  // The lead-in sentence wants separating from the list it introduces, but a
+  // blank line BETWEEN items is not cosmetic -- `blocks` treats it as a
+  // paragraph break, which would close the list and open a new one per item,
+  // renumbering every ordered item back to 1.
+  const out: string[] = [];
+  for (const line of lines) {
+    const prev = out[out.length - 1];
+    if (MARKER.test(line) && prev !== undefined && !MARKER.test(prev)) {
+      out.push("");
+    }
+    out.push(line);
+  }
+  return out.join("\n");
+}
 
 /**
  * Group lines into blocks. Blank lines separate paragraphs; consecutive
@@ -74,7 +156,7 @@ function blocks(content: string): BlockNode[] {
   const out: BlockNode[] = [];
   // \r\n first: an answer that round-tripped through a Windows client would
   // otherwise leave a stray \r that defeats the blank-line test.
-  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  const lines = reflow(content.replace(/\r\n/g, "\n")).split("\n");
   let para: string[] = [];
   let list: { kind: "ul" | "ol"; items: string[] } | null = null;
 
@@ -91,12 +173,33 @@ function blocks(content: string): BlockNode[] {
     }
   };
 
-  for (const raw of lines) {
-    const line = raw.trim();
+  // An index loop, not for-of, because a table needs LOOKAHEAD: a row of pipes
+  // is only a header once the NEXT line is a divider, and consuming its body
+  // rows means advancing past them. (An earlier version used
+  // `lines.indexOf(raw)` to fake this, which silently finds the FIRST matching
+  // line -- so two identical rows in one answer sent it back to the start.)
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
 
     if (!line) {
       flushPara();
       flushList();
+      continue;
+    }
+
+    const row = cells(line);
+    if (row && row.length > 1 && isDivider(lines[i + 1] ?? "")) {
+      flushPara();
+      flushList();
+      const rows: string[][] = [];
+      let j = i + 2; // skip the header and its divider
+      for (; j < lines.length; j++) {
+        const next = cells(lines[j]);
+        if (!next || next.length < 2) break;
+        rows.push(next);
+      }
+      out.push({ kind: "table", head: row, rows });
+      i = j - 1; // the outer loop increments
       continue;
     }
 
@@ -156,6 +259,34 @@ function Block({
 
   if (block.kind === "h3") return <h3>{render(block.text)}</h3>;
   if (block.kind === "p") return <p>{render(block.text)}</p>;
+
+  if (block.kind === "table") {
+    return (
+      // Wrapped in its own scroll container. A wide table must never make the
+      // whole message scroll sideways -- the rest of the answer would move with
+      // it, which is far more disorienting than scrolling the table alone.
+      <div className="md-scroll md-table-wrap">
+        <table className="md-table">
+          <thead>
+            <tr>
+              {block.head.map((cell, i) => (
+                <th key={i}>{render(cell)}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {block.rows.map((row, r) => (
+              <tr key={r}>
+                {row.map((cell, c) => (
+                  <td key={c}>{render(cell)}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
 
   const List = block.kind === "ul" ? "ul" : "ol";
   return (

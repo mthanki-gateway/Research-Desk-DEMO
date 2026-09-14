@@ -321,6 +321,10 @@ export type TraceStep = {
   sufficient?: boolean;
   /** Answer is knowingly incomplete: resolve kept what was supported and named the gap. */
   partial?: boolean;
+  /** "remember" when the turn stored a preference instead of searching. */
+  intent?: string;
+  /** Preferences this turn saved, so the UI can announce the change. */
+  memory_saved?: string[];
   missing?: string[];
   assessment?: string;
   iteration?: number;
@@ -421,6 +425,10 @@ export type ChatMessage = {
     iterations?: number;
     sufficient?: boolean;
     partial?: boolean;
+    /** "remember" when the turn stored a preference instead of searching. */
+    intent?: string;
+    /** Preferences this turn saved, so the UI can announce the change. */
+    memory_saved?: string[];
     critique?: string;
     /** Set only when the user was asked to clarify and answered. */
     clarification?: string | null;
@@ -465,6 +473,44 @@ export async function updateSession(
 
 export async function deleteSession(id: string): Promise<void> {
   const res = await authedFetch(`/sessions/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await detail(res));
+}
+
+/** One remembered instruction. `source_message` is the turn it came from. */
+export type Memory = {
+  id: string;
+  text: string;
+  source_message: string | null;
+  active: boolean;
+  created_at: string;
+};
+
+/**
+ * What is remembered about one conversation. `summary` and `preferences` are
+ * different kinds of memory and stay separate: the summary is a lossy
+ * compression of what was discussed, the preferences are instructions kept
+ * verbatim and reapplied every turn. Only the latter can be forgotten.
+ */
+export type ConversationMemory = {
+  session_id: string;
+  title: string;
+  summary: string | null;
+  preferences: Memory[];
+};
+
+export type ProfileMemory = {
+  user_preferences: Memory[];
+  conversations: ConversationMemory[];
+};
+
+export async function getMemory(): Promise<ProfileMemory> {
+  const res = await authedFetch("/profile/memory");
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function forgetMemory(id: string): Promise<void> {
+  const res = await authedFetch(`/profile/memory/${id}`, { method: "DELETE" });
   if (!res.ok) throw new Error(await detail(res));
 }
 
@@ -533,6 +579,7 @@ export type ClarifyDecision =
 async function readTurnStream(
   res: Response,
   onProgress?: (node: string, detail: string) => void,
+  onActivity?: (activity: Activity) => void,
 ): Promise<TurnOutcome> {
   if (!res.ok) throw new Error(await detail(res));
   if (!res.body) throw new Error("No response body to stream");
@@ -561,6 +608,7 @@ async function readTurnStream(
       const payload = JSON.parse(dataLine.slice(5).trim());
 
       if (event === "progress") onProgress?.(payload.node, payload.detail);
+      else if (event === "activity") onActivity?.(payload as Activity);
       else if (event === "done") outcome = { status: "done", done: payload };
       else if (event === "interrupt")
         outcome = { status: "paused", interrupt: payload };
@@ -571,6 +619,23 @@ async function readTurnStream(
   if (!outcome) throw new Error("Stream ended without a result");
   return outcome;
 }
+
+/**
+ * One search or rerank happening inside a node.
+ *
+ * Separate from node progress because they answer different questions: a node
+ * event says WHICH STAGE is running, an activity says WHAT IT IS DOING. A turn
+ * that spends six seconds on the web showed one motionless "retrieve" line
+ * without these.
+ */
+export type Activity = {
+  /** "search" | "search_done" | "rerank" */
+  kind: string;
+  /** "documents" | "web" */
+  source?: string;
+  query?: string;
+  n?: number;
+};
 
 /** Start a turn. Resolves either with an answer or with a pause. */
 export async function streamTurn(
@@ -584,6 +649,7 @@ export async function streamTurn(
     modelProfile?: string | null;
   } = {},
   onProgress?: (node: string, detail: string) => void,
+  onActivity?: (activity: Activity) => void,
 ): Promise<TurnOutcome> {
   const res = await authedJson(`/sessions/${sessionId}/stream`, "POST", {
     question,
@@ -596,7 +662,7 @@ export async function streamTurn(
     // Dev-only; the server ignores it unless APP_ENV=dev.
     model_profile: opts.modelProfile ?? null,
   });
-  return readTurnStream(res, onProgress);
+  return readTurnStream(res, onProgress, onActivity);
 }
 
 /**
@@ -611,6 +677,7 @@ export async function resumeTurn(
   question: string,
   decision: ClarifyDecision,
   onProgress?: (node: string, detail: string) => void,
+  onActivity?: (activity: Activity) => void,
 ): Promise<TurnOutcome> {
   const res = await authedJson(`/sessions/${sessionId}/resume/stream`, "POST", {
     thread_id: threadId,
@@ -618,7 +685,7 @@ export async function resumeTurn(
     action: decision.action,
     answer: decision.action === "answer" ? decision.answer : "",
   });
-  return readTurnStream(res, onProgress);
+  return readTurnStream(res, onProgress, onActivity);
 }
 
 /**

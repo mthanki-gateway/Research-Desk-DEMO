@@ -46,8 +46,28 @@ from app.services.vectorstore import SearchHit
 
 log = structlog.get_logger()
 
-REACT_SYSTEM = """You GATHER SOURCES for a question using tools. You do not \
-write the final answer -- a later step does that from what you collect.
+REACT_SYSTEM = """You handle the user's message. You decide what it needs: \
+sometimes a search, sometimes nothing at all.
+
+FIRST DECIDE WHETHER ANYTHING NEEDS LOOKING UP
+
+Call NO TOOLS AT ALL, and simply write the reply yourself, when the message \
+does not depend on any source:
+- a greeting or small talk -- "hi", "hey", "thanks", "how are you"
+- a question about YOU: what you can do, how you work, what documents you have
+- a pure instruction about how to answer, once you have stored it
+- a message you cannot act on until they say more
+
+"hi" is answered with a greeting. Searching the documents and the web for it \
+wastes their time, returns whatever happens to be lexically nearest, and \
+produces a paragraph about a transcript they did not ask for. This is the \
+single most common way to get this wrong.
+
+When you do answer directly, write the ACTUAL REPLY -- a sentence or two, \
+addressed to the user. Keep it short, and do not invent facts about their \
+documents; if you have not searched, you do not know what is in them.
+
+Everything below applies only when the message DOES need sources.
 
 YOUR SOURCES
 You have two, and they are EQUALS. The user's uploaded documents hold their \
@@ -76,9 +96,18 @@ together in one turn so they run at the same time.
 question, then reply with one short sentence saying what you found. That \
 sentence is not shown to the user.
 
-Never answer from memory, and never write citation markers -- your job is \
-retrieval, not composition. Widening your sources does not weaken this: a \
-claim you did not retrieve is still a claim you cannot make."""
+When sources ARE involved you do not write the final answer -- a later step \
+composes it from what you collect. Never answer from memory, and never write \
+citation markers: your job there is retrieval, not composition. Widening your \
+sources does not weaken this: a claim you did not retrieve is still a claim \
+you cannot make.
+
+STANDING INSTRUCTIONS
+
+When the user tells you how to behave from now on, call remember_preference. \
+Do it ALONGSIDE searching when one message does both -- "tell me about X and \
+always cite pages" is a search and a remember, not a choice between them. \
+Then say what you stored, in your own reply if you are answering directly."""
 
 
 async def react(state: ResearchState) -> dict:
@@ -98,15 +127,35 @@ async def react(state: ResearchState) -> dict:
     # loses track of what it asked for and repeats itself.
     contents: list[dict] = [{"role": "user", "parts": [{"text": opening}]}]
 
+    raw_session = state.get("session_id")
+    session_id = uuid.UUID(raw_session) if raw_session else None
+
     specs = tools.tool_specs()
     evidence: list[SearchHit] = []
     seen: set[uuid.UUID] = set()
     trace: list[dict] = []
+    # Filled by the remember_preference tool. Mutable and passed in rather than
+    # parsed back out of the observations, because the answer has to confirm
+    # what was stored and re-reading the table could race with another turn.
+    remembered: list[str] = []
+    # The reply the model wrote when it decided nothing needed looking up.
+    direct: str = ""
+    # Whether any SEARCH ran, which is not the same as whether evidence exists.
+    #
+    # "No evidence" has two causes that must not share a code path: the agent
+    # never looked (a greeting), or it looked and found nothing. Only the first
+    # is safe to answer from the model's own words. The second has to go to
+    # `draft`, which is where "your documents cover X but not Z" is written and
+    # where `critique` still reviews the result -- otherwise a failed search
+    # becomes licence to answer from memory, ungrounded and unreviewed.
+    searched = False
 
     for round_no in range(1, tools.max_rounds() + 1):
         try:
             calls, text, model_content = await get_llm().generate_tools(
-                contents, tools=specs, system=REACT_SYSTEM
+                contents,
+                tools=specs,
+                system=REACT_SYSTEM + (state.get("preferences") or ""),
             )
         except LLMError as exc:
             log.warning("react_failed", round=round_no, error=str(exc))
@@ -114,11 +163,23 @@ async def react(state: ResearchState) -> dict:
             break
 
         if not calls:
-            # No tools requested: gathering is finished. The prose is a
-            # note-to-self and is deliberately DISCARDED -- `draft` composes
-            # the answer, because only it sees the final numbering of the
-            # accumulated evidence. Letting this model write the answer would
-            # mean either no inline citations or invented ones.
+            # No tools requested. What that MEANS depends on whether anything
+            # was gathered, and the two cases could not be more different.
+            #
+            # With evidence, gathering is finished and the prose is a
+            # note-to-self, deliberately DISCARDED -- `draft` composes the
+            # answer, because only it sees the final numbering of the
+            # accumulated evidence. Letting this model write it would mean
+            # either no inline citations or invented ones.
+            #
+            # With NOTHING gathered, the model judged that the message needs no
+            # sources -- a greeting, a question about the assistant itself, a
+            # bare instruction. Then the prose IS the answer and is kept.
+            # Sending that case to `draft` is what made "hi" run three
+            # sub-questions and five web searches, and answer with whatever
+            # happened to be lexically nearest.
+            if not searched:
+                direct = text.strip()
             trace.append({"round": round_no, "done": True, "note": text[:160]})
             break
 
@@ -128,6 +189,11 @@ async def react(state: ResearchState) -> dict:
         # for twenty searches should still get its first few, because
         # cancelling the whole round teaches the model nothing.
         calls = calls[: tools.max_calls_per_round()]
+
+        # Storing an instruction is not looking something up, so a turn that
+        # only remembers can still answer in its own words.
+        if any(c.get("name") != tools.REMEMBER_PREFERENCE for c in calls):
+            searched = True
 
         # Independent lookups run CONCURRENTLY. This is the payoff of the
         # model requesting several calls in one turn -- three competitor
@@ -140,6 +206,8 @@ async def react(state: ResearchState) -> dict:
                     top_k=top_k,
                     document_ids=document_ids,
                     owner_id=owner_id,
+                    session_id=session_id,
+                    remembered=remembered,
                 )
                 for call in calls
             )
@@ -194,6 +262,31 @@ async def react(state: ResearchState) -> dict:
         n_web=n_web,
     )
 
+    # NOTHING TO GROUND: the agent judged the message needed no sources, so its
+    # own prose is the answer and the turn ends here.
+    #
+    # `sufficient` is True so `critique` is skipped entirely -- a critic asked
+    # whether "Hello, how can I help?" is supported by its sources would
+    # correctly find that it is not, and send a greeting round the
+    # missing-evidence loop. Grounding is a rule about CLAIMS, and there are
+    # none here.
+    if direct and not searched:
+        log.info("react_direct", remembered=len(remembered), chars=len(direct))
+        return {
+            "evidence": [],
+            "pending_queries": [],
+            "sub_questions": [],
+            "iterations": 0,
+            "draft": direct,
+            "citations": [],
+            "sufficient": True,
+            "answered_directly": True,
+            "memory_saved": remembered,
+            "trace": [
+                {"node": "react", "direct": True, "remembered": remembered}
+            ],
+        }
+
     # EVIDENCE ONLY. `draft` writes the answer and `critique` reviews it, both
     # unchanged -- which is the whole reason this node gathers rather than
     # answers: citation numbering, `sources_used`, the no-sources-cited badge
@@ -206,5 +299,7 @@ async def react(state: ResearchState) -> dict:
         # for -- the same slot the planned path fills with its sub-questions.
         "sub_questions": [t["query"] for t in trace if t.get("query")],
         "iterations": 0,
+        # Carried so `draft` can confirm what was stored in its opening line.
+        "memory_saved": remembered,
         "trace": [{"node": "react", "rounds": trace, "n_web": n_web}],
     }

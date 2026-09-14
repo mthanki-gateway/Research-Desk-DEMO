@@ -104,9 +104,13 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* Darker than the container tone it used to be.
+   primary/on-primary rather than a hand-picked darker colour: the two are a
+   guaranteed-contrasting M3 pair, so the selected text stays legible in every
+   theme and accent instead of needing a check per palette. */
 ::selection {
-  background: var(--md-primary-container);
-  color: var(--md-on-primary-container);
+  background: var(--md-primary);
+  color: var(--md-on-primary);
 }
 
 /* M3 focus indicator: a 3px ring in the primary colour, keyboard only.
@@ -413,6 +417,57 @@ textarea:focus-visible {
     color: var(--md-on-surface);
   }
 
+  /* Prose rhythm inside an answer.
+     The renderer emits real <p>/<ul>/<ol>/<h3>, but Tailwind's preflight strips
+     every default margin -- so without these an answer with four paragraphs
+     renders as one unbroken slab, which is exactly how it looked. */
+  .md-answer > * + * { margin-top: 0.85em; }
+  .md-answer p { line-height: 1.65; }
+  .md-answer h3 {
+    font-size: 1rem;
+    font-weight: 600;
+    line-height: 1.4;
+    /* More space above than below, so a heading binds to the text it
+       introduces rather than floating between two blocks. */
+    margin-top: 1.4em;
+    margin-bottom: -0.2em;
+  }
+  .md-answer ul,
+  .md-answer ol { padding-left: 1.4em; }
+  .md-answer ul { list-style: disc; }
+  .md-answer ol { list-style: decimal; }
+  .md-answer li { margin-top: 0.3em; line-height: 1.6; }
+  .md-answer li::marker { color: var(--md-on-surface-variant); }
+
+  /* Tables. Horizontal scrolling is confined to the wrapper so a wide table
+     never drags the rest of the answer sideways with it. */
+  .md-table-wrap {
+    overflow-x: auto;
+    max-width: 100%;
+  }
+  .md-table {
+    border-collapse: collapse;
+    width: 100%;
+    /* Below this a table stops being readable and should scroll instead of
+       compressing its columns into single characters. */
+    min-width: 22rem;
+    font-size: 0.9375rem;
+  }
+  .md-table th,
+  .md-table td {
+    padding: 0.5rem 0.85rem 0.5rem 0;
+    text-align: left;
+    vertical-align: top;
+    border-bottom: 1px solid var(--md-outline-variant);
+  }
+  .md-table th {
+    font-weight: 600;
+    color: var(--md-on-surface-variant);
+    font-size: 0.875rem;
+    white-space: nowrap;
+  }
+  .md-table tr:last-child td { border-bottom: none; }
+
   /* Inline citation marker: the [5] inside answer prose, made clickable so it
      opens that passage in the rail. Sized and aligned to sit inside a line of
      body text without disturbing its rhythm -- hence the em-based padding and
@@ -509,6 +564,101 @@ textarea:focus-visible {
     line-height: 1.5rem;
     letter-spacing: 0.03125em;
   }
+  /* The multiline variant, for the chat composer.
+     `height` is driven by JS (scrollHeight) rather than `rows`, so it starts
+     one line tall and grows with the text. That means the fixed 56px above has
+     to go, but min-height keeps an empty field exactly the same size as the
+     single-line one -- otherwise switching the composer to a textarea would
+     visibly shrink it.
+
+     resize:none because the drag handle collides with the pill's rounded
+     corner and duplicates the auto-grow. overflow-y:auto so the scrollbar
+     appears only once the max height is reached. */
+  textarea.md-field-input {
+    /* BLOCK, and this is what aligns the send button.
+
+       A textarea is inline-block by default, so it sits on its parent's text
+       baseline and the block wrapper reserves a few pixels of descender space
+       BELOW it. The wrapper is therefore taller than the field looks, and the
+       composer's `items-end` aligned the FAB to the wrapper's bottom edge --
+       leaving the button sitting low against an input whose visible bottom was
+       several pixels higher. No amount of adjusting the button could fix it;
+       the extra space was never part of the button. */
+    display: block;
+    height: auto;
+    min-height: 56px;
+    max-height: 40vh;
+    resize: none;
+    /* Hidden by default; the resize handler flips it to `auto` only once the
+       box is actually clamped at max-height. Below the cap the element is
+       exactly as tall as its content, so there is nothing to scroll and a
+       track would only paint over the pill's curve. */
+    overflow-y: hidden;
+    /* Reserve the gutter on BOTH sides when a scrollbar does appear, so the
+       text does not shift sideways the moment the field becomes scrollable.
+       Ignored by engines that lack it, which then fall back to the
+       padding-right below. */
+    scrollbar-gutter: stable both-edges;
+    /* Vertically centres a single line against the 56px min-height, and stays
+       sane once wrapped -- 1rem padding plus a 1.5 line-height would sit the
+       first line too high in a grown box. */
+    padding-top: 1.05rem;
+    padding-bottom: 1.05rem;
+    /* Extra room on the right so the thumb, when it appears, sits inside the
+       pill rather than on top of the text or across the corner curve. */
+    padding-right: 1.5rem;
+    line-height: 1.4;
+    /* Transparent until hovered or actively scrolling, matching `.md-scroll`
+       elsewhere. A composer that is usually one line should not carry a
+       permanent scrollbar. */
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+    transition:
+      border-color var(--md-dur-short) var(--md-ease-standard),
+      box-shadow var(--md-dur-short) var(--md-ease-standard),
+      scrollbar-color var(--md-dur-medium) var(--md-ease-standard);
+  }
+  textarea.md-field-input:hover,
+  textarea.md-field-input:focus {
+    scrollbar-color: var(--md-outline-variant) transparent;
+  }
+
+  /* WebKit fallback: Chrome below 121 and Safari ignore the standard
+     properties above. Browsers that support them ignore this block, so the two
+     cannot fight. */
+  textarea.md-field-input::-webkit-scrollbar { width: 10px; }
+  textarea.md-field-input::-webkit-scrollbar-track { background: transparent; }
+  textarea.md-field-input::-webkit-scrollbar-thumb {
+    background-color: transparent;
+    /* Transparent border plus background-clip paints a 4px thumb inside a 10px
+       gutter, keeping it clear of the pill's curve. */
+    border: 3px solid transparent;
+    background-clip: content-box;
+    border-radius: var(--md-shape-full);
+    transition: background-color var(--md-dur-medium) var(--md-ease-standard);
+  }
+  textarea.md-field-input:hover::-webkit-scrollbar-thumb,
+  textarea.md-field-input:focus::-webkit-scrollbar-thumb {
+    background-color: var(--md-outline-variant);
+  }
+
+  /* A key cap, for stating a shortcut inline. Deliberately quiet: it sits in
+     the composer's hint line, which should be readable and then ignored. */
+  .md-kbd {
+    display: inline-block;
+    padding: 0.05em 0.4em;
+    border: 1px solid var(--md-outline-variant);
+    border-radius: var(--md-shape-xs);
+    background: var(--md-surface-container-high);
+    color: var(--md-on-surface-variant);
+    font-family: inherit;
+    font-size: 0.92em;
+    /* 1.2, not 1.5. The cap sits in a fixed-height hint line under the
+       composer, and a taller line-height pushed it past that box and into the
+       input above -- which read as the composer jumping when a turn started. */
+    line-height: 1.2;
+  }
+
   .md-field-input:hover:not(:disabled) { border-color: var(--md-on-surface); }
   .md-field-input:focus {
     border-color: var(--md-primary);
@@ -807,6 +957,32 @@ textarea:focus-visible {
   /* =========================================================================
      Navigation drawer - the navy departure. Active item is a pill.
      ========================================================================= */
+  /* A group of related destinations, drawn as one tinted block.
+
+     The drawer previously ran destinations, the session list and the account
+     row together as one column of items separated only by margin, so "Lab"
+     and the first session title read as neighbours in the same list when they
+     are nothing of the kind. Grouping is what says otherwise: places you go,
+     conversations you have, and you -- three blocks with real space between
+     them rather than a uniform stack. */
+  .md-nav-group {
+    background: var(--md-nav-surface-container);
+    border-radius: var(--md-shape-lg);
+    padding: 0.625rem;
+  }
+  /* Breathing room INSIDE a group as well as between them. Items packed at
+     the default 1px gap read as one striped block rather than three separate
+     destinations, which undoes most of what the grouping was for. */
+  .md-nav-group > * + * {
+    margin-top: 0.25rem;
+  }
+  /* The group already carries the inset, so items inside it sit tighter to
+     the edge than a bare drawer item would. Without this the icon ends up
+     2rem from the drawer edge and the block looks padded twice. */
+  .md-nav-group .md-nav-item {
+    padding: 0 0.75rem;
+  }
+
   .md-nav-item {
     display: flex;
     align-items: center;

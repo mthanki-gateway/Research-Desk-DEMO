@@ -52,6 +52,23 @@ class RateLimiter:
     def token_capacity(self) -> int:
         return int(self._tokens.capacity)
 
+    def peek(self, tokens: int) -> float:
+        """Seconds this limiter would make a caller wait. 0 means go now.
+
+        READ-ONLY: it refills the buckets (which is just advancing the clock)
+        but consumes nothing. That is what lets a pool ask several limiters
+        "could you serve this?" and use only the one it picks -- asking with
+        `acquire` would spend a request on every member it merely considered.
+
+        Taken without the lock, so the answer is a snapshot that another task
+        can invalidate before the caller acts on it. That is acceptable here:
+        the pool uses it to CHOOSE, and the chosen client still goes through
+        `acquire`, which is authoritative. A stale peek costs a slightly worse
+        choice, never an exceeded budget.
+        """
+        tokens = min(tokens, self.token_capacity)
+        return max(self._requests.wait_time(1), self._tokens.wait_time(tokens))
+
     async def acquire(self, tokens: int) -> None:
         """Block until one request of `tokens` size fits in both budgets."""
         # Clamp rather than deadlock: a single item larger than the whole

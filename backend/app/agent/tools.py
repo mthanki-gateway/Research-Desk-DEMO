@@ -39,7 +39,7 @@ from typing import Any
 import structlog
 
 from app.config import get_settings
-from app.services import websearch
+from app.services import preferences, websearch
 from app.services.parents import read_around
 from app.services.retrieval import retrieve
 from app.services.vectorstore import SearchHit
@@ -49,6 +49,7 @@ log = structlog.get_logger()
 SEARCH_DOCUMENTS = "search_documents"
 SEARCH_WEB = "search_web"
 READ_AROUND = "read_around"
+REMEMBER_PREFERENCE = "remember_preference"
 
 
 def tool_specs() -> list[dict[str, Any]]:
@@ -150,6 +151,61 @@ def tool_specs() -> list[dict[str, Any]]:
             }
         )
 
+    # Memory as a TOOL rather than a node in front of the graph.
+    #
+    # A router node had to classify every message before anything else ran, so
+    # it decided "is this an instruction?" without having seen a single
+    # document -- and the cost of that guess was paid on every turn, including
+    # the overwhelming majority that store nothing. As a tool it is the same
+    # judgement made by the agent that is already reading the message, at the
+    # moment it has something to store, and it composes: "tell me about X and
+    # always cite pages" is one search call plus one remember call, rather than
+    # a router that has to split the message before either can happen.
+    declarations.append(
+        {
+            "name": REMEMBER_PREFERENCE,
+            "description": (
+                "Store a STANDING INSTRUCTION about how to answer, so it "
+                "applies to this and every future turn. Use it when the user "
+                "tells you how to behave from now on -- 'always cite page "
+                "numbers', 'keep answers short', 'never mention X', 'remember "
+                "that I prefer...'. Call it as well as searching when one "
+                "message both asks something and gives an instruction. Do NOT "
+                "use it for a one-off request about the current answer "
+                "('summarise that in one line'), and do NOT use it to store "
+                "facts, documents or answers -- it is only for instructions "
+                "about your own behaviour. Storing something already covered "
+                "is harmless: it is detected and skipped."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "instruction": {
+                        "type": "string",
+                        "description": (
+                            "One imperative sentence addressed to you, keeping "
+                            "every specific the user gave. 'Always say which "
+                            "facts came from the web.' -- not 'the user "
+                            "prefers thorough search'."
+                        ),
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["user", "session"],
+                        "description": (
+                            "'user' (the default) applies it to every "
+                            "conversation; 'session' only to this one. Use "
+                            "'session' only when the user clearly limited it "
+                            "-- 'for this chat', 'just here'. People say "
+                            "'always' and mean it."
+                        ),
+                    },
+                },
+                "required": ["instruction"],
+            },
+        }
+    )
+
     return [{"functionDeclarations": declarations}]
 
 
@@ -160,6 +216,8 @@ async def run_tool(
     top_k: int,
     document_ids: list[uuid.UUID] | None,
     owner_id: str | None,
+    session_id: uuid.UUID | None = None,
+    remembered: list[str] | None = None,
 ) -> tuple[list[SearchHit], str]:
     """Execute one tool call. Returns (hits, text_for_the_model).
 
@@ -171,6 +229,14 @@ async def run_tool(
     same reason it is on the graph state: tenant scoping must be an explicit
     argument on every retrieval path.
     """
+    # Checked BEFORE the query guard below: this is the one tool that takes no
+    # query, and falling through would reject every call with "the query
+    # parameter was empty".
+    if name == REMEMBER_PREFERENCE:
+        return [], await _remember(
+            args, owner_id=owner_id, session_id=session_id, remembered=remembered
+        )
+
     query = str(args.get("query", "")).strip()
     if not query:
         return [], "Error: the query parameter was empty. Provide a query."
@@ -219,9 +285,71 @@ async def run_tool(
 
         # The model invented a tool. Say so plainly -- it can correct itself.
         return [], f"Unknown tool {name!r}. Available: {SEARCH_DOCUMENTS}, {SEARCH_WEB}."
+
     except Exception as exc:  # noqa: BLE001 - a tool failure must not end the loop
         log.warning("tool_failed", tool=name, query=query[:60], error=str(exc))
         return [], f"The {name} tool failed: {type(exc).__name__}. Try again or rephrase."
+
+
+async def _remember(
+    args: dict[str, Any],
+    *,
+    owner_id: str | None,
+    session_id: uuid.UUID | None,
+    remembered: list[str] | None,
+) -> str:
+    """Store a standing instruction, and tell the model what happened.
+
+    The observation is written for the AGENT to act on, not for the user: it
+    says plainly whether the instruction was new or already covered, because
+    the agent has to report that difference in its reply and cannot tell
+    otherwise. "Saved" and "you already had this" are different things to say.
+
+    Appends to `remembered` so the caller knows what was stored this turn
+    without re-reading the database -- the answer has to confirm it, and a
+    second query could race with a concurrent turn.
+    """
+    text = " ".join(str(args.get("instruction", "")).split())
+    if not text:
+        return "Error: the instruction parameter was empty."
+
+    scope = str(args.get("scope") or "user").strip().lower()
+    if scope not in ("user", "session"):
+        scope = "user"
+
+    try:
+        stored = await preferences.preferences_in_force(
+            owner_id=owner_id, session_id=session_id
+        )
+        if await preferences.already_covered(text, [p.text for p in stored]):
+            log.info("preference_already_covered", text=text[:60])
+            return (
+                f"Already covered by a stored instruction, so nothing was "
+                f"added: {text!r}. Tell the user it is already remembered "
+                "rather than claiming you saved it."
+            )
+
+        pref = await preferences.remember(
+            text,
+            owner_id=owner_id,
+            session_id=session_id,
+            scope=scope,
+            source_message=None,
+        )
+    except Exception as exc:  # noqa: BLE001 - a tool failure must not end the loop
+        log.warning("remember_tool_failed", error=str(exc))
+        return f"Could not store the instruction: {type(exc).__name__}."
+
+    if pref is None:
+        return (
+            f"Already remembered, so nothing changed: {text!r}. Say it is "
+            "already in force rather than claiming you saved it."
+        )
+
+    if remembered is not None:
+        remembered.append(text)
+    where = "this conversation" if scope == "session" else "every conversation"
+    return f"Stored for {where}: {text!r}. Confirm this to the user."
 
 
 def _coverage_note(hits: list[SearchHit], top_k: int) -> str:

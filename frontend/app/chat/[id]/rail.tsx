@@ -59,7 +59,7 @@ function CollapsedRail({
 
   return (
     <aside
-      className={`fixed inset-y-0 right-0 z-30 hidden flex-col items-center gap-1 py-4 ${
+      className={`fixed inset-y-0 right-0 z-30 hidden flex-col items-center gap-2 py-5 ${
         visible ? "lg:flex" : ""
       }`}
       style={{
@@ -141,7 +141,7 @@ function RailStat({
       onClick={onClick}
       role="button"
       tabIndex={0}
-      className="flex w-14 cursor-pointer flex-col items-center gap-0.5 rounded-[var(--md-shape-lg)] py-2"
+      className="flex w-14 cursor-pointer flex-col items-center gap-1 rounded-[var(--md-shape-lg)] py-2.5"
       style={{
         background: active ? "var(--md-secondary-container)" : "transparent",
         color: active
@@ -345,7 +345,7 @@ function Controls({
   const scoped = session.document_ids.length > 0;
 
   return (
-    <div className="space-y-6 p-4">
+    <div className="space-y-7 p-5">
       <section>
         <SectionHeading
           meta={
@@ -365,7 +365,7 @@ function Controls({
             No indexed documents.
           </p>
         ) : (
-          <ul className="space-y-2">
+          <ul className="space-y-2.5">
             {documents.map((d) => {
               const explicit = session.document_ids.includes(d.id);
               return (
@@ -430,7 +430,7 @@ function Controls({
       <section>
         <SectionHeading>Retrieval</SectionHeading>
 
-        <div className="space-y-4">
+        <div className="space-y-5">
           <div className="flex items-center justify-between gap-3">
             <span className="md-body-medium">
               Passages per query

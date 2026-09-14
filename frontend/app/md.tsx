@@ -10,6 +10,7 @@ import {
   type AnchorHTMLAttributes,
   type ButtonHTMLAttributes,
   type InputHTMLAttributes,
+  type TextareaHTMLAttributes,
 } from "react";
 
 /* ===========================================================================
@@ -363,6 +364,112 @@ export const TextField = forwardRef<HTMLInputElement, TextFieldProps>(
         <input
           id={id}
           ref={ref}
+          placeholder=" "
+          className="md-field-input"
+          {...rest}
+        />
+        <label htmlFor={id} className="md-field-label">
+          {label}
+        </label>
+      </span>
+    );
+  },
+);
+
+type TextAreaProps = TextareaHTMLAttributes<HTMLTextAreaElement> & {
+  label: string;
+  surface?: string;
+  shape?: string;
+};
+
+/**
+ * The same M3 field, as a textarea that grows with its content.
+ *
+ * A separate component rather than a `multiline` flag on TextField: the two
+ * take different element props (`rows` vs `type`), different refs, and
+ * different change-event types, so one component serving both would need a
+ * union everywhere it is used and a cast at every call site.
+ *
+ * Height is set from `scrollHeight` rather than by counting rows, because the
+ * only thing that knows how many lines the text occupies after wrapping is the
+ * browser. Counting "\n" would keep a long wrapped paragraph one line tall.
+ */
+export const TextArea = forwardRef<HTMLTextAreaElement, TextAreaProps>(
+  function TextArea({ label, surface, shape, className = "", ...rest }, ref) {
+    const id = useId();
+    const inner = useRef<HTMLTextAreaElement | null>(null);
+
+    const resize = useCallback((el: HTMLTextAreaElement | null) => {
+      if (!el) return;
+      // Reset FIRST. scrollHeight never reports less than the element's
+      // current height, so measuring without this makes the box grow
+      // monotonically and never come back down when text is deleted.
+      //
+      // "0px" rather than "auto": with `auto` the browser may still lay the
+      // element out against its `rows` attribute before reporting, which reads
+      // back a taller box than the content needs and leaves an empty composer
+      // several lines deep.
+      el.style.height = "0px";
+
+      const styles = window.getComputedStyle(el);
+
+      // ADD THE BORDERS BACK. `scrollHeight` measures padding + content and
+      // EXCLUDES borders, but with `box-sizing: border-box` the height being
+      // set INCLUDES them. Assigning scrollHeight directly therefore leaves the
+      // content box two pixels short of its own content -- just enough to make
+      // a scrollbar appear on a textarea that fits perfectly, permanently, at
+      // every size. That was the scrollbar sitting against the pill's edge.
+      const borders =
+        styles.boxSizing === "border-box"
+          ? parseFloat(styles.borderTopWidth) + parseFloat(styles.borderBottomWidth)
+          : 0;
+      const content = el.scrollHeight + (Number.isFinite(borders) ? borders : 0);
+
+      // Clamp in JS as well as CSS: the inline height set here beats the
+      // stylesheet's min-height/max-height on some engines, and an empty field
+      // must stay exactly the size of the single-line input it replaced.
+      const min = parseFloat(styles.minHeight) || 0;
+      const max = parseFloat(styles.maxHeight) || Number.POSITIVE_INFINITY;
+      const next = Math.min(Math.max(content, min), max);
+      el.style.height = `${next}px`;
+
+      // Scroll ONLY once it is actually clamped. Below the cap the box is
+      // exactly its content, so `overflow: auto` would still reserve a gutter
+      // in some engines and paint a track over the rounded corner.
+      el.style.overflowY = next < content ? "auto" : "hidden";
+    }, []);
+
+    // Also on `value`, not just on input: the composer clears the field
+    // programmatically after sending, and without this the box would stay
+    // several lines tall around an empty textarea.
+    useEffect(() => {
+      resize(inner.current);
+    }, [resize, rest.value]);
+
+    return (
+      <span
+        className={`md-field ${className}`}
+        style={
+          {
+            ...(surface ? { "--md-field-bg": surface } : {}),
+            ...(shape
+              ? {
+                  "--md-field-radius": shape,
+                  "--md-field-label-left": "1.25rem",
+                }
+              : {}),
+          } as React.CSSProperties
+        }
+      >
+        <textarea
+          id={id}
+          ref={(el) => {
+            inner.current = el;
+            if (typeof ref === "function") ref(el);
+            else if (ref) ref.current = el;
+            resize(el);
+          }}
+          rows={1}
           placeholder=" "
           className="md-field-input"
           {...rest}

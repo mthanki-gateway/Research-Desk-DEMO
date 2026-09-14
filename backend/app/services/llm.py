@@ -46,7 +46,39 @@ GENAI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
 
 class LLMError(RuntimeError):
-    pass
+    """A model call failed.
+
+    Carries the HTTP status when there was one, because the CALLER often has a
+    better remedy than a retry: a pool can move to a different model on 429,
+    where backing off on the exhausted one just waits. Without the status that
+    decision would have to be made by matching on the message text.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        # Seconds, parsed from the 429's RetryInfo when Google supplies one.
+        # Better than a guessed backoff: it is the server saying when the
+        # budget actually refills.
+        self.retry_after = retry_after
+
+
+def _retry_after(response) -> float | None:
+    """`retryDelay` from a 429 body, in seconds."""
+    try:
+        for detail in response.json().get("error", {}).get("details", []):
+            delay = detail.get("retryDelay")
+            if isinstance(delay, str) and delay.endswith("s"):
+                return float(delay[:-1])
+    except (ValueError, TypeError):
+        pass
+    return None
 
 
 class GenAIClient:
@@ -81,6 +113,19 @@ class GenAIClient:
             name=f"llm:{self._model}",
         )
 
+    @property
+    def model(self) -> str:
+        """The model id this client calls, without the `models/` prefix."""
+        return self._model
+
+    def wait_estimate(self, tokens: int) -> float:
+        """Seconds before this client could serve a request of `tokens`.
+
+        Consumes nothing -- a pool has to be able to compare several members
+        without spending budget on the ones it does not choose.
+        """
+        return self._limiter.peek(tokens)
+
     async def aclose(self) -> None:
         await self._client.aclose()
 
@@ -93,6 +138,7 @@ class GenAIClient:
         temperature: float = 0.2,
         max_output_tokens: int = 1024,
         top_p: float = 0.9,
+        max_attempts: int = 4,
     ) -> str:
         """One completion. Returns raw text (JSON text when `schema` is given)."""
         body: dict[str, Any] = {
@@ -140,7 +186,7 @@ class GenAIClient:
             },
         ) as span:
             last_error: Exception | None = None
-            for attempt in range(4):
+            for attempt in range(max_attempts):
                 # Timed here rather than by making `acquire` return a duration:
                 # the limiter's contract stays "block until it fits", and the
                 # measurement is the caller's concern.
@@ -163,7 +209,24 @@ class GenAIClient:
                             status_message=f"{exc.response.status_code}",
                         )
                         raise LLMError(
-                            f"{exc.response.status_code}: {exc.response.text[:400]}"
+                            f"{exc.response.status_code}: {exc.response.text[:400]}",
+                            status=exc.response.status_code,
+                        ) from exc
+                    # LAST ATTEMPT: raise with the status rather than sleeping
+                    # into a retry that will not happen. A pool calls this with
+                    # max_attempts=1 precisely so it can move to a model that
+                    # still has budget -- backing off here would spend the time
+                    # the pool exists to avoid.
+                    if attempt == max_attempts - 1:
+                        tracing.update(
+                            span,
+                            level="ERROR",
+                            status_message=f"{exc.response.status_code}",
+                        )
+                        raise LLMError(
+                            f"{exc.response.status_code}: {exc.response.text[:200]}",
+                            status=exc.response.status_code,
+                            retry_after=_retry_after(exc.response),
                         ) from exc
                     backoff = 2**attempt * 5
                     log.warning(

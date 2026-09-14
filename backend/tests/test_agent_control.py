@@ -10,7 +10,7 @@ import uuid
 
 import pytest
 
-from app.agent.graph import should_continue
+from app.agent.graph import after_react, entry, should_continue
 from app.agent.nodes import MISSING_EVIDENCE, UNANSWERABLE, UNSUPPORTED_CLAIM, resolve
 from app.agent.state import _union, merge_evidence
 from app.config import Settings
@@ -211,7 +211,7 @@ class TestResolve:
                     'stated.", "sources_used": [1]}'
                 )
 
-        monkeypatch.setattr(nodes, "get_llm", lambda *a, **k: FakeLLM())
+        monkeypatch.setattr(nodes, "get_pool", lambda role: _StubPool(FakeLLM()))
         out = await resolve(
             {
                 "question": "margin and capex?",
@@ -234,7 +234,7 @@ class TestResolve:
             async def generate(self, prompt, **kw):
                 raise nodes.LLMError("429")
 
-        monkeypatch.setattr(nodes, "get_llm", lambda *a, **k: BoomLLM())
+        monkeypatch.setattr(nodes, "get_pool", lambda role: _StubPool(BoomLLM()))
         out = await resolve(
             {
                 "question": "q",
@@ -280,3 +280,77 @@ class TestSeenChunkIds:
         """
         first = [_hit(1), _hit(2)]
         assert merge_evidence(first, [_hit(1), _hit(2)]) == first
+
+
+class _StubPool:
+    """Stands in for ModelPool so a test can stub the model behind it.
+
+    The nodes now go through a pool rather than calling get_llm directly -- the
+    pool spreads load across models sharing one role. Tests stub the pool at the
+    same seam so they exercise the production path rather than a bypass.
+    """
+
+    def __init__(self, client):
+        self._client = client
+
+    def for_prompt(self, *a, **kw):
+        return self._client
+
+    def pick(self, tokens):
+        return self._client
+
+    async def generate(self, prompt, **kwargs):
+        # The pool now owns the call so it can hand off to another model on a
+        # 429. Delegating keeps the stub a seam rather than a second
+        # implementation.
+        kwargs.pop("max_attempts", None)
+        return await self._client.generate(prompt, **kwargs)
+
+
+class TestAgentDecidesWhetherToRetrieve:
+    """The agent's own judgement is what routes the turn, not a node in front
+    of it. These pin the two edges that judgement feeds.
+    """
+
+    def test_a_direct_answer_ends_the_turn(self):
+        """"hi" used to reach `draft` with no evidence, which either said
+        nothing was found or answered from whatever was lexically nearest --
+        three sub-questions and five web searches for a greeting."""
+        assert after_react({"answered_directly": True, "evidence": []}) == END
+
+    def test_an_empty_search_still_drafts(self):
+        """THE DISTINCTION THAT MATTERS. "No evidence" has two causes: the
+        agent never looked, or it looked and found nothing. Only the first is
+        safe to answer in the model's own words -- the second must reach
+        `draft`, where "your documents cover X but not Z" is written and where
+        `critique` reviews the result. Conflating them turns a failed search
+        into licence to answer from memory."""
+        assert after_react({"evidence": [], "sufficient": True}) == "draft"
+
+    def test_evidence_always_drafts(self):
+        assert after_react({"evidence": [_hit(1)]}) == "draft"
+
+    def test_the_agent_owns_routing_when_it_has_tools(self, monkeypatch):
+        """No standalone router call on a turn the agent can handle itself."""
+        monkeypatch.setattr(
+            "app.agent.graph.get_settings",
+            lambda: Settings(model_profile="gemini"),
+        )
+        assert entry({"react": True}) == "clarify"
+
+    def test_the_router_stays_for_models_without_tool_calling(self, monkeypatch):
+        """Gemma emits no functionCall parts, so `remember_preference` is never
+        called there. Skipping the router too would leave that profile with
+        nothing able to capture an instruction."""
+        monkeypatch.setattr(
+            "app.agent.graph.get_settings", lambda: Settings(model_profile="gemma")
+        )
+        assert entry({"react": True}) == "route"
+
+    def test_the_router_stays_on_the_planned_path(self, monkeypatch):
+        """The evaluation harness runs `plan`, which has no tools at all."""
+        monkeypatch.setattr(
+            "app.agent.graph.get_settings",
+            lambda: Settings(model_profile="gemini"),
+        )
+        assert entry({"react": False}) == "route"

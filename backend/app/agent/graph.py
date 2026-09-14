@@ -1,12 +1,26 @@
 """The graph.
 
-    START → clarify ─┬─(clear)──────────────→ plan → retrieve → draft ──┐
-                     │                                 ▲                │
-                     └─(vague)→ ask_human ─┬→ plan ────┘                │
-                                           │                     critique
-                                  cancelled │                     │    │
-                                           └─────→ END ←──────────┘    │
-                                                        └── retry ─────┘
+    START ─┬─(no tools)→ route ─┬─(instruction only)────────────→ END
+           │                    └─→ clarify
+           └─(agent)──────────────→ clarify ─┬─(vague)→ ask_human ─→ …
+                                             │
+                                             ├─→ react ─┬─(no search)→ END
+                                             │          └─→ draft ──┐
+                                             └─→ plan → retrieve → draft
+                                                          ▲          │
+                                                          │      critique
+                                                          │      │    │
+                                              END ←───────┴──────┘    │
+                                                        └── retry ────┘
+
+WHO DECIDES WHETHER TO RETRIEVE
+
+The agent does, when it has tools. `react` calls no search for a greeting, a
+question about the assistant, or a bare instruction, and writes the reply
+itself -- so "hi" costs one model call instead of a plan, three sub-questions
+and five web searches. `route` remains the entry point only for the paths that
+cannot make that call for themselves: the Gemma profile, which emits no
+functionCall parts, and the planned path the evaluation harness measures.
 
 The cycle is the reason this is a graph and not four awaits. LangChain's LCEL
 builds DAGs, and a DAG cannot loop; expressing "critique decides whether to go
@@ -33,6 +47,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 
 from app.agent.nodes import (
+    REMEMBER,
     UNANSWERABLE,
     UNSUPPORTED_CLAIM,
     ask_human,
@@ -41,6 +56,7 @@ from app.agent.nodes import (
     plan,
     resolve,
     retrieve_node,
+    route,
 )
 from app.agent.nodes import (
     clarify as clarify_node,
@@ -109,6 +125,17 @@ def should_continue(
     return "retrieve"
 
 
+def _uses_react(state: ResearchState) -> bool:
+    """Will this turn gather with the ReAct agent?
+
+    Shared by `entry` and `gather_strategy` so the two cannot disagree. They
+    did while this was inlined twice: `entry` skipped the router on a turn that
+    then fell back to `plan` because the model had no tool calling, leaving the
+    turn with neither a router nor an agent able to handle an instruction.
+    """
+    return bool(state.get("react")) and get_settings().supports_tool_calling
+
+
 def gather_strategy(state: ResearchState) -> Literal["react", "plan"]:
     """Which evidence-gathering strategy this turn uses.
 
@@ -131,6 +158,62 @@ def gather_strategy(state: ResearchState) -> Literal["react", "plan"]:
         log.info("react_unavailable", reason="model has no native tool calling")
         return "plan"
     return "react"
+
+
+def after_react(state: ResearchState) -> Literal["draft", "__end__"]:
+    """A turn that needed no sources is already answered.
+
+    `react` writes its own reply when it called no tools and gathered nothing
+    -- a greeting, a question about the assistant, a bare instruction. Sending
+    that to `draft` is what made "hi" run three sub-questions and five web
+    searches: `draft` exists to compose an answer FROM EVIDENCE, so handed none
+    it either says nothing was found or reaches for whatever was lexically
+    nearest.
+    """
+    if state.get("answered_directly"):
+        return END
+    return "draft"
+
+
+def entry(state: ResearchState) -> Literal["route", "clarify"]:
+    """Whether the standalone router runs at all.
+
+    THE AGENT OWNS THIS JOB WHEN IT CAN DO IT. `route` is a model call in front
+    of every turn that classifies the message before anything else has run --
+    paid on all of them, including the overwhelming majority that store
+    nothing. The ReAct agent makes the same judgement with `remember_preference`
+    at the moment it actually has something to store, and it composes: "tell me
+    about X and always cite pages" is one search call plus one remember call in
+    a single round, where the router first had to split the message in two.
+
+    It stays for the path that CANNOT do it. Tool calling is what the agent
+    version rests on, and the Gemma profile emits no functionCall parts -- so
+    on that profile, and on the planned path the evaluation harness measures,
+    the router is still the only thing standing between "remember to cite
+    pages" and a document search for the phrase.
+    """
+    return "clarify" if _uses_react(state) else "route"
+
+
+def after_route(state: ResearchState) -> Literal["clarify", "__end__"]:
+    """Only a PURE instruction ends the turn here.
+
+    `route` already wrote the confirmation into `draft`, and for an instruction
+    alone there is nothing to retrieve -- an instruction about how to answer is
+    not a question about the documents. Falling through to the search path is
+    the bug this node exists to prevent: it produced "your documents do not
+    mention personal preferences regarding search behaviour".
+
+    `both` deliberately does NOT end. One message often carries a question AND
+    a standing instruction ("tell me about X, and always say which facts came
+    from the web"), and treating that as either one alone silently drops half
+    of what was asked. `route` has already stored the preference and rewritten
+    `question` to the question part, so the rest of the graph runs normally --
+    with the new instruction already in force.
+    """
+    if state.get("intent") == REMEMBER:
+        return END
+    return "clarify"
 
 
 def needs_human(state: ResearchState) -> Literal["ask_human", "plan"]:
@@ -160,6 +243,7 @@ def after_human(state: ResearchState) -> Literal["react", "plan", "__end__"]:
 def build_graph(checkpointer=None):
     builder = StateGraph(ResearchState)
 
+    builder.add_node("route", route)
     builder.add_node("clarify", clarify_node)
     builder.add_node("ask_human", ask_human)
     builder.add_node("plan", plan)
@@ -169,7 +253,12 @@ def build_graph(checkpointer=None):
     builder.add_node("critique", critique)
     builder.add_node("resolve", resolve)
 
-    builder.add_edge(START, "clarify")
+    builder.add_conditional_edges(
+        START, entry, {"route": "route", "clarify": "clarify"}
+    )
+    builder.add_conditional_edges(
+        "route", after_route, {"clarify": "clarify", END: END}
+    )
     builder.add_conditional_edges(
         "clarify",
         needs_human,
@@ -180,8 +269,11 @@ def build_graph(checkpointer=None):
     )
     builder.add_edge("plan", "retrieve")
     # ReAct does its own retrieval through tools, so it goes STRAIGHT to
-    # drafting -- it produces the evidence that `retrieve` would have.
-    builder.add_edge("react", "draft")
+    # drafting -- it produces the evidence that `retrieve` would have. Unless
+    # it gathered nothing on purpose, in which case it has already answered.
+    builder.add_conditional_edges(
+        "react", after_react, {"draft": "draft", END: END}
+    )
     builder.add_edge("retrieve", "draft")
     builder.add_edge("draft", "critique")
     builder.add_conditional_edges(
@@ -262,6 +354,10 @@ class AgentResult:
         # resolve produced the final answer -- without this the UI cannot tell a
         # complete answer from a knowingly incomplete one.
         self.partial: bool = bool(state.get("partial"))
+        # Preferences this turn stored, so the UI can say memory changed
+        # rather than leaving it to be inferred from the prose.
+        self.memory_saved: list[str] = state.get("memory_saved") or []
+        self.intent: str = state.get("intent", "")
         # `answer` is an error message rather than an answer. Callers that are
         # not a chat window -- the evaluation harness above all -- must be able
         # to tell the difference; see `generation_failed` in state.py.
@@ -284,6 +380,8 @@ def initial_state(
     owner_id: str | None = None,
     multi_query: bool | None = None,
     chat_context: str = "",
+    session_id: str | None = None,
+    preferences: str = "",
     clarify: bool | None = None,
     react: bool | None = None,
     resumable: bool = True,
@@ -308,6 +406,10 @@ def initial_state(
         "owner_id": owner_id,
         "multi_query": multi_query,
         "chat_context": chat_context,
+        "session_id": session_id,
+        "preferences": preferences,
+        "intent": "",
+        "memory_saved": [],
         "clarify": ask,
         "react": (
             settings.react_default if react is None else react
@@ -366,6 +468,8 @@ async def run_agent(
     owner_id: str | None = None,
     multi_query: bool | None = None,
     chat_context: str = "",
+    session_id: str | None = None,
+    preferences: str = "",
     thread_id: str | None = None,
     clarify: bool | None = None,
     react: bool | None = None,
@@ -377,6 +481,8 @@ async def run_agent(
         owner_id=owner_id,
         multi_query=multi_query,
         chat_context=chat_context,
+        session_id=session_id,
+        preferences=preferences,
         clarify=clarify,
         react=react,
         resumable=bool(thread_id),
@@ -435,6 +541,8 @@ async def stream_agent(
     owner_id: str | None = None,
     multi_query: bool | None = None,
     chat_context: str = "",
+    session_id: str | None = None,
+    preferences: str = "",
     thread_id: str | None = None,
     clarify: bool | None = None,
     react: bool | None = None,
@@ -456,6 +564,8 @@ async def stream_agent(
         owner_id=owner_id,
         multi_query=multi_query,
         chat_context=chat_context,
+        session_id=session_id,
+        preferences=preferences,
         clarify=clarify,
         react=react,
         resumable=bool(thread_id),
@@ -481,8 +591,17 @@ async def _astream(inputs: Any, thread_id: str | None):
     # "values" gives the full state after each node so the caller ends up with
     # the final state without a second aget_state() round-trip.
     async for mode, chunk in get_graph().astream(
-        inputs, config=thread_config(thread_id), stream_mode=["updates", "values"]
+        inputs, config=thread_config(thread_id), stream_mode=["updates", "values", "custom"]
     ):
+        if mode == "custom":
+            # Fine-grained progress published from INSIDE a node -- which
+            # search is running, which rerank. Node-level events say
+            # "retrieve" for six seconds and nothing about what is being
+            # looked up. See services/progress.py.
+            payload = (chunk or {}).get("progress") if isinstance(chunk, dict) else None
+            if payload:
+                yield "progress", payload.get("kind"), payload
+            continue
         if mode == "updates":
             # A pause arrives on the "updates" channel under the same
             # `__interrupt__` key `ainvoke` uses, NOT as a node result -- so it

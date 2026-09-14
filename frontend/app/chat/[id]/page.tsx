@@ -17,8 +17,9 @@ import {
 } from "@/lib/api";
 import { useApp } from "../../providers";
 import { Answer } from "../../answer";
-import { Button, Chip, Fab, LinkChip, TextField } from "../../md";
+import { Button, Chip, Fab, LinkChip, TextArea } from "../../md";
 import {
+  IconCheck,
   IconExternal,
   IconQuote,
   IconSpinner,
@@ -89,6 +90,20 @@ function Conversation({ id }: { id: string }) {
   const [question, setQuestion] = useState("");
   const [pendingQuestion, setPendingQuestion] = useState<string | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
+  /**
+   * Searches happening right now, newest first.
+   *
+   * A LIST rather than one line, because the agent runs independent lookups
+   * CONCURRENTLY -- three searches can be one wall-clock step -- and
+   * collapsing them into a single line would show one query while three were
+   * in flight, making parallel work look sequential.
+   *
+   * Keyed by source+query so a finished search is marked done IN PLACE rather
+   * than appended again, which would otherwise make the list jump.
+   */
+  const [activity, setActivity] = useState<
+    { key: string; source: string; query: string; done: boolean; n?: number }[]
+  >([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [railOpen, setRailOpen] = useState(false);
@@ -189,7 +204,9 @@ function Conversation({ id }: { id: string }) {
     // `Boolean(pendingClarify)`, not the object: the review card appearing is
     // worth scrolling to, but editing inside it must not yank the view.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messageCount, pendingQuestion, Boolean(pendingClarify), Boolean(session)]);
+    // activity.length too: a new search line appears at the bottom of the
+    // list, and without it the newest one lands below the fold.
+  }, [messageCount, pendingQuestion, activity.length, Boolean(pendingClarify), Boolean(session)]);
 
   /**
    * Apply the end of a stream, which lands one of two ways.
@@ -220,6 +237,7 @@ function Conversation({ id }: { id: string }) {
     setPendingClarify(null);
     setBusy(true);
     setProgress("Thinking");
+    setActivity([]);
     setError(null);
 
     try {
@@ -234,6 +252,29 @@ function Conversation({ id }: { id: string }) {
           modelProfile: settings.modelProfile,
         },
         (_node, detail) => setProgress(detail),
+        (a) => {
+          // Reranks have no query to show and would add a line saying
+          // nothing the user can act on.
+          if (a.kind === "rerank" || !a.query) return;
+          const key = a.source + ':' + a.query;
+          setActivity((prev) => {
+            const at = prev.findIndex((x) => x.key === key);
+            if (at >= 0) {
+              const next = [...prev];
+              next[at] = { ...next[at], done: a.kind === "search_done", n: a.n };
+              return next;
+            }
+            return [
+              {
+                key,
+                source: a.source ?? "documents",
+                query: a.query ?? "",
+                done: false,
+              },
+              ...prev,
+            ].slice(0, 6);
+          });
+        },
       );
       await settle(outcome, q);
     } catch (err) {
@@ -243,6 +284,7 @@ function Conversation({ id }: { id: string }) {
     } finally {
       setBusy(false);
       setProgress(null);
+      setActivity([]);
     }
   }
 
@@ -262,6 +304,29 @@ function Conversation({ id }: { id: string }) {
     try {
       const outcome = await resumeTurn(id, thread, q, decision, (_n, detail) =>
         setProgress(detail),
+        (a) => {
+          // Reranks have no query to show and would add a line saying
+          // nothing the user can act on.
+          if (a.kind === "rerank" || !a.query) return;
+          const key = a.source + ':' + a.query;
+          setActivity((prev) => {
+            const at = prev.findIndex((x) => x.key === key);
+            if (at >= 0) {
+              const next = [...prev];
+              next[at] = { ...next[at], done: a.kind === "search_done", n: a.n };
+              return next;
+            }
+            return [
+              {
+                key,
+                source: a.source ?? "documents",
+                query: a.query ?? "",
+                done: false,
+              },
+              ...prev,
+            ].slice(0, 6);
+          });
+        },
       );
       await settle(outcome, q);
     } catch (err) {
@@ -272,6 +337,7 @@ function Conversation({ id }: { id: string }) {
     } finally {
       setBusy(false);
       setProgress(null);
+      setActivity([]);
     }
   }
 
@@ -368,6 +434,47 @@ function Conversation({ id }: { id: string }) {
             </li>
           )}
 
+          {/* Live searches, in the position the ANSWER will occupy.
+              Not above the composer: that form is `sticky bottom-0`, so
+              anything growing inside it makes the form taller and -- anchored
+              at the bottom -- pushes its top edge upward. A third search
+              appearing visibly shoved the input up mid-turn.
+
+              Here it also reads correctly: the work shows up where its result
+              will, and is replaced by the answer rather than vanishing from a
+              different part of the screen. */}
+          {activity.length > 0 && (
+            <li className="md-body-small space-y-1 px-1">
+              {activity.map((a) => (
+                <div
+                  key={a.key}
+                  className="flex items-center gap-2"
+                  style={{
+                    color: a.done
+                      ? "var(--md-on-surface-variant)"
+                      : "var(--md-primary)",
+                  }}
+                >
+                  {a.done ? (
+                    <IconCheck className="h-3.5 w-3.5 shrink-0" />
+                  ) : (
+                    <IconSpinner className="h-3.5 w-3.5 shrink-0" />
+                  )}
+                  <span className="truncate">
+                    {a.done ? "Searched" : "Searching"}{" "}
+                    {a.source === "web" ? "the web" : "your documents"} for “
+                    {a.query}”
+                  </span>
+                  {a.done && a.n != null && (
+                    <span className="shrink-0 tabular-nums opacity-70">
+                      {a.n} result{a.n === 1 ? "" : "s"}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </li>
+          )}
+
           {pendingClarify && (
             <Clarify
               interrupt={pendingClarify}
@@ -403,7 +510,7 @@ function Conversation({ id }: { id: string }) {
           }}
         >
           <div className="flex items-end gap-3">
-            <TextField
+            <TextArea
               label={
                 pendingClarify
                   ? "Answer the question above to continue"
@@ -411,6 +518,17 @@ function Conversation({ id }: { id: string }) {
               }
               value={question}
               onChange={(e) => setQuestion(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter" || e.shiftKey) return;
+                // IME GUARD. While composing (Japanese, Chinese, Korean),
+                // Enter CONFIRMS the candidate word -- it is not a submit.
+                // Without this check the message sends mid-word every time
+                // someone picks a character, which is invisible to anyone
+                // testing in English.
+                if (e.nativeEvent.isComposing) return;
+                e.preventDefault();
+                void send(e);
+              }}
               // Locked while paused. A second question would start a second
               // turn and orphan the paused checkpoint, leaving a thread nothing
               // can ever reach.
@@ -458,7 +576,12 @@ function Conversation({ id }: { id: string }) {
             </Fab>
           </div>
           <p
-            className="md-body-small mt-2 flex h-4 items-center gap-1.5 px-1"
+            // FIXED height, and it has to fit the tallest thing that can go in
+            // here. At h-4 the key caps (border + line-height ~20px) overflowed
+            // upward into the composer, so starting a turn appeared to nudge
+            // the input. The line swaps between three different contents on
+            // every turn; reserving the space means none of them move anything.
+            className="md-body-small mt-2 flex h-5 items-center gap-1.5 px-1"
             style={{
               color: progress
                 ? "var(--md-primary)"
@@ -475,7 +598,15 @@ function Conversation({ id }: { id: string }) {
             ) : pendingClarify ? (
               "Waiting on your answer — nothing has been searched yet"
             ) : (
-              'Follow-ups resolve against history — try "and the prior year?"'
+              // Shift+Enter is invisible unless it is stated. A textarea that
+              // submits on Enter looks identical to one that does not, so
+              // without this the only way to discover the newline is to try it
+              // and risk sending a half-written question.
+              <>
+                <kbd className="md-kbd">Shift</kbd>
+                <span aria-hidden="true"> + </span>
+                <kbd className="md-kbd">Enter</kbd> for a new line
+              </>
             )}
           </p>
         </form>
@@ -533,7 +664,11 @@ function Turn({
   const meta = message.agent_meta ?? {};
   const used = new Set(meta.sources_used ?? []);
   const cited = message.sources.filter((s) => used.has(s.n));
-  const uncited = cited.length === 0;
+  // A memory turn cites nothing BY DESIGN -- it stored an instruction and
+  // never searched -- so the warning would be accusing it of the thing it was
+  // supposed to do.
+  const remembered = meta.intent === "remember";
+  const uncited = cited.length === 0 && !remembered;
 
   return (
     <li className="space-y-2">
