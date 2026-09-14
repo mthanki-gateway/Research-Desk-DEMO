@@ -43,6 +43,17 @@
   --md-dur-short: 150ms;
   --md-dur-medium: 300ms;
   --md-dur-long: 450ms;
+  /* The press ripple, as ONE number for the whole app.
+     Its own token rather than --md-dur-long: that one also drives layout
+     transitions, so tuning the ripple through it would move the drawer and
+     the rail every time -- and this gets tuned by feel. See .md-ripple-span.
+
+     CURRENTLY DORMANT. Ripples are switched off at RIPPLE_ENABLED in md.tsx,
+     so changing this value has no visible effect until that is flipped back.
+     Kept here, and kept accurate, because the switch is meant to be reversible
+     -- and the first thing anyone re-enabling it will want to adjust is this
+     number. */
+  --md-ripple-duration: 320ms;
 
   /* --- elevation --------------------------------------------------------
      M3 elevation is a shadow PLUS a surface tint (primary blended into the
@@ -859,6 +870,28 @@ textarea:focus-visible {
     letter-spacing: 0.00714em;
   }
   .md-segmented > button + button { border-left: 1px solid var(--md-outline); }
+  /* The readout in a stepper: −  value  +.
+     Carries BOTH dividers itself, because `button + button` above cannot draw
+     one against a non-button sibling. No background at all -- a fill here is
+     what made the old version look like it was breaking out of the outline,
+     and a value has nothing to signal by being filled. */
+  .md-segmented > .md-segmented-value {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 2.75rem;
+    padding: 0 0.75rem;
+    border-left: 1px solid var(--md-outline);
+    border-right: 1px solid var(--md-outline);
+    color: var(--md-on-surface);
+    font-size: 0.875rem;
+    font-weight: 500;
+    letter-spacing: 0.00714em;
+    font-variant-numeric: tabular-nums;
+    /* The width no longer changes between 9 and 10, so the two buttons stop
+       shifting sideways as the value crosses a digit boundary. */
+    user-select: none;
+  }
   .md-segmented > button[data-active="true"] {
     background: var(--md-secondary-container);
     color: var(--md-on-secondary-container);
@@ -1189,26 +1222,53 @@ textarea:focus-visible {
    So the timing function is `linear` and the shape is expressed as explicit
    stops. Now duration means what it says, and the opacity is held high
    through the first half instead of fading in step with the expansion -- the
-   spread stays VISIBLE while it happens, which is the part that reads as
-   slow. */
+   spread stays VISIBLE for the whole time it is running.
+
+   That visibility is why the number that finally felt right is SHORTER than
+   the ones that felt too fast: once the expansion actually reads, 400ms of it
+   is plenty, where 450ms of front-loaded easing read as an instant snap. The
+   fix was never the duration. */
 @keyframes md-ripple {
   0% { transform: scale(0); opacity: 0.36; }
   40% { transform: scale(0.5); opacity: 0.32; }
   70% { transform: scale(0.78); opacity: 0.22; }
   100% { transform: scale(1); opacity: 0; }
 }
+/* The clip layer the ripple lives in, parked on <body> so it survives the
+   pressed element unmounting. `useRipple` copies the host's rect, radius and
+   colour onto it.
+
+   `fixed`, because the rect it is given is a viewport rect. It does not follow
+   scrolling, which is correct at this duration -- the layer is gone long
+   before a scroll could move it noticeably.
+
+   ABOVE EVERYTHING, deliberately. The app stacks at 30 (app bar, scrim), 40
+   (drawer) and 50 (dialog), and anything lower would hide the ripple behind
+   the very surface it was pressed on -- a drawer nav item at z-40 with its
+   ripple at z-20 shows nothing at all.
+
+   Painting on top is safe here rather than merely expedient: the layer is
+   always positioned exactly over the element that was just pressed, and an
+   element that can be pressed is by definition not covered. */
+.md-ripple-layer {
+  position: fixed;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 60;
+}
 .md-ripple-span {
   position: absolute;
   border-radius: 50%;
   background: currentColor;
   pointer-events: none;
-  /* Its OWN duration, not --md-dur-long.
+  /* THE ONLY PLACE A RIPPLE DURATION IS SET. Change --md-ripple-duration in
+     :root; nothing else should hardcode a number here.
 
-     That token also drives layout transitions, where 450ms is already at the
-     edge of feeling sluggish -- so slowing the ripple through it would have
-     slowed the drawer and the rail with it. The ripple is the one thing here
-     that reads better long: it is feedback for a press that has already
-     happened, so a slow spread is expressive rather than a delay. */
-  animation: md-ripple 1100ms linear forwards;
+     Worth stating because a ripple can LOOK slower or faster per screen
+     without any of this changing: the span is a child of the pressed element,
+     so if that element unmounts the animation is cut off wherever it had got
+     to. A row that navigates away is the case where that shows -- see
+     `useRipple`. */
+  animation: md-ripple var(--md-ripple-duration) linear forwards;
   z-index: 0;
 }

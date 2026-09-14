@@ -106,6 +106,24 @@ function Conversation({ id }: { id: string }) {
   >([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * The composer, so focus can be put back after a turn.
+   *
+   * It is `disabled` while a turn runs, and a disabled element cannot hold
+   * focus -- the browser drops it the moment the attribute is set. So every
+   * question cost a click to get back into the box, which is the opposite of
+   * how a chat should feel.
+   */
+  const composer = useRef<HTMLTextAreaElement | null>(null);
+  /**
+   * Whether a turn was running on the previous render.
+   *
+   * Without it the effect below cannot tell "a turn just finished" from "this
+   * page mounted", since both see `busy === false`. Focusing on mount would
+   * steal focus on every navigation into a chat and yank the viewport down to
+   * the composer.
+   */
+  const wasBusy = useRef(false);
   const [railOpen, setRailOpen] = useState(false);
   // Starts at the defaults, then the saved values arrive in an effect below.
   //
@@ -287,6 +305,28 @@ function Conversation({ id }: { id: string }) {
       setActivity([]);
     }
   }
+
+  // Put the caret back in the composer once a turn finishes.
+  useEffect(() => {
+    if (busy) {
+      wasBusy.current = true;
+      return;
+    }
+    if (!wasBusy.current) return; // a mount, not a completion
+    wasBusy.current = false;
+
+    // Not while a clarifying question is open: focus belongs to its options,
+    // and the composer is still disabled anyway.
+    if (pendingClarify) return;
+
+    // Pointer-based devices only. On a touch device, focusing a text field
+    // throws the on-screen keyboard up over half the screen -- so the answer
+    // that just arrived would be hidden by the act of being ready for the next
+    // question.
+    if (!window.matchMedia("(pointer: fine)").matches) return;
+
+    composer.current?.focus();
+  }, [busy, pendingClarify]);
 
   /** Answer the clarifying question: narrow the search, skip, or cancel. */
   async function answerClarify(decision: ClarifyDecision) {
@@ -511,6 +551,7 @@ function Conversation({ id }: { id: string }) {
         >
           <div className="flex items-end gap-3">
             <TextArea
+              ref={composer}
               label={
                 pendingClarify
                   ? "Answer the question above to continue"

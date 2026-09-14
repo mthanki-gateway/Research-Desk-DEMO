@@ -22,17 +22,63 @@ import {
    =========================================================================== */
 
 /**
+ * THE RIPPLE KILL SWITCH. Flip to `true` to bring press ripples back.
+ *
+ * OFF because no duration read right across the whole app: fast enough to suit
+ * the buttons made it a flicker on the wide list rows, and slow enough to suit
+ * the rows made every button feel laggy.
+ *
+ * A single flag rather than deleting the code or setting the duration to 0ms.
+ * Zero duration would still measure the host, build a clip layer and append it
+ * to <body> on every press -- paying the whole cost to render nothing -- and
+ * deleting it would throw away the part that was genuinely hard: the layer
+ * that survives an unmounting row while still clipping to the host's shape.
+ * See `useRipple`.
+ *
+ * Nothing else changes when this is off. The state layer in globals.css still
+ * provides hover, focus and press tinting, so every control keeps its press
+ * feedback; it simply does not expand a circle.
+ */
+const RIPPLE_ENABLED = false;
+
+/**
  * Attaches an M3 press ripple to a host element.
  *
  * The state layer in CSS covers hover/focus/press tinting; this covers the
  * expanding circle. It measures the host, spawns a span at the pointer, and
  * removes it on animation end. Respects prefers-reduced-motion via the global
  * transition kill-switch, which reduces the animation to ~0ms.
+ *
+ * DURATION IS NOT SET HERE. It is `--md-ripple-duration`, one token for the
+ * whole app, and cleanup hangs off `animationend` so it follows whatever that
+ * token says without this file knowing the number.
+ *
+ * WHY THE RIPPLE IS NOT A CHILD OF THE ELEMENT IT BELONGS TO
+ *
+ * As a child it died when that element unmounted, so the animation was not
+ * shortened but CUT OFF wherever it had reached. Rows that navigate showed it
+ * plainly: a session row in the drawer lives in the persistent shell and ran
+ * full length, while the identical row on the chat LIST page unmounted with
+ * the page and stopped part way -- same component, same duration, different
+ * lifetime, and it read as "the chat list ripple is much faster".
+ *
+ * So the span goes into a clip layer on `document.body` instead, which
+ * outlives any unmount. The layer exists because the host was silently doing
+ * three jobs for the ripple, and all three have to be reproduced or something
+ * breaks: its RECT (position), its BORDER-RADIUS (or circles spill out of
+ * every pill and FAB), and its `color` (which `currentColor` on the span
+ * reads -- miss it and the ripple on a filled button turns dark instead of
+ * white).
  */
 export function useRipple<T extends HTMLElement>() {
   const host = useRef<T | null>(null);
 
   const spawn = useCallback((e: React.PointerEvent<T>) => {
+    // Before any measuring: the cheapest place to opt out is ahead of the
+    // getBoundingClientRect and getComputedStyle below, both of which force
+    // layout on every press.
+    if (!RIPPLE_ENABLED) return;
+
     const el = host.current;
     if (!el) return;
 
@@ -43,13 +89,43 @@ export function useRipple<T extends HTMLElement>() {
     const dy = Math.max(e.clientY - rect.top, rect.bottom - e.clientY);
     const radius = Math.hypot(dx, dy);
 
+    // A CLIP LAYER ON <body>, NOT A CHILD OF THE HOST.
+    //
+    // As a child it died with the host, so any row that navigates had its
+    // ripple cut off mid-animation -- visibly "faster" on the chat list, while
+    // the identical row in the drawer (which survives the navigation) ran full
+    // length. Same component, same duration, different lifetime.
+    //
+    // The reason this was not simply portalled before is clipping: the ripple
+    // is kept inside the host's rounded shape by living inside it, and a bare
+    // circle on <body> would spill outside every button and pill. So the layer
+    // reproduces the only three things the host was providing -- its rect, its
+    // border-radius, and its `color`, which `currentColor` on the span reads.
+    // Miss the colour and a ripple on the filled "New chat" button turns dark
+    // instead of white.
+    const style = getComputedStyle(el);
+    const layer = document.createElement("span");
+    layer.className = "md-ripple-layer";
+    layer.style.left = `${rect.left}px`;
+    layer.style.top = `${rect.top}px`;
+    layer.style.width = `${rect.width}px`;
+    layer.style.height = `${rect.height}px`;
+    layer.style.borderRadius = style.borderRadius;
+    layer.style.color = style.color;
+
     const span = document.createElement("span");
     span.className = "md-ripple-span";
     span.style.width = span.style.height = `${radius * 2}px`;
+    // Relative to the LAYER, which is positioned at the host's rect -- so
+    // these stay the same numbers as when the span was a child of the host.
     span.style.left = `${e.clientX - rect.left - radius}px`;
     span.style.top = `${e.clientY - rect.top - radius}px`;
-    span.addEventListener("animationend", () => span.remove(), { once: true });
-    el.appendChild(span);
+    // Removes the layer, not the span: the span is inside it, and leaving
+    // empty layers on <body> would leak one element per press.
+    span.addEventListener("animationend", () => layer.remove(), { once: true });
+
+    layer.appendChild(span);
+    document.body.appendChild(layer);
   }, []);
 
   return { ref: host, onPointerDown: spawn };

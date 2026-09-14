@@ -454,14 +454,24 @@ function Controls({
               >
                 &minus;
               </Ripplable>
-              <button
-                type="button"
-                data-active="true"
-                className="tabular-nums"
-                style={{ pointerEvents: "none", minWidth: "2.5rem" }}
+              {/* A VALUE, not a selected segment.
+                  It was a `<button data-active="true">` with pointer events
+                  switched off, which gave it the filled "this segment is
+                  chosen" treatment -- a solid block running the full 40px
+                  height, so it met the pill's 1px outline from the inside and
+                  read as spilling over it. Nothing here is chosen; it is the
+                  number the two buttons change.
+
+                  Being a real button also meant it was still focusable and
+                  announced as one, so tabbing through the stepper stopped on
+                  a control that could not be activated. */}
+              <span
+                className="md-segmented-value"
+                aria-live="polite"
+                aria-label={`${settings.topK} passages per query`}
               >
                 {settings.topK}
-              </button>
+              </span>
               <Ripplable
                 as="button"
                 onClick={() =>
