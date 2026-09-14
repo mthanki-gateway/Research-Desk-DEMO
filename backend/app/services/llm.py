@@ -520,6 +520,27 @@ def strip_degeneration(text: str) -> str:
     return cut if len(cut) >= 20 else ""
 
 
+def _unescape_newlines(value: str) -> str:
+    r"""Turn literal ``\n`` into real newlines -- but only when there are none.
+
+    A model asked to put line breaks in a JSON string field sometimes escapes
+    the BACKSLASH instead of the newline, emitting ``"\\n"`` in the JSON. That
+    decodes to the two visible characters ``\`` and ``n``, which reach the user
+    as "records [5] .\n\nRegarding the technical operations..." -- measured,
+    from a real turn.
+
+    THE GUARD IS THE WHOLE DESIGN. Only text containing no real newline at all
+    is touched. A model that produced genuine line breaks was clearly capable
+    of it, so a backslash-n still sitting in that text is deliberate content --
+    a regex in a code block, a Windows path, an explanation of escaping itself
+    -- and rewriting it would corrupt the answer. Text with zero real breaks
+    and several literal ones can only be the failure above.
+    """
+    if "\n" in value or "\\n" not in value:
+        return value
+    return value.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
+
+
 def extract_string(raw: str, key: str) -> str:
     """Pull a possibly-truncated string value out of JSON.
 
@@ -535,7 +556,7 @@ def extract_string(raw: str, key: str) -> str:
     try:
         data = json.loads(raw)
         if isinstance(data, dict) and isinstance(data.get(key), str):
-            return strip_degeneration(data[key].strip())
+            return strip_degeneration(_unescape_newlines(data[key]).strip())
     except json.JSONDecodeError:
         pass
 
@@ -555,7 +576,7 @@ def extract_string(raw: str, key: str) -> str:
         value = json.loads(f'"{value}"')
     except json.JSONDecodeError:
         value = value.replace('\\"', '"').replace("\\n", "\n").replace("\\\\", "\\")
-    return strip_degeneration(value.strip())
+    return strip_degeneration(_unescape_newlines(value).strip())
 
 
 def extract_object_list(raw: str, key: str) -> list[dict]:

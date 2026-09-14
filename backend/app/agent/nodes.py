@@ -550,27 +550,129 @@ async def retrieve_node(state: ResearchState) -> dict:
 # 3. draft
 # --------------------------------------------------------------------------
 
+# The rules for text the USER READS: what to report, and how to shape it.
+#
+# They lived only in DRAFT_SYSTEM, and `resolve` -- which produces the final
+# answer whenever the critique loop exhausts its budget -- had none of them.
+# So the turns most likely to be long and hard to read were exactly the ones
+# rendered as a single unbroken block, and the formatting work looked like it
+# had silently stopped applying. Measured on "tell me all about pyramids":
+# two critique cycles, `iteration_cap_reached`, then `resolve` wrote the
+# answer with zero line breaks in it.
+#
+# One constant appended to both, rather than the text copied into each: a
+# rule improved in one place and not the other is how they drifted apart the
+# first time.
+ANSWER_RULES = """SAY WHAT YOU DID, FIRST
+
+Open with ONE short sentence reporting the work, then a blank line, then the \
+answer. The reader cannot see the retrieval, so without this they cannot tell \
+a thin answer from a thin corpus -- "I don't know" reads identically whether \
+nothing was searched or everything was.
+
+Report only what the "Search coverage" line and the source list actually show, \
+naming both halves when both were used:
+
+    I searched your documents and the web.
+
+    I searched your documents; the web was not available for this answer.
+
+    I searched your documents and found nothing on this, so the answer below \
+is from the web.
+
+If a memory update is reported to you below, SAY SO in that same opening -- \
+plainly, and quoting what was stored:
+
+    I've remembered that you always want a table when comparing numbers, and \
+searched your documents and the web.
+
+Never claim a search you were not told about, never pad this into a paragraph, \
+and never repeat it at the end.
+
+FORMAT IT SO IT CAN BE READ
+
+Write markdown, and structure it. A correct answer delivered as one unbroken \
+block is a worse answer -- nobody reads it, and the parts they wanted are \
+buried.
+
+Use REAL line breaks -- an actual blank line between paragraphs, each list \
+item on its own actual line. Never type the characters backslash-n; they \
+appear on screen exactly as written and the answer reads "records [5] \
+.\\n\\nRegarding the operations...". Structure that is not on separate lines \
+does not survive either: "intro: - first - second" on one line is the other \
+half of this same failure.
+
+- PARAGRAPHS FIRST. This matters more than everything below it combined. One \
+idea per paragraph, separated by a blank line, and never more than about five \
+sentences before a break. Prose broken into paragraphs is the DEFAULT shape of \
+an answer; lists, tables and headings are exceptions you reach for when the \
+content genuinely has that shape.
+- ONE PARAGRAPH PER PART OF THE QUESTION. If the user asked two things, answer \
+the first, break, then answer the second -- in the order they asked. Do not \
+weave the parts together into one paragraph, and do not answer them in one \
+paragraph just because both answers are short. A question with three parts \
+gets at least three paragraphs.
+- A LIST when you are enumerating. If you catch yourself writing "(1) ... (2) \
+... (3)" inside a sentence, those are list items -- put each on its own line \
+starting with "- " or "1. ". Do not inline them. But do not reach for a list \
+where two sentences would do: a list of three fragments is harder to read \
+than the paragraph it replaced.
+- A TABLE when you are comparing things across the same dimensions -- figures \
+by period, options against criteria, documents against what each covers. Use \
+markdown pipes:
+
+    | Metric | 2023 | 2024 |
+    | --- | --- | --- |
+    | Gross margin | 58.7% [1] | 62.1% [1] |
+
+- A `### heading` only when the answer covers genuinely separate topics. Two \
+paragraphs do not need headings.
+- **Bold** for a figure or term the reader is looking for. Sparingly; bolding \
+everything is the same as bolding nothing.
+
+Citations go INSIDE the structure -- at the end of the sentence, the list item, \
+or the table cell they support. A list of citations at the end tells the reader \
+nothing about which claim came from where.
+
+Be concise: structure is not permission to write more. Prefer a short answer \
+with three clear paragraphs over a long one with three headings.
+
+When in doubt, use a paragraph break."""
+
+
 DRAFT_SCHEMA = {
     "type": "object",
     "properties": {
         "answer": {
             "type": "string",
-            # The newline sentence is load-bearing, not decoration.
+            # ASK FOR LINE BREAKS, NEVER FOR THE ESCAPE THAT ENCODES THEM.
             #
-            # Under a JSON schema the model writes the answer as a STRING
-            # LITERAL, and a literal newline is not legal there -- so a model
-            # that has not been told to escape them simply stops emitting them,
-            # and every structural instruction in DRAFT_SYSTEM silently
-            # evaporates. Measured: answers arrived reading "...pain points:
-            # - Customer concentration... - Hardware supply chain..." -- the
-            # list markers the prompt asked for, with zero \n in the whole
-            # field, so the renderer had nothing to split on and showed one
-            # wall of text. The prompt was right; the envelope ate it.
+            # Both failures here were measured, and they are opposite:
+            #
+            #   silent   Told nothing, the model emitted NO line breaks at all
+            #            -- a literal newline is illegal inside a JSON string
+            #            literal, so every structural instruction in
+            #            DRAFT_SYSTEM evaporated at the envelope and answers
+            #            arrived as "...pain points: - Customer concentration
+            #            ... - Hardware supply chain...", markers intact and
+            #            not one \n in the field.
+            #
+            #   literal  Told to "write the two-character escape \n", it
+            #            escaped the BACKSLASH -- emitting "\\n" in the JSON,
+            #            which decodes to the two visible characters \ and n.
+            #            The user read "records [5] .\n\nRegarding the
+            #            technical operations..." on screen.
+            #
+            # Encoding is the serialiser's job and it does it correctly. Ask
+            # only for the intent -- blank lines between paragraphs -- and let
+            # the JSON layer represent them. `_unescape_newlines` in llm.py is
+            # the net under the second failure.
             "description": (
-                "The answer in MARKDOWN, with [n] citations inline. This is a "
-                "JSON string, so every line break MUST be written as the "
-                "two-character escape \\n -- a paragraph break is \\n\\n. An "
-                "answer containing no \\n at all is wrong."
+                "The answer in MARKDOWN, with [n] citations inline. Use real "
+                "line breaks: a blank line between paragraphs, and each list "
+                "item on its own line. Do not write the characters backslash-n "
+                "-- press a real newline and let the encoding handle it. An "
+                "answer that is one unbroken block is wrong."
             ),
         },
         "sources_used": {"type": "array", "items": {"type": "integer"}},
@@ -583,7 +685,8 @@ DRAFT_SCHEMA = {
     "required": ["answer", "sources_used"],
 }
 
-DRAFT_SYSTEM = """You are a research assistant. You answer from the numbered \
+DRAFT_SYSTEM = (
+    """You are a research assistant. You answer from the numbered \
 sources provided, and you are helpful about what they do and do not contain.
 
 Each source is marked with its KIND:
@@ -625,80 +728,11 @@ the Postgres documentation [3]"); for their own files, the file or section \
 their own material and which on a public page, without opening anything.
 - Never blur the two. Do not let a web figure stand as if it came from their \
 documents, and do not present their internal numbers as public knowledge.
-
-SAY WHAT YOU DID, FIRST
-
-Open with ONE short sentence reporting the work, then a blank line, then the \
-answer. The reader cannot see the retrieval, so without this they cannot tell \
-a thin answer from a thin corpus -- "I don't know" reads identically whether \
-nothing was searched or everything was.
-
-Report only what the "Search coverage" line and the source list actually show, \
-naming both halves when both were used:
-
-    I searched your documents and the web.
-
-    I searched your documents; the web was not available for this answer.
-
-    I searched your documents and found nothing on this, so the answer below \
-is from the web.
-
-If a memory update is reported to you below, SAY SO in that same opening -- \
-plainly, and quoting what was stored:
-
-    I've remembered that you always want a table when comparing numbers, and \
-searched your documents and the web.
-
-Never claim a search you were not told about, never pad this into a paragraph, \
-and never repeat it at the end.
-
-FORMAT IT SO IT CAN BE READ
-
-Write markdown, and structure it. A correct answer delivered as one unbroken \
-block is a worse answer -- nobody reads it, and the parts they wanted are \
-buried.
-
-You reply as JSON, so the answer is a string literal: write every line break \
-as the escape \\n, and a paragraph break as \\n\\n. Structure that is not \
-separated by \\n does not survive -- "intro: - first - second" on one line is \
-the failure this is warning you about.
-
-- PARAGRAPHS FIRST. This matters more than everything below it combined. One \
-idea per paragraph, separated by a blank line, and never more than about five \
-sentences before a break. Prose broken into paragraphs is the DEFAULT shape of \
-an answer; lists, tables and headings are exceptions you reach for when the \
-content genuinely has that shape.
-- ONE PARAGRAPH PER PART OF THE QUESTION. If the user asked two things, answer \
-the first, break, then answer the second -- in the order they asked. Do not \
-weave the parts together into one paragraph, and do not answer them in one \
-paragraph just because both answers are short. A question with three parts \
-gets at least three paragraphs.
-- A LIST when you are enumerating. If you catch yourself writing "(1) ... (2) \
-... (3)" inside a sentence, those are list items -- put each on its own line \
-starting with "- " or "1. ". Do not inline them. But do not reach for a list \
-where two sentences would do: a list of three fragments is harder to read \
-than the paragraph it replaced.
-- A TABLE when you are comparing things across the same dimensions -- figures \
-by period, options against criteria, documents against what each covers. Use \
-markdown pipes:
-
-    | Metric | 2023 | 2024 |
-    | --- | --- | --- |
-    | Gross margin | 58.7% [1] | 62.1% [1] |
-
-- A `### heading` only when the answer covers genuinely separate topics. Two \
-paragraphs do not need headings.
-- **Bold** for a figure or term the reader is looking for. Sparingly; bolding \
-everything is the same as bolding nothing.
-
-Citations go INSIDE the structure -- at the end of the sentence, the list item, \
-or the table cell they support. A list of citations at the end tells the reader \
-nothing about which claim came from where.
-
-Be concise: structure is not permission to write more. Prefer a short answer \
-with three clear paragraphs over a long one with three headings.
-
-When in doubt, use a paragraph break."""
+"""
+    # Appended rather than inlined, so `resolve` gets the identical block.
+    + "\n\n"
+    + ANSWER_RULES
+)
 
 
 # "[1]", "[2, 3]", "[1][4]" -- the shapes the drafter actually produces. The
@@ -721,6 +755,47 @@ def _cited_in_text(answer: str, n_sources: int) -> list[int]:
             if 1 <= n <= n_sources and n not in out:
                 out.append(n)
     return out
+
+
+def _memory_block(state: ResearchState) -> str:
+    """What was stored this turn, for whichever node writes the answer.
+
+    SHARED BY `draft` AND `resolve`, and that sharing is the point. It lived
+    only in `draft`, so a turn that stored an instruction and then exhausted
+    the critique loop had its answer written by `resolve` -- which knew nothing
+    about the memory and never mentioned it. Measured: "tell me all about
+    pyramids ... and update my preference to be more stoic" stored the
+    preference and answered without a word about it, which from the outside is
+    indistinguishable from having ignored the request.
+
+    Reports BOTH outcomes, and keeps them apart. An instruction that was
+    already in force is skipped rather than stored, and saying nothing about it
+    is how a restatement comes back looking ignored -- which is precisely what
+    makes someone state it a third time. But it must not be reported as newly
+    saved either, or the assistant claims to have done something it explicitly
+    declined to do.
+
+    Empty string when neither happened, so the prompt gains no line at all on
+    the overwhelming majority of turns -- a "nothing was remembered" note is
+    itself something the model reasons about, and small models apologise for
+    it.
+    """
+    saved = state.get("memory_saved") or []
+    known = state.get("memory_known") or []
+    if not saved and not known:
+        return ""
+
+    parts = ["Memory, this turn -- report this in your opening sentence:"]
+    if saved:
+        listed = "\n".join(f"- {s}" for s in saved)
+        parts.append(f"STORED, now in force. Quote it back:\n{listed}")
+    if known:
+        listed = "\n".join(f"- {s}" for s in known)
+        parts.append(
+            "ALREADY IN FORCE, so nothing was added. Say it was already "
+            f"remembered -- do NOT say you saved it:\n{listed}"
+        )
+    return "\n\n".join(parts) + "\n\n"
 
 
 async def draft(state: ResearchState) -> dict:
@@ -768,22 +843,6 @@ async def draft(state: ResearchState) -> dict:
         "AND that web search is not enabled -- do not imply the "
         "information does not exist."
     )
-    # What was stored this turn, so the answer can say so.
-    #
-    # Only the BOTH path needs this. A remember-only turn never reaches `draft`
-    # -- `route` writes its own confirmation and ends -- but a turn that stored
-    # an instruction AND asked something came out as a bare answer with no
-    # acknowledgement, so the user could not tell the instruction had landed.
-    # Telling them to check the profile page is not the same as confirming it.
-    saved = state.get("memory_saved") or []
-    memory_block = ""
-    if saved:
-        listed = "\n".join(f"- {s}" for s in saved)
-        memory_block = (
-            "Memory updated this turn -- you stored the following, and must "
-            f"say so in your opening sentence:\n{listed}\n\n"
-        )
-
     # A REGENERATION carries the critic's objection, and nothing else changes.
     #
     # This is the remedy for `unsupported_claim`: the passages were right and
@@ -807,7 +866,7 @@ async def draft(state: ResearchState) -> dict:
         f"{history_block}"
         f"Sources:\n{build_context(evidence)}\n\n"
         f"Search coverage: {reach}\n\n"
-        f"{memory_block}"
+        f"{_memory_block(state)}"
         f"{redo_block}"
         f"Question: {state['question']}\n\n"
         "Answer from the sources above, per your instructions."
@@ -945,7 +1004,8 @@ async def draft(state: ResearchState) -> dict:
 # with its limits named.
 # --------------------------------------------------------------------------
 
-RESOLVE_SYSTEM = """You are finishing an answer that could not be completed.
+RESOLVE_SYSTEM = (
+    """You are finishing an answer that could not be completed.
 
 You are given a draft, the sources behind it, and what a reviewer said was \
 missing or unsupported.
@@ -959,11 +1019,32 @@ answered and why -- "your documents do not give X".
 Never apologise at length, never refuse outright when some of the question was \
 answerable, and never invent a fact to fill the gap. A partial answer with its \
 limits named is far more useful than a refusal."""
+    # THE SAME RULES THE DRAFTER GETS.
+    #
+    # This node writes the final answer whenever the critique loop runs out of
+    # budget, and it had no formatting guidance at all -- so the longest,
+    # most-worked turns were exactly the ones that arrived as a single
+    # unbroken block, and every fix to DRAFT_SYSTEM looked like it had
+    # silently stopped applying.
+    + "\n\n"
+    + ANSWER_RULES
+)
 
 RESOLVE_SCHEMA = {
     "type": "object",
     "properties": {
-        "answer": {"type": "string", "description": "The answer, [n] citations kept."},
+        "answer": {
+            "type": "string",
+            # Same wording as DRAFT_SCHEMA's, and for the same reason: the
+            # field description is where the model learns this is markdown
+            # that may contain line breaks. Without it the schema quietly
+            # implies a single-line string.
+            "description": (
+                "The answer in MARKDOWN, [n] citations kept. Use real line "
+                "breaks: a blank line between paragraphs, each list item on "
+                "its own line. Do not write the characters backslash-n."
+            ),
+        },
         "sources_used": {"type": "array", "items": {"type": "integer"}},
     },
     "required": ["answer"],
@@ -1002,6 +1083,12 @@ async def resolve(state: ResearchState) -> dict:
         f"Draft answer:\n{draft_text}\n\n"
         f"Reviewer says these are unsupported:\n{flagged}\n\n"
         f"Reviewer says these are missing:\n{gaps}\n\n"
+        # This node replaces the draft wholesale, so anything the draft was
+        # told to mention has to be repeated here or it is simply dropped. The
+        # memory confirmation was exactly that: stored, mentioned by `draft`,
+        # then written out of existence by a `resolve` that had never heard of
+        # it.
+        f"{_memory_block(state)}"
         "Write the most useful honest answer available."
     )
 

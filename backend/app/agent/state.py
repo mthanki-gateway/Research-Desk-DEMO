@@ -113,6 +113,15 @@ class ResearchState(TypedDict, total=False):
     # Preferences saved BY this turn, so the UI can say memory changed rather
     # than leaving the user to infer it from the prose.
     memory_saved: list[str]
+    # Instructions the user restated this turn that were ALREADY in force.
+    #
+    # Separate from `memory_saved` because the answer must say something
+    # different about each. Merging them would have the assistant claim to have
+    # stored something it deliberately skipped; dropping them entirely -- which
+    # is what happened before -- means restating an instruction gets no
+    # acknowledgement at all, and silence is exactly what makes someone restate
+    # it a third time.
+    memory_known: list[str]
     # The conversation, so a preference can be scoped to it rather than to the
     # user. Carried in state because nodes are pure functions of state.
     session_id: str | None

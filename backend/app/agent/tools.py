@@ -33,6 +33,7 @@ tool and be citable. See DRAFT_SYSTEM in nodes.py.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Any
 
@@ -218,6 +219,7 @@ async def run_tool(
     owner_id: str | None,
     session_id: uuid.UUID | None = None,
     remembered: list[str] | None = None,
+    already_known: list[str] | None = None,
 ) -> tuple[list[SearchHit], str]:
     """Execute one tool call. Returns (hits, text_for_the_model).
 
@@ -234,7 +236,11 @@ async def run_tool(
     # parameter was empty".
     if name == REMEMBER_PREFERENCE:
         return [], await _remember(
-            args, owner_id=owner_id, session_id=session_id, remembered=remembered
+            args,
+            owner_id=owner_id,
+            session_id=session_id,
+            remembered=remembered,
+            already_known=already_known,
         )
 
     query = str(args.get("query", "")).strip()
@@ -291,12 +297,17 @@ async def run_tool(
         return [], f"The {name} tool failed: {type(exc).__name__}. Try again or rephrase."
 
 
+# Serialises the check-then-write below. See `_remember`.
+_REMEMBER_LOCK = asyncio.Lock()
+
+
 async def _remember(
     args: dict[str, Any],
     *,
     owner_id: str | None,
     session_id: uuid.UUID | None,
     remembered: list[str] | None,
+    already_known: list[str] | None = None,
 ) -> str:
     """Store a standing instruction, and tell the model what happened.
 
@@ -308,6 +319,19 @@ async def _remember(
     Appends to `remembered` so the caller knows what was stored this turn
     without re-reading the database -- the answer has to confirm it, and a
     second query could race with a concurrent turn.
+
+    SERIALISED, because the deduplication is a check-then-write and `react`
+    dispatches a round's tool calls through `asyncio.gather`. Two paraphrases
+    of one instruction requested in the SAME round both read the table before
+    either wrote, so both passed the "already covered?" test and both were
+    stored -- measured: "Always keep answers short." and "Please be brief in
+    your replies." landed as two rows. The lock makes the second call read the
+    first one's write.
+
+    It is per-process, not a database lock, and that is the right size for
+    this: the race is between two calls in one `gather`, and the lexical guard
+    inside `remember` still catches the rarer cross-process case of one user
+    running two turns at once.
     """
     text = " ".join(str(args.get("instruction", "")).split())
     if not text:
@@ -318,24 +342,42 @@ async def _remember(
         scope = "user"
 
     try:
-        stored = await preferences.preferences_in_force(
-            owner_id=owner_id, session_id=session_id
-        )
-        if await preferences.already_covered(text, [p.text for p in stored]):
-            log.info("preference_already_covered", text=text[:60])
-            return (
-                f"Already covered by a stored instruction, so nothing was "
-                f"added: {text!r}. Tell the user it is already remembered "
-                "rather than claiming you saved it."
+        async with _REMEMBER_LOCK:
+            stored = await preferences.preferences_in_force(
+                owner_id=owner_id, session_id=session_id
             )
+            # `remembered` is included alongside the stored rows -- belt and
+            # braces. The lock already makes the second caller see the first
+            # one's committed write, but this also covers the case where the
+            # first write was skipped as a duplicate of something a THIRD call
+            # stored, and it costs one list concatenation.
+            known = [p.text for p in stored] + list(remembered or [])
+            if await preferences.already_covered(text, known):
+                log.info("preference_already_covered", text=text[:60])
+                # Recorded, not merely logged. "Already in force" is a real
+                # outcome the user needs told -- restating an instruction and
+                # getting no acknowledgement reads as not having been heard,
+                # which is the exact thing that makes people restate it again.
+                if already_known is not None:
+                    already_known.append(text)
+                return (
+                    f"Already covered by a stored instruction, so nothing was "
+                    f"added: {text!r}. Tell the user it is already remembered "
+                    "rather than claiming you saved it."
+                )
 
-        pref = await preferences.remember(
-            text,
-            owner_id=owner_id,
-            session_id=session_id,
-            scope=scope,
-            source_message=None,
-        )
+            pref = await preferences.remember(
+                text,
+                owner_id=owner_id,
+                session_id=session_id,
+                scope=scope,
+                source_message=None,
+            )
+            # INSIDE the lock: the next caller's `known` list has to include
+            # this, and appending after releasing would reopen the same race
+            # one level up.
+            if pref is not None and remembered is not None:
+                remembered.append(text)
     except Exception as exc:  # noqa: BLE001 - a tool failure must not end the loop
         log.warning("remember_tool_failed", error=str(exc))
         return f"Could not store the instruction: {type(exc).__name__}."
@@ -346,8 +388,6 @@ async def _remember(
             "already in force rather than claiming you saved it."
         )
 
-    if remembered is not None:
-        remembered.append(text)
     where = "this conversation" if scope == "session" else "every conversation"
     return f"Stored for {where}: {text!r}. Confirm this to the user."
 

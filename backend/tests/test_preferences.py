@@ -6,8 +6,11 @@ several rows -- each taking a slot in the prompt and making the instruction look
 more emphatic than it is.
 """
 
+import asyncio
+
 import pytest
 
+from app.agent import tools
 from app.services import preferences as prefs_mod
 from app.services.llm import LLMError
 from app.services.preferences import (
@@ -167,3 +170,56 @@ class TestAlreadyCovered:
 
         monkeypatch.setattr(prefs_mod, "get_llm", lambda: _Failing())
         assert await already_covered("Be brief", ["Keep it short"]) is False
+
+
+class TestConcurrentSaves:
+    """Two remember calls in ONE round of tool calls.
+
+    `react` dispatches a round through `asyncio.gather`, so deduplication --
+    which is a check-then-write -- had both callers read the table before
+    either wrote. Both passed "already covered?" and both were stored.
+    Measured: "Always keep answers short." and "Please be brief in your
+    replies." landed as two rows for one instruction.
+    """
+
+    async def test_the_check_and_write_are_serialised(self, monkeypatch):
+        """The second caller must not start until the first has written.
+
+        Asserted on ORDERING rather than on row count, so it needs no database
+        and cannot pass for the wrong reason: interleaved entry is exactly the
+        condition that produced the duplicate.
+        """
+        events: list[str] = []
+
+        async def fake_in_force(**_kw):
+            events.append("read")
+            # Yields control. Without the lock this is where the second caller
+            # ran, read the same empty table, and duplicated the write.
+            await asyncio.sleep(0)
+            return []
+
+        async def fake_covered(_text, _existing):
+            return False
+
+        async def fake_remember(text, **_kw):
+            events.append("write")
+            return object()
+
+        monkeypatch.setattr(prefs_mod, "preferences_in_force", fake_in_force)
+        monkeypatch.setattr(prefs_mod, "already_covered", fake_covered)
+        monkeypatch.setattr(prefs_mod, "remember", fake_remember)
+
+        await asyncio.gather(*(
+            tools.run_tool(
+                "remember_preference",
+                {"instruction": text},
+                top_k=5,
+                document_ids=None,
+                owner_id="t",
+                session_id=None,
+                remembered=[],
+            )
+            for text in ("Be brief.", "Keep it short.")
+        ))
+
+        assert events == ["read", "write", "read", "write"], events

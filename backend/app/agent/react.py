@@ -138,6 +138,12 @@ async def react(state: ResearchState) -> dict:
     # parsed back out of the observations, because the answer has to confirm
     # what was stored and re-reading the table could race with another turn.
     remembered: list[str] = []
+    # Instructions the user restated that were ALREADY in force. Tracked
+    # separately from `remembered` because the answer has to say something
+    # different about each -- "saved" and "you already had this" are not
+    # the same message, and merging them would have the assistant claim to
+    # have stored something it deliberately did not.
+    already_known: list[str] = []
     # The reply the model wrote when it decided nothing needed looking up.
     direct: str = ""
     # Whether any SEARCH ran, which is not the same as whether evidence exists.
@@ -208,6 +214,7 @@ async def react(state: ResearchState) -> dict:
                     owner_id=owner_id,
                     session_id=session_id,
                     remembered=remembered,
+                    already_known=already_known,
                 )
                 for call in calls
             )
@@ -282,8 +289,14 @@ async def react(state: ResearchState) -> dict:
             "sufficient": True,
             "answered_directly": True,
             "memory_saved": remembered,
+            "memory_known": already_known,
             "trace": [
-                {"node": "react", "direct": True, "remembered": remembered}
+                {
+                    "node": "react",
+                    "direct": True,
+                    "remembered": remembered,
+                    "already_known": already_known,
+                }
             ],
         }
 
@@ -301,5 +314,6 @@ async def react(state: ResearchState) -> dict:
         "iterations": 0,
         # Carried so `draft` can confirm what was stored in its opening line.
         "memory_saved": remembered,
+        "memory_known": already_known,
         "trace": [{"node": "react", "rounds": trace, "n_web": n_web}],
     }

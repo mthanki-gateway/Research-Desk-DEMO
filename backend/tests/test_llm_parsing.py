@@ -8,9 +8,12 @@ The literal string in `DEGENERATED` below is from a real turn, and it reached
 the user as `model returned invalid JSON`. Every test here exists because of it.
 """
 
+import json
+
 import pytest
 
 from app.services.llm import (
+    _unescape_newlines,
     extract_bool,
     extract_int_list,
     extract_object_list,
@@ -242,3 +245,44 @@ class TestLongRunBeyondTheScanWindow:
     def test_is_repetitive_catches_what_survives(self):
         """Second line of defence: cutting is not judging."""
         assert is_repetitive("the-the " * 50) is True
+
+
+class TestLiteralNewlineRecovery:
+    r"""A model escaping the BACKSLASH instead of the newline.
+
+    Asked to put line breaks in a JSON string field, the drafter emitted
+    ``"\\n"`` -- which decodes to the two visible characters ``\`` and ``n``,
+    so the answer reached the user reading "records [5] .\n\nRegarding the
+    technical operations...".
+
+    Telling it to "write the escape \n" is what CAUSED this: encoding is the
+    serialiser's job, so the prompt now asks only for real line breaks. These
+    pin the net underneath.
+    """
+
+    # Built from chr(92) rather than written as an escape, so nothing between
+    # here and the assertion can quietly turn it into a real newline -- which
+    # would make this test pass while testing the opposite case.
+    LITERAL = chr(92) + "n"
+
+    def test_literal_escapes_become_real_breaks(self):
+        broken = f"records [5] .{self.LITERAL}{self.LITERAL}Regarding the operations"
+        out = _unescape_newlines(broken)
+        assert out.count(chr(10)) == 2
+        assert self.LITERAL not in out
+
+    def test_text_with_real_breaks_is_left_alone(self):
+        """THE GUARD. A model that produced genuine line breaks was capable of
+        it, so a literal escape still sitting in that text is deliberate
+        content -- a regex, a Windows path, an explanation of escaping -- and
+        rewriting it would corrupt the answer."""
+        mixed = f"Real break here:{chr(10)}use {self.LITERAL} to split lines."
+        assert _unescape_newlines(mixed) == mixed
+
+    def test_text_with_neither_is_unchanged(self):
+        assert _unescape_newlines("no breaks at all") == "no breaks at all"
+
+    def test_extract_string_recovers_the_whole_field(self):
+        """End to end through the parser the drafter actually uses."""
+        raw = json.dumps({"answer": f"One.{self.LITERAL}{self.LITERAL}Two.", "sources_used": [1]})
+        assert extract_string(raw, "answer") == f"One.{chr(10)}{chr(10)}Two."

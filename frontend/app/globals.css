@@ -1175,15 +1175,40 @@ textarea:focus-visible {
 
 /* Ripple. Expands from the pointer position and fades; the state layer handles
    hover/focus, this handles the press. */
+/* THE PACING LIVES IN THE KEYFRAMES, NOT IN AN EASING FUNCTION.
+
+   Both easings tried here made a longer duration do almost nothing visible.
+   `standard` and `emphasized-decelerate` are both FRONT-LOADED -- they cover
+   most of their travel in the first fraction of the time and spend the rest
+   crawling the last few percent. Against a scale that is already visually
+   compressed at the end (going 0.9 -> 1.0 barely reads as movement) and an
+   opacity that has nearly finished fading, the result is a ripple that looks
+   the same at 800ms as at 450ms: it snaps out, then an invisible tail runs
+   for half a second.
+
+   So the timing function is `linear` and the shape is expressed as explicit
+   stops. Now duration means what it says, and the opacity is held high
+   through the first half instead of fading in step with the expansion -- the
+   spread stays VISIBLE while it happens, which is the part that reads as
+   slow. */
 @keyframes md-ripple {
-  from { transform: scale(0); opacity: 0.36; }
-  to { transform: scale(1); opacity: 0; }
+  0% { transform: scale(0); opacity: 0.36; }
+  40% { transform: scale(0.5); opacity: 0.32; }
+  70% { transform: scale(0.78); opacity: 0.22; }
+  100% { transform: scale(1); opacity: 0; }
 }
 .md-ripple-span {
   position: absolute;
   border-radius: 50%;
   background: currentColor;
   pointer-events: none;
-  animation: md-ripple var(--md-dur-long) var(--md-ease-standard) forwards;
+  /* Its OWN duration, not --md-dur-long.
+
+     That token also drives layout transitions, where 450ms is already at the
+     edge of feeling sluggish -- so slowing the ripple through it would have
+     slowed the drawer and the rail with it. The ripple is the one thing here
+     that reads better long: it is feedback for a press that has already
+     happened, so a slow spread is expressive rather than a delay. */
+  animation: md-ripple 1100ms linear forwards;
   z-index: 0;
 }
