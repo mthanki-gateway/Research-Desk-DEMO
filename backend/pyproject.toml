@@ -55,6 +55,17 @@ dev = [
 # install with `uv sync --extra local-embeddings` if EMBEDDING_PROVIDER=fastembed.
 [project.optional-dependencies]
 local-embeddings = ["fastembed>=0.4"]
+# NVIDIA's hosted NeMo speech models (Parakeet, Canary, Nemotron streaming).
+#
+# A gRPC CLIENT, and that is not a preference. Those functions are reachable
+# only over gRPC: posting to the HTTP invocation path returns "Inference
+# connection error" for every body shape, which is the NVCF gateway failing to
+# reach a worker that does not speak HTTP. Measured against
+# ai-parakeet-1_1b-rnnt-multilingual-asr.
+#
+# Optional for the same reason `eval` is: nothing here is needed to serve a
+# request, and grpcio is a large wheel. Install with `uv sync --extra speech`.
+speech = ["nvidia-riva-client>=2.15"]
 # RAG evaluation via the standard library. This is the ONLY generation-side
 # judge -- its definitions are the ones published numbers are reported against,
 # which is the whole reason for taking the dependency.

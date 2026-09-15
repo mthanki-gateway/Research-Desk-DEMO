@@ -169,6 +169,11 @@ async def react(state: ResearchState) -> dict:
     # the same message, and merging them would have the assistant claim to
     # have stored something it deliberately did not.
     already_known: list[str] = []
+    # Facts the metadata tools computed -- counts, file lists, averages.
+    # Carried separately from `evidence` because they are not passages and
+    # cannot be cited: they were produced by this application from its own
+    # database, so there is nothing for a [n] marker to point at.
+    facts: list[str] = []
     # The reply the model wrote when it decided nothing needed looking up.
     direct: str = ""
     # Whether any SEARCH ran, which is not the same as whether evidence exists.
@@ -221,9 +226,10 @@ async def react(state: ResearchState) -> dict:
         # cancelling the whole round teaches the model nothing.
         calls = calls[: tools.max_calls_per_round()]
 
-        # Storing an instruction is not looking something up, so a turn that
-        # only remembers can still answer in its own words.
-        if any(c.get("name") != tools.REMEMBER_PREFERENCE for c in calls):
+        # Counting documents or storing an instruction is not looking
+        # anything up, so a turn that only did those can still answer in
+        # its own words -- there is no evidence for `draft` to work from.
+        if any(c.get("name") not in tools.NON_RETRIEVAL for c in calls):
             searched = True
 
         # Independent lookups run CONCURRENTLY. This is the payoff of the
@@ -240,6 +246,7 @@ async def react(state: ResearchState) -> dict:
                     session_id=session_id,
                     remembered=remembered,
                     already_known=already_known,
+                    facts=facts,
                 )
                 for call in calls
             )
@@ -315,6 +322,7 @@ async def react(state: ResearchState) -> dict:
             "answered_directly": True,
             "memory_saved": remembered,
             "memory_known": already_known,
+            "corpus_facts": facts,
             "trace": [
                 {
                     "node": "react",
@@ -340,5 +348,10 @@ async def react(state: ResearchState) -> dict:
         # Carried so `draft` can confirm what was stored in its opening line.
         "memory_saved": remembered,
         "memory_known": already_known,
+        # Metadata results reach `draft` HERE, and this is the whole reason
+        # they are a separate state key. On this path the node's own prose is
+        # discarded, so a turn that both searched and counted would otherwise
+        # keep the passages and silently lose the count.
+        "corpus_facts": facts,
         "trace": [{"node": "react", "rounds": trace, "n_web": n_web}],
     }

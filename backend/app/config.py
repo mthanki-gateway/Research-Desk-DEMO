@@ -687,6 +687,55 @@ class Settings(BaseSettings):
     def web_search_enabled(self) -> bool:
         return bool(self.serper_api_key)
 
+    # --- Groq: open-weights models on someone else's hardware ---
+    #
+    # NOT self-hosting, and the distinction is worth keeping straight in the
+    # code as well as the docs. GroqCloud runs the weights on their LPUs and
+    # exposes an HTTP API; nothing about the runtime, the batching, the KV
+    # cache or the hardware is ours. What IS ours is the choice of an
+    # open-weights model, which means the same weights could later be run on
+    # our own GPU with vLLM and this client would keep working -- the API is
+    # OpenAI-compatible at both ends.
+    #
+    # That compatibility is the reason this is a separate tiny client rather
+    # than something bolted onto GenAIClient: Google's generateContent and
+    # OpenAI's chat/completions differ in message shape, tool format and usage
+    # accounting, and pretending they are one thing is how both end up wrong.
+    groq_api_key: str = ""
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+    groq_model: str = "openai/gpt-oss-120b"
+    groq_timeout_seconds: float = 120.0
+
+    @property
+    def groq_enabled(self) -> bool:
+        return bool(self.groq_api_key)
+
+    # --- NVIDIA: hosted NeMo speech models, free developer key ---
+    #
+    # A SECOND provider rather than a swap. Groq serves Whisper and nothing
+    # else; NVIDIA serves the NeMo family -- Parakeet, Canary, and
+    # `nemotron-asr-streaming`, which is genuinely streaming rather than the
+    # batch endpoint Whisper sits behind. Their ASR NIM profiles also carry
+    # Sortformer speaker diarization, which is the thing Whisper structurally
+    # cannot do.
+    #
+    # NOT the same host as the LLM catalogue. `integrate.api.nvidia.com` serves
+    # chat models and returns 404 for /audio/transcriptions -- measured, and
+    # the reason an earlier reading of this concluded NVIDIA had no ASR at all.
+    # Speech runs on NVCF, where `api.nvcf.nvidia.com` answers 401 rather than
+    # 404: the route exists and wants a key.
+    nvidia_api_key: str = ""
+    nvidia_nvcf_url: str = "https://api.nvcf.nvidia.com/v2/nvcf"
+    # Which hosted function to invoke. Left EMPTY on purpose: function ids are
+    # per-model UUIDs that change as NVIDIA publishes and retires previews, so
+    # a hardcoded default would be a 404 waiting to happen. `/playground/nvidia
+    # /functions` lists what this key can actually reach.
+    nvidia_asr_function_id: str = ""
+
+    @property
+    def nvidia_enabled(self) -> bool:
+        return bool(self.nvidia_api_key)
+
     # --- ReAct research mode ---
     # A genuine tool-calling loop: the model chooses which tool to call, sees
     # the result, and decides what to call next. That is what makes multi-hop

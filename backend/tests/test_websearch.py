@@ -172,14 +172,40 @@ class TestToolSpecs:
         assert tools.READ_AROUND in self._names(tools.tool_specs())
 
     def test_every_declaration_is_usable(self, monkeypatch):
-        """A description and at least one required parameter. A tool the model
-        cannot tell when to use is one it will use wrongly."""
+        """A real description, and every required field actually declared.
+
+        This used to also demand at least one required PARAMETER, on the
+        reasoning that a tool with no arguments is under-specified. The
+        metadata tools disproved it: `corpus_stats` takes nothing because there
+        is nothing to vary -- it reports on the whole collection, and inventing
+        a parameter to satisfy a test would give the model a knob to turn
+        wrongly.
+
+        What still has to hold is that a declared requirement exists: a
+        `required` naming a field absent from `properties` is a schema the API
+        rejects at call time, which surfaces as the model mysteriously never
+        using that tool.
+        """
         monkeypatch.setattr(tools.websearch, "enabled", lambda: True)
         for decl in tools.tool_specs()[0]["functionDeclarations"]:
             assert decl["description"].strip(), decl["name"]
-            assert decl["parameters"]["required"], decl["name"]
-            for field in decl["parameters"]["required"]:
-                assert field in decl["parameters"]["properties"], decl["name"]
+            params = decl["parameters"]
+            assert params["type"] == "object", decl["name"]
+            assert "properties" in params, decl["name"]
+            for field in params.get("required", []):
+                assert field in params["properties"], decl["name"]
+
+    def test_the_description_says_when_not_to_use_it(self, monkeypatch):
+        """Most "the agent chose the wrong tool" problems are description
+        problems. The metadata tools sit closest to the search tools in intent,
+        so theirs are the ones that must draw the line explicitly."""
+        monkeypatch.setattr(tools.websearch, "enabled", lambda: True)
+        by_name = {
+            d["name"]: d["description"]
+            for d in tools.tool_specs()[0]["functionDeclarations"]
+        }
+        assert "search_documents" in by_name[tools.LIST_DOCUMENTS]
+        assert "Not for the contents" in by_name[tools.CORPUS_STATS]
 
     def test_the_search_tools_take_a_query(self, monkeypatch):
         monkeypatch.setattr(tools.websearch, "enabled", lambda: True)

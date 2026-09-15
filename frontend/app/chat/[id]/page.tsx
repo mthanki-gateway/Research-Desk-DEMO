@@ -224,7 +224,21 @@ function Conversation({ id }: { id: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     // activity.length too: a new search line appears at the bottom of the
     // list, and without it the newest one lands below the fold.
-  }, [messageCount, pendingQuestion, activity.length, Boolean(pendingClarify), Boolean(session)]);
+    //
+    // `busy` is the definitive end-of-turn signal, and the layout changes
+    // again at that moment for reasons no other dependency here sees: the
+    // progress line and the activity list are both removed, so the document
+    // gets SHORTER after the answer was already scrolled to. Without this the
+    // view ends up short of the bottom by exactly the height of the progress
+    // block that just disappeared.
+  }, [
+    messageCount,
+    pendingQuestion,
+    activity.length,
+    busy,
+    Boolean(pendingClarify),
+    Boolean(session),
+  ]);
 
   /**
    * Apply the end of a stream, which lands one of two ways.
@@ -325,7 +339,17 @@ function Conversation({ id }: { id: string }) {
     // question.
     if (!window.matchMedia("(pointer: fine)").matches) return;
 
-    composer.current?.focus();
+    // preventScroll, because FOCUS MUST NOT MOVE THE VIEWPORT.
+    //
+    // `focus()` scrolls its element into view by default, and the composer is
+    // `sticky bottom-0` -- so the browser scrolls to where it sits in the
+    // document flow, which is not the same place as the sentinel the scroll
+    // effect above aims for (that one clears the composer via `scroll-mb-40`).
+    // Two scrolls raced on every completed turn and the browser's landed last,
+    // stopping short of the bottom: focus worked, the view did not follow.
+    //
+    // Scrolling is the other effect's job. This one only moves the caret.
+    composer.current?.focus({ preventScroll: true });
   }, [busy, pendingClarify]);
 
   /** Answer the clarifying question: narrow the search, skip, or cancel. */

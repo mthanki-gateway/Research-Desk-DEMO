@@ -49,6 +49,46 @@ export const IconLab = (p: Props) => (
   </Svg>
 );
 
+export const IconMic = (p: Props) => (
+  <Svg {...p}>
+    <rect x="9" y="3" width="6" height="11" rx="3" />
+    <path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6" />
+  </Svg>
+);
+
+export const IconStop = (p: Props) => (
+  <Svg {...p}>
+    <rect x="6" y="6" width="12" height="12" rx="2" />
+  </Svg>
+);
+
+export const IconAtlas = (p: Props) => (
+  <Svg {...p}>
+    <circle cx="12" cy="12" r="2" />
+    <circle cx="5" cy="7" r="1.6" />
+    <circle cx="19" cy="8" r="1.6" />
+    <circle cx="7" cy="18" r="1.6" />
+    <circle cx="18" cy="17" r="1.6" />
+    <path d="M6.4 8.2 10 10.8M17.6 9 14 10.8M8.3 16.8 10.7 13.8M16.7 15.8 13.5 13.4" />
+  </Svg>
+);
+
+export const IconChip = (p: Props) => (
+  <Svg {...p}>
+    <rect x="7" y="7" width="10" height="10" rx="2" />
+    <path d="M10 3v4M14 3v4M10 17v4M14 17v4M3 10h4M3 14h4M17 10h4M17 14h4" />
+  </Svg>
+);
+
+export const IconGrid = (p: Props) => (
+  <Svg {...p}>
+    <rect x="4" y="4" width="7" height="7" rx="1.5" />
+    <rect x="13" y="4" width="7" height="7" rx="1.5" />
+    <rect x="4" y="13" width="7" height="7" rx="1.5" />
+    <rect x="13" y="13" width="7" height="7" rx="1.5" />
+  </Svg>
+);
+
 export const IconProfile = (p: Props) => (
   <Svg {...p}>
     <circle cx="12" cy="8" r="3.5" />

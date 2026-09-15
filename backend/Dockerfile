@@ -39,7 +39,7 @@ FROM base AS dev
 # stage below stays at 177MB and cannot judge anything, which is correct --
 # evaluation is a development activity and serving a request never needs it.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --group dev --extra eval
+    uv sync --frozen --no-install-project --group dev --extra eval --extra speech
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 

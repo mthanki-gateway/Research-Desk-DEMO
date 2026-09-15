@@ -40,7 +40,7 @@ from typing import Any
 import structlog
 
 from app.config import get_settings
-from app.services import preferences, websearch
+from app.services import corpus, preferences, websearch
 from app.services.parents import read_around
 from app.services.retrieval import retrieve
 from app.services.vectorstore import SearchHit
@@ -51,6 +51,20 @@ SEARCH_DOCUMENTS = "search_documents"
 SEARCH_WEB = "search_web"
 READ_AROUND = "read_around"
 REMEMBER_PREFERENCE = "remember_preference"
+LIST_DOCUMENTS = "list_documents"
+CORPUS_STATS = "corpus_stats"
+CONVERSATION_STATS = "conversation_stats"
+
+# Tools that do not RETRIEVE anything.
+#
+# The distinction drives control flow, not bookkeeping. `react` uses it to
+# decide whether the turn "searched": a turn that only listed documents or
+# stored a preference has no passages to draft from, so it must answer in its
+# own words rather than being sent to `draft` with an empty evidence set and
+# told to compose from nothing.
+NON_RETRIEVAL = frozenset(
+    {REMEMBER_PREFERENCE, LIST_DOCUMENTS, CORPUS_STATS, CONVERSATION_STATS}
+)
 
 
 def tool_specs() -> list[dict[str, Any]]:
@@ -152,6 +166,68 @@ def tool_specs() -> list[dict[str, Any]]:
             }
         )
 
+    # QUESTIONS ABOUT THE CORPUS, not questions answered FROM it.
+    #
+    # Semantic search cannot answer "how many documents are there", "what is
+    # the average conversation length" or "what do these files broadly cover" --
+    # embedding those questions retrieves passages that happen to discuss
+    # counting, which is not the same thing at all. Before these existed the
+    # agent could only deflect "what documents do you have?" while the UI
+    # listed all five by name beside it.
+    #
+    # Three tools rather than one `stats(kind)` with a mode parameter: the
+    # model picks from name and description, and a name that says exactly what
+    # comes back is chosen correctly far more often than an enum it has to
+    # reason about. Three clear names cost about as many tokens as one vague
+    # one with three documented modes.
+    declarations.append(
+        {
+            "name": LIST_DOCUMENTS,
+            "description": (
+                "List the user's uploaded documents: filename, size, how many "
+                "passages each holds, when it was uploaded, whether it "
+                "finished indexing, and the section headings across all of "
+                "them. Use it for 'what documents do you have', 'what is in my "
+                "library', 'what are these files about', 'what themes do they "
+                "cover', and before saying something is not in their "
+                "documents. It returns no passages and nothing citable -- to "
+                "quote or cite content, use search_documents."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        }
+    )
+    declarations.append(
+        {
+            "name": CORPUS_STATS,
+            "description": (
+                "Aggregate statistics over the whole document collection: how "
+                "many documents, total and average length, passage counts, "
+                "indexing status breakdown, and the first and latest upload "
+                "dates. Use it for counting and sizing questions about the "
+                "library as a whole -- 'how much have I uploaded', 'how long "
+                "is the average document'. Not for the contents of any "
+                "document."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        }
+    )
+    declarations.append(
+        {
+            "name": CONVERSATION_STATS,
+            "description": (
+                "Aggregate statistics over the user's past chat sessions: how "
+                "many conversations, average and median messages per "
+                "conversation, longest conversation, average message length "
+                "split by who wrote it, and first and last activity dates. Use "
+                "it for questions about their usage and history -- 'how many "
+                "chats have I had', 'what is the average length of my "
+                "sessions'. It reports counts only and never the content of "
+                "any past conversation."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        }
+    )
+
     # Memory as a TOOL rather than a node in front of the graph.
     #
     # A router node had to classify every message before anything else ran, so
@@ -220,6 +296,7 @@ async def run_tool(
     session_id: uuid.UUID | None = None,
     remembered: list[str] | None = None,
     already_known: list[str] | None = None,
+    facts: list[str] | None = None,
 ) -> tuple[list[SearchHit], str]:
     """Execute one tool call. Returns (hits, text_for_the_model).
 
@@ -231,9 +308,8 @@ async def run_tool(
     same reason it is on the graph state: tenant scoping must be an explicit
     argument on every retrieval path.
     """
-    # Checked BEFORE the query guard below: this is the one tool that takes no
-    # query, and falling through would reject every call with "the query
-    # parameter was empty".
+    # Checked BEFORE the query guard below: these take no query, and falling
+    # through would reject every call with "the query parameter was empty".
     if name == REMEMBER_PREFERENCE:
         return [], await _remember(
             args,
@@ -242,6 +318,21 @@ async def run_tool(
             remembered=remembered,
             already_known=already_known,
         )
+
+    if name in (LIST_DOCUMENTS, CORPUS_STATS, CONVERSATION_STATS):
+        observation = await _metadata(name, owner_id=owner_id)
+        # Recorded so the fact survives to whichever node writes the answer.
+        #
+        # The agent's own prose is discarded on the retrieval path -- `draft`
+        # composes from `evidence` alone -- so a turn that both searched AND
+        # counted would otherwise lose the count entirely. Returning it as a
+        # SearchHit instead was the alternative and is worse: it would join the
+        # numbered citation list, and "[3]" pointing at a figure this app
+        # computed rather than at a passage anyone can open is exactly the kind
+        # of unverifiable citation the grounding rules exist to prevent.
+        if facts is not None:
+            facts.append(observation)
+        return [], observation
 
     query = str(args.get("query", "")).strip()
     if not query:
@@ -295,6 +386,38 @@ async def run_tool(
     except Exception as exc:  # noqa: BLE001 - a tool failure must not end the loop
         log.warning("tool_failed", tool=name, query=query[:60], error=str(exc))
         return [], f"The {name} tool failed: {type(exc).__name__}. Try again or rephrase."
+
+
+async def _metadata(name: str, *, owner_id: str | None) -> str:
+    """Run one metadata tool and render its result for the model.
+
+    Rendered as labelled lines rather than returned as JSON. The model reads
+    this back as an observation and then writes prose from it; JSON invites it
+    to echo the structure -- answers came back as key/value dumps -- while
+    lines it can read are lines it rewrites.
+
+    Never raises, for the same reason the search tools do not: a failed tool
+    should come back as text the model can react to, not end the loop.
+    """
+    try:
+        if name == LIST_DOCUMENTS:
+            rows = await corpus.documents(owner_id)
+            outline = await corpus.headings(owner_id) if rows else []
+            return corpus.render_documents(rows, outline)
+
+        if name == CORPUS_STATS:
+            return corpus.render_stats(
+                "Statistics for the whole document collection:",
+                await corpus.corpus_stats(owner_id),
+            )
+
+        return corpus.render_stats(
+            "Statistics over the user's past conversations:",
+            await corpus.conversation_stats(owner_id),
+        )
+    except Exception as exc:  # noqa: BLE001 - a tool failure must not end the loop
+        log.warning("metadata_tool_failed", tool=name, error=str(exc))
+        return f"The {name} tool failed: {type(exc).__name__}."
 
 
 # Serialises the check-then-write below. See `_remember`.

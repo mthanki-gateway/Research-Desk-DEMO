@@ -87,6 +87,50 @@
   * {
     border-color: var(--md-outline-variant);
   }
+
+  /* IF IT CAN BE CLICKED, IT SHOWS A POINTER.
+
+     Tailwind v4 dropped the `button { cursor: pointer }` reset that v3 shipped,
+     so a bare <button> now gets the arrow cursor. Every component class here
+     had been putting `cursor: pointer` back by hand -- .md-nav-item,
+     .md-card-interactive, .md-segmented > button, .md-fab -- which works right
+     up until something is built from `.md-state` and utilities alone, as the
+     app switcher and the clarify options were. Both shipped with the wrong
+     cursor and neither was obviously broken to look at.
+
+     So it is restored ONCE, here, and no component has to remember it.
+
+     In @layer base, not unlayered: unlayered CSS outranks every layer, so this
+     would otherwise beat `cursor: text` on an editable control or any
+     deliberate override in @layer components. Layered, components still win --
+     the same trap the border-color rule above documents.
+
+     The role list is every INTERACTIVE role this codebase actually uses
+     (checked with grep, not guessed). Non-interactive ones -- status,
+     progressbar, presentation, dialog, tablist -- are deliberately absent:
+     they are containers or announcements, and a pointer over them would
+     promise a click that does nothing. */
+  button,
+  select,
+  summary,
+  [role="button"],
+  [role="link"],
+  [role="tab"],
+  [role="option"],
+  [role="checkbox"],
+  [role="switch"],
+  label[for],
+  a[href] {
+    cursor: pointer;
+  }
+
+  /* A disabled control is not clickable, and saying so with the cursor is the
+     cheapest possible explanation for why nothing happened. */
+  button:disabled,
+  select:disabled,
+  [aria-disabled="true"] {
+    cursor: not-allowed;
+  }
 }
 
 /* The sidebar and rail are fixed elements parked off-canvas with translate-x.
@@ -1119,6 +1163,10 @@ textarea:focus-visible {
     max-width: 22rem;
     width: 100%;
   }
+  /* For dialogs whose content is a LIST. 22rem is sized for a question
+     and two buttons; a row with an icon, a name and a line of
+     description wraps three times in it. */
+  .md-dialog-wide { max-width: 34rem; }
   .md-scrim {
     position: fixed;
     inset: 0;

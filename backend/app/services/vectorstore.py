@@ -265,6 +265,55 @@ class VectorStore:
         log.info("claimed_vectors", owner_id=owner_id, n=before.count)
         return before.count
 
+    async def all_vectors(
+        self, owner_id: str | None, *, limit: int = 5_000
+    ) -> list[tuple[list[float], dict]]:
+        """Every stored vector with its payload, for whole-corpus analysis.
+
+        `scroll`, not `search`: there is no query here. Search would need a
+        probe vector and would return results ranked by distance from it,
+        which is the wrong shape for "show me everything" -- and on an HNSW
+        index it is also approximate, so some points would simply never
+        appear.
+
+        Capped because the caller projects and cross-multiplies these in
+        memory: a similarity matrix is O(n^2), so 5,000 chunks is already 25
+        million cosines. Far past the point where a scatter plot means
+        anything to look at, but a limit beats an unbounded allocation.
+        """
+        points: list[tuple[list[float], dict]] = []
+        offset = None
+        while len(points) < limit:
+            batch, offset = await self._client.scroll(
+                collection_name=self._collection,
+                scroll_filter=(
+                    models.Filter(
+                        must=[
+                            models.FieldCondition(
+                                key="owner_id",
+                                match=models.MatchValue(value=owner_id),
+                            )
+                        ]
+                    )
+                    if owner_id
+                    else None
+                ),
+                # The whole reason for this method. Payload alone would give
+                # the labels and none of the geometry.
+                with_vectors=True,
+                with_payload=True,
+                limit=min(256, limit - len(points)),
+                offset=offset,
+            )
+            points.extend(
+                (list(pt.vector), dict(pt.payload or {}))
+                for pt in batch
+                if pt.vector is not None
+            )
+            if offset is None:
+                break
+        return points
+
     async def count(self) -> int:
         result = await self._client.count(collection_name=self._collection, exact=True)
         return result.count

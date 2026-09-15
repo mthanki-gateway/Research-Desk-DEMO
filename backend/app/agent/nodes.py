@@ -798,10 +798,44 @@ def _memory_block(state: ResearchState) -> str:
     return "\n\n".join(parts) + "\n\n"
 
 
+def _facts_block(state: ResearchState) -> str:
+    """Metadata results, labelled so they are not mistaken for sources.
+
+    The label does real work. Dropped into the prompt unmarked, these read as
+    just more context and the drafter either attaches a citation to them --
+    picking whichever [n] happens to be nearby, which is a fabricated citation
+    for a figure no source contains -- or omits the figure as uncitable, which
+    loses the very thing that was asked for.
+
+    Shared by `draft` and `resolve` for the same reason `_memory_block` is:
+    `resolve` rewrites the answer from scratch when the critique loop runs out
+    of budget, so anything only `draft` was told would be discarded one node
+    later.
+    """
+    facts = state.get("corpus_facts") or []
+    if not facts:
+        return ""
+    joined = "\n\n".join(facts)
+    return (
+        "FACTS FROM THIS APPLICATION'S OWN DATABASE. These are not sources and "
+        "carry no number -- state them directly and NEVER put a [n] citation "
+        "on them. They are exact; do not round, hedge or re-describe them as "
+        "approximate:\n"
+        f"{joined}\n\n"
+    )
+
+
 async def draft(state: ResearchState) -> dict:
     settings = get_settings()
     evidence = state.get("evidence") or []
-    if not evidence:
+    # NO PASSAGES IS NOT THE SAME AS NOTHING TO SAY.
+    #
+    # A metadata tool answers without retrieving anything -- "you have 5
+    # documents, 39 passages, 18,506 characters" is a complete answer backed by
+    # no passage at all. Bailing out here on an empty evidence list would have
+    # replied "nothing was found" to a question this app had already answered
+    # exactly, which is the same class of mistake as sending "hi" to retrieval.
+    if not evidence and not (state.get("corpus_facts") or []):
         # Deliberately does NOT say "upload a document". That was right while
         # the corpus was the whole universe, but a search can now come back
         # empty with documents present and the web searched -- and telling
@@ -862,11 +896,18 @@ async def draft(state: ResearchState) -> dict:
             "actually says. Do not add new claims.\n\n"
         )
 
+    # Omitted entirely rather than left empty when a metadata-only turn brought
+    # no passages. A bare "Sources:" heading with nothing under it reads as a
+    # failed search, and the drafter opens by apologising for finding nothing
+    # -- directly above the figures that answer the question.
+    sources_block = f"Sources:\n{build_context(evidence)}\n\n" if evidence else ""
+
     prompt = (
         f"{history_block}"
-        f"Sources:\n{build_context(evidence)}\n\n"
+        f"{sources_block}"
         f"Search coverage: {reach}\n\n"
         f"{_memory_block(state)}"
+        f"{_facts_block(state)}"
         f"{redo_block}"
         f"Question: {state['question']}\n\n"
         "Answer from the sources above, per your instructions."
@@ -1089,6 +1130,7 @@ async def resolve(state: ResearchState) -> dict:
         # then written out of existence by a `resolve` that had never heard of
         # it.
         f"{_memory_block(state)}"
+        f"{_facts_block(state)}"
         "Write the most useful honest answer available."
     )
 

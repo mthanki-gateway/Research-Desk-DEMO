@@ -744,3 +744,168 @@ export async function claimUnowned(): Promise<{
   if (!res.ok) throw new Error(await detail(res));
   return res.json();
 }
+
+// --- Model Lab: an open-weights model over an OpenAI-compatible API ---------
+
+export type PlaygroundStatus = {
+  enabled: boolean;
+  default_model: string;
+  /** Shown in the UI: this is the one line that changes to self-host. */
+  base_url: string;
+};
+
+export type GroqModel = {
+  id: string;
+  owned_by: string | null;
+  context_window: number | null;
+};
+
+export type Completion = {
+  text: string;
+  finish_reason: string | null;
+  model: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  elapsed_ms: number;
+  tokens_per_second: number | null;
+};
+
+export async function playgroundStatus(): Promise<PlaygroundStatus> {
+  const res = await authedFetch("/playground/status");
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function playgroundModels(): Promise<GroqModel[]> {
+  const res = await authedFetch("/playground/models");
+  if (!res.ok) throw new Error(await detail(res));
+  return (await res.json()).models;
+}
+
+export async function playgroundComplete(body: {
+  prompt: string;
+  model?: string;
+  system?: string;
+  temperature?: number;
+  max_tokens?: number;
+}): Promise<Completion> {
+  const res = await authedFetch("/playground/complete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export type Transcription = {
+  text: string;
+  language: string | null;
+  duration_seconds: number;
+  elapsed_ms: number;
+  realtime_factor: number | null;
+  /** Whisper's own confidence. Shown, never trusted: on pure silence it
+   *  returns "Thank you." with no_speech_prob 0.000. */
+  no_speech_prob: number | null;
+  avg_logprob: number | null;
+  model: string;
+};
+
+/**
+ * Multipart, so no Content-Type header is set by hand — the browser has to
+ * add its own `boundary` and setting the type manually omits it, which the
+ * server then cannot parse.
+ */
+export async function transcribeAudio(
+  blob: Blob,
+  opts: {
+    model?: string;
+    language?: string;
+    filename?: string;
+    /** Tail of the transcript so far, to keep spelling consistent across a
+     *  cut Whisper cannot see across. Ignored by NeMo, which has no
+     *  equivalent decoder-context parameter. */
+    prompt?: string;
+    /** "groq" (Whisper) or "nvidia" (NeMo / Parakeet). */
+    provider?: string;
+  } = {},
+): Promise<Transcription> {
+  const form = new FormData();
+  form.append("file", blob, opts.filename ?? "audio.webm");
+  if (opts.model) form.append("model", opts.model);
+  if (opts.language) form.append("language", opts.language);
+  if (opts.prompt) form.append("prompt", opts.prompt);
+  if (opts.provider) form.append("provider", opts.provider);
+
+  const res = await authedFetch("/playground/transcribe", {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export type NvidiaStatus = {
+  enabled: boolean;
+  base_url: string;
+  function_id: string;
+};
+
+export async function nvidiaStatus(): Promise<NvidiaStatus> {
+  const res = await authedFetch("/playground/nvidia/status");
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export type NvidiaFunction = {
+  id: string;
+  name: string;
+  status: string | null;
+  protocol: string | null;
+  speech: boolean;
+};
+
+export async function nvidiaFunctions(): Promise<NvidiaFunction[]> {
+  const res = await authedFetch("/playground/nvidia/functions");
+  if (!res.ok) throw new Error(await detail(res));
+  return (await res.json()).functions;
+}
+
+// --- Corpus atlas: the embedding space as geometry -------------------------
+
+export type AtlasPoint = {
+  chunk_id: string;
+  document_id: string;
+  filename: string;
+  heading: string | null;
+  chunk_index: number;
+  n_chars: number;
+  preview: string;
+  x: number;
+  y: number;
+  z: number;
+  /** Most similar OTHER chunk. Precomputed so the UI need not scan the matrix. */
+  nearest: {
+    filename: string;
+    heading: string | null;
+    chunk_index: number;
+    score: number;
+  } | null;
+};
+
+export type Atlas = {
+  points: AtlasPoint[];
+  /** Row-major cosine similarity, same order as `points`. */
+  similarity: number[][];
+  /** Share of variance each of the three axes accounts for. */
+  explained_variance: number[];
+  n_documents: number;
+  truncated: boolean;
+};
+
+export async function getAtlas(): Promise<Atlas> {
+  const res = await authedFetch("/corpus/atlas");
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}

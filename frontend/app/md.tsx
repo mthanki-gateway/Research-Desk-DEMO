@@ -565,12 +565,28 @@ export function Dialog({
   title,
   body,
   children,
+  wide = false,
+  contentClassName = "mt-6 flex justify-end gap-2",
 }: {
   open: boolean;
   onClose: () => void;
   title: string;
   body?: string;
   children: React.ReactNode;
+  /** Widens the panel for dialogs whose content is a list rather than a
+   *  question. 22rem fits "Delete 3 conversations?" and two buttons; it
+   *  squeezes anything with rows in it. */
+  wide?: boolean;
+  /**
+   * Classes on the children wrapper.
+   *
+   * The default is an ACTION ROW -- right-aligned, horizontal -- because that
+   * is what every confirm dialog puts here. It is overridable because it is
+   * wrong for anything else: a column of cards passed as children was laid out
+   * as one right-aligned flex item and shrank to its content, which is what
+   * made the app switcher render as a narrow strip.
+   */
+  contentClassName?: string;
 }) {
   if (!open) return null;
   return (
@@ -580,7 +596,7 @@ export function Dialog({
     >
       <div className="md-scrim" />
       <div
-        className="md-dialog relative"
+        className={`md-dialog relative ${wide ? "md-dialog-wide" : ""}`}
         role="dialog"
         aria-modal="true"
         onClick={(e) => e.stopPropagation()}
@@ -594,7 +610,7 @@ export function Dialog({
             {body}
           </p>
         )}
-        <div className="mt-6 flex justify-end gap-2">{children}</div>
+        <div className={contentClassName}>{children}</div>
       </div>
     </div>
   );

@@ -122,6 +122,14 @@ class ResearchState(TypedDict, total=False):
     # acknowledgement at all, and silence is exactly what makes someone restate
     # it a third time.
     memory_known: list[str]
+    # Results from the metadata tools: document lists, counts, averages.
+    #
+    # NOT `evidence`, deliberately. Evidence is passages a reader can open and
+    # check, and the drafter must cite each one [n]. These are figures this
+    # application computed from its own database -- there is no passage behind
+    # them, so a citation marker would either be hallucinated or would point at
+    # an unrelated source. They travel separately and are stated plainly.
+    corpus_facts: list[str]
     # The conversation, so a preference can be scoped to it rather than to the
     # user. Carried in state because nodes are pure functions of state.
     session_id: str | None

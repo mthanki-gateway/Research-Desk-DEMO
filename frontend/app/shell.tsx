@@ -7,11 +7,13 @@ import { createSession } from "@/lib/api";
 import { useApp } from "./providers";
 import CommandPalette from "./command-palette";
 import ChunkPanel from "./chunk-panel";
+import { PROJECTS, SHARED_NAV, projectFor } from "./projects";
 // Rail widths live with the rail, so the margin reserved here and the rail
 // itself can never disagree about how wide it is.
 import { RAIL_WIDTH, RAIL_WIDTH_COLLAPSED } from "./chat/[id]/rail";
 import {
   Button,
+  Dialog,
   IconButton,
   LinearProgress,
   Ripplable,
@@ -24,26 +26,13 @@ import {
   IconLibrary,
   IconMenu,
   IconPlus,
+  IconChevron,
   IconSearch,
   IconProfile,
   IconSignOut,
   IconSpinner,
 } from "./icons";
 
-/**
- * The work: the three places you go to do something.
- *
- * Profile is deliberately NOT in this list. It is not a fourth workspace --
- * it is about you rather than about documents, and sitting it under Lab made
- * it read as one, which is part of why it went unnoticed. It lives at the
- * bottom with the account row instead, where settings-shaped things are
- * looked for.
- */
-const NAV = [
-  { href: "/chat", label: "Chat", Icon: IconChat },
-  { href: "/library", label: "Library", Icon: IconLibrary },
-  { href: "/lab", label: "Lab", Icon: IconLab },
-];
 
 /**
  * M3 navigation drawer.
@@ -77,7 +66,12 @@ export default function Shell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [palette, setPalette] = useState(false);
+  const [switcher, setSwitcher] = useState(false);
   const [creating, setCreating] = useState(false);
+  // Which app owns the current route. Drives the drawer's whole contents,
+  // so the nav cannot disagree with the page being shown.
+  const project = projectFor(pathname);
+  const isResearchDesk = project.id === "research-desk";
   const scroller = useAutoHideScroll<HTMLElement>();
 
   // /login and /auth/* must render without the drawer, and must never be
@@ -106,7 +100,10 @@ export default function Shell({ children }: { children: React.ReactNode }) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  useEffect(() => setOpen(false), [pathname]);
+  useEffect(() => {
+    setOpen(false);
+    setSwitcher(false);
+  }, [pathname]);
 
   async function startSession() {
     setCreating(true);
@@ -166,7 +163,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
           className="md-title-large"
           style={{ color: "var(--md-nav-on-surface)" }}
         >
-          Research Desk
+          {project.name}
         </span>
       </header>
 
@@ -195,21 +192,61 @@ export default function Shell({ children }: { children: React.ReactNode }) {
           transitionTimingFunction: "var(--md-ease-emphasized)",
         }}
       >
-        <div className="flex items-center justify-between px-4 pt-3">
-          <Link href="/chat" className="block">
+        <div className="flex items-center gap-1 px-2 pt-2">
+          {/* The app's own name, and the switch to another one, in a single
+              control. A separate "switch project" item lower down was the
+              obvious alternative and is worse: the thing you click to change
+              apps should be the thing showing which app you are in. */}
+          <Ripplable
+            as="button"
+            type="button"
+            onClick={() => setSwitcher(true)}
+            // flex-1 so the control spans the drawer and the chevron sits at
+            // the right edge. Sized to its content it floated mid-row with the
+            // chevron hard against the text, which read as decoration rather
+            // than as the affordance that opens the dialog.
+            className="md-state flex min-w-0 flex-1 items-center gap-3 rounded-[var(--md-shape-md)] px-2 py-2 text-left"
+            aria-haspopup="dialog"
+            title="Switch app"
+            // Colour set HERE rather than on the icon: icons are stroked with
+            // `currentColor` and take only a className, so the parent is what
+            // tints them. The text spans below set their own colours, so this
+            // reaches the two icons alone.
+            style={{ color: "var(--md-nav-on-surface-variant)" }}
+          >
+            {/* The APP'S OWN mark, not a generic grid. A grid icon says "there
+                are several of these somewhere"; the app's own icon says which
+                one you are in, which is the question this control answers
+                every time you look at it and only occasionally by being
+                clicked. */}
             <span
-              className="md-title-large block"
-              style={{ color: "var(--md-nav-on-surface)" }}
+              className="grid h-9 w-9 shrink-0 place-items-center rounded-[var(--md-shape-md)]"
+              style={{
+                background: "var(--md-primary-container)",
+                color: "var(--md-on-primary-container)",
+              }}
             >
-              Research Desk
+              <project.Icon className="h-5 w-5" />
             </span>
-            <span
-              className="md-body-small block"
-              style={{ color: "var(--md-nav-on-surface-variant)" }}
-            >
-              Document intelligence
+            <span className="min-w-0 flex-1">
+              <span
+                className="md-title-medium block truncate"
+                style={{ color: "var(--md-nav-on-surface)" }}
+              >
+                {project.name}
+              </span>
+              <span
+                className="md-body-small block"
+                style={{ color: "var(--md-nav-on-surface-variant)" }}
+              >
+                Switch app
+              </span>
             </span>
-          </Link>
+            {/* A chevron, because this OPENS something. The grid glyph that
+                was here implied a grid of apps would appear in place, which is
+                not what happens. */}
+            <IconChevron className="h-4 w-4 shrink-0 rotate-90" />
+          </Ripplable>
           <IconButton
             onClick={() => setOpen(false)}
             aria-label="Close navigation"
@@ -220,17 +257,22 @@ export default function Shell({ children }: { children: React.ReactNode }) {
           </IconButton>
         </div>
 
-        <Button
-          onClick={() => void startSession()}
-          disabled={creating}
-          className="w-full"
-        >
-          {creating ? <IconSpinner /> : <IconPlus />}
-          {creating ? "Creating" : "New chat"}
-        </Button>
+        {/* Research Desk's action, not a universal one. A drawer that
+            offers "New chat" while you are in the Model Lab is offering
+            to leave the app you just opened. */}
+        {isResearchDesk && (
+          <Button
+            onClick={() => void startSession()}
+            disabled={creating}
+            className="w-full"
+          >
+            {creating ? <IconSpinner /> : <IconPlus />}
+            {creating ? "Creating" : "New chat"}
+          </Button>
+        )}
 
         <nav className="md-nav-group space-y-1">
-          {NAV.map(({ href, label, Icon }) => {
+          {project.nav.map(({ href, label, Icon }) => {
             const active = pathname.startsWith(href);
             return (
               /* A real <Link>, not a div with role="link" calling
@@ -296,106 +338,121 @@ export default function Shell({ children }: { children: React.ReactNode }) {
             The group is the flex child that takes the leftover height, with
             the scroll on the list INSIDE it -- so the label and the search row
             stay put while the titles move, and the tinted block does not
-            visibly shrink as sessions are added. */}
-        <div className="md-nav-group flex min-h-0 flex-1 flex-col">
-          <p
-            className="md-label-medium mb-1 px-3 pt-1"
-            style={{ color: "var(--md-nav-on-surface-variant)" }}
-          >
-            Sessions
-          </p>
-          <div className="scroll-thin min-h-0 flex-1 overflow-y-auto">
-            {loading && sessions.length === 0 ? (
-              <ul className="space-y-2 px-3 pt-2" aria-hidden>
-                {[80, 64, 72].map((w) => (
-                  <li
-                    key={w}
-                    className="h-3 rounded"
-                    style={{
-                      width: `${w}%`,
-                      // Also a leftover from the navy drawer: white-at-5% was
-                      // invisible the moment the surface went light.
-                      background: "var(--md-surface-container-high)",
-                    }}
-                  />
-                ))}
-              </ul>
-            ) : sessions.length === 0 ? (
-              <p
-                className="md-body-small px-3"
-                style={{ color: "var(--md-nav-on-surface-variant)" }}
-              >
-                No sessions yet
-              </p>
-            ) : (
-              <ul>
-                {sessions.map((s) => {
-                  const active = pathname === `/chat/${s.id}`;
-                  return (
-                    <li key={s.id}>
-                      <Ripplable
-                        as="div"
-                        className="md-nav-item md-nav-item-dense"
-                        data-active={active}
-                        onClick={() => router.push(`/chat/${s.id}`)}
-                        title={s.title}
-                        role="link"
-                        tabIndex={0}
-                      >
-                        <span className="min-w-0 flex-1 truncate">
-                          {s.title}
-                        </span>
-                        <span className="md-label-small shrink-0 opacity-70">
-                          {s.n_messages}
-                        </span>
-                      </Ripplable>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </div>
+            visibly shrink as sessions are added.
 
-          <Ripplable
-            as="div"
-            className="md-nav-item md-nav-item-dense mt-1"
-            onClick={() => setPalette(true)}
-            role="button"
-            tabIndex={0}
-          >
-            <IconSearch className="h-5 w-5 shrink-0" />
-            <span className="flex-1">Search sessions</span>
-            {/* A token, not `rgba(255,255,255,0.10)`. That was tuned for the old
-              navy drawer and became invisible the moment the drawer went
-              light. */}
-            <kbd
-              className="md-label-small rounded px-1.5 py-0.5"
-              style={{
-                background: "var(--md-surface-container-high)",
-                color: "var(--md-on-surface-variant)",
-              }}
+            Research Desk only. The Model Lab has no sessions, and an empty
+            "Sessions" panel there reads as a feature that is broken rather
+            than one that does not apply. */}
+        {isResearchDesk ? (
+          <div className="md-nav-group flex min-h-0 flex-1 flex-col">
+            <p
+              className="md-label-medium mb-1 px-3 pt-1"
+              style={{ color: "var(--md-nav-on-surface-variant)" }}
             >
-              ⌘K
-            </kbd>
-          </Ripplable>
-        </div>
+              Sessions
+            </p>
+            <div className="scroll-thin min-h-0 flex-1 overflow-y-auto">
+              {loading && sessions.length === 0 ? (
+                <ul className="space-y-2 px-3 pt-2" aria-hidden>
+                  {[80, 64, 72].map((w) => (
+                    <li
+                      key={w}
+                      className="h-3 rounded"
+                      style={{
+                        width: `${w}%`,
+                        // Also a leftover from the navy drawer: white-at-5% was
+                        // invisible the moment the surface went light.
+                        background: "var(--md-surface-container-high)",
+                      }}
+                    />
+                  ))}
+                </ul>
+              ) : sessions.length === 0 ? (
+                <p
+                  className="md-body-small px-3"
+                  style={{ color: "var(--md-nav-on-surface-variant)" }}
+                >
+                  No sessions yet
+                </p>
+              ) : (
+                <ul>
+                  {sessions.map((s) => {
+                    const active = pathname === `/chat/${s.id}`;
+                    return (
+                      <li key={s.id}>
+                        <Ripplable
+                          as="div"
+                          className="md-nav-item md-nav-item-dense"
+                          data-active={active}
+                          onClick={() => router.push(`/chat/${s.id}`)}
+                          title={s.title}
+                          role="link"
+                          tabIndex={0}
+                        >
+                          <span className="min-w-0 flex-1 truncate">
+                            {s.title}
+                          </span>
+                          <span className="md-label-small shrink-0 opacity-70">
+                            {s.n_messages}
+                          </span>
+                        </Ripplable>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+
+            <Ripplable
+              as="div"
+              className="md-nav-item md-nav-item-dense mt-1"
+              onClick={() => setPalette(true)}
+              role="button"
+              tabIndex={0}
+            >
+              <IconSearch className="h-5 w-5 shrink-0" />
+              <span className="flex-1">Search sessions</span>
+              {/* A token, not `rgba(255,255,255,0.10)`. That was tuned for the old
+                navy drawer and became invisible the moment the drawer went
+                light. */}
+              <kbd
+                className="md-label-small rounded px-1.5 py-0.5"
+                style={{
+                  background: "var(--md-surface-container-high)",
+                  color: "var(--md-on-surface-variant)",
+                }}
+              >
+                ⌘K
+              </kbd>
+            </Ripplable>
+          </div>
+        ) : (
+          // Takes the leftover height so the account group stays pinned to
+          // the bottom, exactly as it sits in Research Desk.
+          <div className="min-h-0 flex-1" />
+        )}
 
         {/* You: profile, then the account row. Last block in the column, which
             is where a settings-shaped destination is looked for -- and next to
             the identity it belongs to rather than beside Lab. */}
         <div className="md-nav-group space-y-1">
-          <Ripplable
-            as={Link}
-            href="/profile"
-            prefetch
-            className="md-nav-item"
-            data-active={pathname.startsWith("/profile")}
-          >
-            <span className="md-nav-icon">
-              <IconProfile className="h-6 w-6" />
-            </span>
-            Profile
-          </Ripplable>
+          {/* Shared across every app rather than owned by one, which is why it
+              lives here with the account row instead of in `project.nav`. */}
+          {SHARED_NAV.map(({ href, label, Icon }) => (
+            <Ripplable
+              key={href}
+              as={Link}
+              href={href}
+              prefetch
+              className="md-nav-item"
+              data-active={pathname.startsWith(href)}
+            >
+              <span className="md-nav-icon">
+                <Icon className="h-6 w-6" />
+              </span>
+              {label}
+            </Ripplable>
+          ))}
 
           {account && (
             <div
@@ -471,6 +528,74 @@ export default function Shell({ children }: { children: React.ReactNode }) {
       </main>
 
       {palette && <CommandPalette onClose={() => setPalette(false)} />}
+
+      <Dialog
+        open={switcher}
+        onClose={() => setSwitcher(false)}
+        title="Switch app"
+        body="These share one stack: the same login, database and API process. Only the routes differ."
+        wide
+        // The default wrapper is an action ROW -- right-aligned and horizontal,
+        // which is right for "Cancel / Delete" and wrong for a list. Left as
+        // the default, these cards were laid out as one flex item and shrank
+        // to their content, which is what made this render as a narrow strip.
+        contentClassName="mt-6 space-y-2"
+      >
+        {PROJECTS.map((p) => {
+          const current = p.id === project.id;
+          return (
+            <Ripplable
+              key={p.id}
+              as={Link}
+              href={p.home}
+              prefetch
+              className="md-card md-card-outlined md-card-interactive flex w-full items-center gap-4 p-4"
+              // The current app is marked, not hidden. Removing it would make
+              // the list change length depending on where you are, so the one
+              // you want is never in the same place twice.
+              data-active={current}
+              aria-current={current ? "page" : undefined}
+            >
+              <span
+                className="grid h-10 w-10 shrink-0 place-items-center rounded-[var(--md-shape-md)]"
+                style={{
+                  background: current
+                    ? "var(--md-primary-container)"
+                    : "var(--md-surface-container-high)",
+                  color: current
+                    ? "var(--md-on-primary-container)"
+                    : "var(--md-on-surface-variant)",
+                }}
+              >
+                <p.Icon className="h-5 w-5" />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-2">
+                  <span className="md-title-small">{p.name}</span>
+                  {current && (
+                    <span
+                      className="md-label-small rounded-[var(--md-shape-full)] px-2 py-0.5"
+                      style={{
+                        background: "var(--md-secondary-container)",
+                        color: "var(--md-on-secondary-container)",
+                      }}
+                    >
+                      Current
+                    </span>
+                  )}
+                </span>
+                <span
+                  className="md-body-small mt-0.5 block"
+                  style={{ color: "var(--md-on-surface-variant)" }}
+                >
+                  {p.blurb}
+                </span>
+              </span>
+            </Ripplable>
+          );
+        })}
+      </Dialog>
+
       <ChunkPanel />
     </div>
   );
