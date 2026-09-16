@@ -573,10 +573,16 @@ export function Dialog({
   title: string;
   body?: string;
   children: React.ReactNode;
-  /** Widens the panel for dialogs whose content is a list rather than a
-   *  question. 22rem fits "Delete 3 conversations?" and two buttons; it
-   *  squeezes anything with rows in it. */
-  wide?: boolean;
+  /**
+   * Widens the panel for dialogs whose content is a list rather than a
+   * question. 22rem fits "Delete 3 conversations?" and two buttons; it
+   * squeezes anything with rows in it.
+   *
+   * `"xl"` is for content that is a VIEW rather than a form -- a plot, a
+   * canvas -- which needs room to be read at all rather than merely room to
+   * avoid wrapping.
+   */
+  wide?: boolean | "xl";
   /**
    * Classes on the children wrapper.
    *
@@ -596,7 +602,9 @@ export function Dialog({
     >
       <div className="md-scrim" />
       <div
-        className={`md-dialog relative ${wide ? "md-dialog-wide" : ""}`}
+        className={`md-dialog relative ${
+          wide === "xl" ? "md-dialog-xl" : wide ? "md-dialog-wide" : ""
+        }`}
         role="dialog"
         aria-modal="true"
         onClick={(e) => e.stopPropagation()}

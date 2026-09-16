@@ -1,3 +1,4 @@
+import hashlib
 import uuid
 
 import structlog
@@ -8,9 +9,12 @@ from fastapi import (
     File,
     HTTPException,
     Query,
+    Response,
     UploadFile,
 )
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import User, current_user, forbid_if_not_owner
 from app.config import get_settings
@@ -36,9 +40,44 @@ router = APIRouter(tags=["documents"])
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20MB
 
 
+def _owner_match(owner_id: str | None):
+    """Predicate for "this row belongs to this caller".
+
+    Spelled with `is_(None)` rather than `==` because `x = NULL` is NULL, never
+    true. With auth off every row has a NULL owner, so a plain `==` matches
+    nothing at all -- the lookup would report every upload as new and the whole
+    dedupe would be dead in precisely the configuration it ships in.
+
+    Pulled out of the query so a test can compile it without a database.
+    """
+    if owner_id is None:
+        return Document.owner_id.is_(None)
+    return Document.owner_id == owner_id
+
+
+async def _find_by_digest(
+    session: AsyncSession, digest: str, owner_id: str | None
+) -> Document | None:
+    """The caller's existing copy of these bytes, if any.
+
+    Scoped by owner even though the digest is global: one tenant must not learn
+    that another holds a file, and must not inherit a row it cannot delete.
+    """
+    result = await session.execute(
+        select(Document)
+        .where(Document.content_sha256 == digest, _owner_match(owner_id))
+        # Oldest wins, so repeated uploads keep converging on one row rather
+        # than hopping between near-simultaneous inserts.
+        .order_by(Document.created_at.asc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
 @router.post("/documents", response_model=DocumentOut, status_code=201)
 async def upload_document(
     background: BackgroundTasks,
+    response: Response,
     file: UploadFile = File(...),
     user: User = Depends(current_user),
 ) -> Document:
@@ -46,6 +85,13 @@ async def upload_document(
 
     Embedding is rate-limited to ~133 chunks/minute, so holding the request
     open would time out any realistic proxy. The client polls GET /documents.
+
+    Already-indexed content is returned as-is with **200** instead of 201, so
+    re-dropping a folder is a cheap sync rather than a corpus-corrupting event.
+    Duplicates are not merely untidy: each one spends real embedding quota, and
+    it puts two copies of every passage in the vector store under DIFFERENT
+    chunk ids, which defeats the retrieval-level dedupe and quietly burns a
+    top-k slot on a passage the model has already been given.
     """
     filename = file.filename or "untitled"
 
@@ -65,16 +111,59 @@ async def upload_document(
             f"{MAX_UPLOAD_BYTES // 1024 // 1024}MB.",
         )
 
+    digest = hashlib.sha256(data).hexdigest()
+
     async with SessionLocal() as session:
+        existing = await _find_by_digest(session, digest, user.owner_id)
+        if existing is not None and existing.status is not DocStatus.failed:
+            response.status_code = 200
+            log.info(
+                "upload_duplicate",
+                document_id=str(existing.id),
+                filename=filename,
+                existing_filename=existing.filename,
+            )
+            return existing
+
+        if existing is not None:
+            # A FAILED row is a duplicate of nothing useful -- it holds no
+            # chunks and no vectors. Treating it as one would make re-uploading
+            # after a transient parse or embedding failure impossible: the user
+            # would get a cheerful 200 and a document that stays broken for
+            # ever. Reuse the row and run ingestion again.
+            existing.status = DocStatus.pending
+            existing.error = None
+            existing.filename = filename
+            existing.n_pages = existing.n_chunks = existing.n_embedded = 0
+            await session.commit()
+            await session.refresh(existing)
+            background.add_task(ingest.ingest_document, existing.id, data)
+            log.info("upload_retry_failed", document_id=str(existing.id))
+            return existing
+
         doc = Document(
             filename=filename,
             content_type=file.content_type or "application/octet-stream",
             size_bytes=len(data),
             status=DocStatus.pending,
             owner_id=user.owner_id,
+            content_sha256=digest,
         )
         session.add(doc)
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError:
+            # Two uploads of the same bytes in flight at once: both SELECTed
+            # before either INSERTed, so the check above cleared both and the
+            # index caught the loser. The uploader sends files sequentially,
+            # but two browser tabs do not coordinate.
+            await session.rollback()
+            winner = await _find_by_digest(session, digest, user.owner_id)
+            if winner is None:
+                raise
+            response.status_code = 200
+            log.info("upload_duplicate_race", document_id=str(winner.id))
+            return winner
         await session.refresh(doc)
 
     # FastAPI runs this after the response is sent. Fine for a demo; a real

@@ -6,9 +6,11 @@ import {
   type ChatMessage,
   type InterruptEvent,
   type ClarifyDecision,
+  type QueryRay,
   type SessionDetail,
   type TurnOutcome,
   deleteSession,
+  getQueryRay,
   getSession,
   sendFeedback,
   resumeTurn,
@@ -17,8 +19,9 @@ import {
 } from "@/lib/api";
 import { useApp } from "../../providers";
 import { Answer } from "../../answer";
-import { Button, Chip, Fab, LinkChip, TextArea } from "../../md";
+import { Button, Chip, Dialog, Fab, LinkChip, TextArea } from "../../md";
 import {
+  IconAtlas,
   IconCheck,
   IconExternal,
   IconQuote,
@@ -27,6 +30,8 @@ import {
   IconThumbUp,
 } from "../../icons";
 import Clarify from "./clarify";
+import RayView from "../rayview";
+import type { PlotTheme } from "../../atlas/scatter";
 import Rail from "./rail";
 import {
   DEFAULT_TURN_SETTINGS,
@@ -712,7 +717,7 @@ function Turn({
   // User turns are M3-style sent bubbles: primary container, right-aligned.
   if (message.role === "user") {
     return (
-      <li className="flex justify-end">
+      <li className="flex flex-col items-end gap-1">
         <p
           className="md-body-medium max-w-[80%] rounded-[var(--md-shape-lg)] px-4 py-3"
           style={{
@@ -722,6 +727,7 @@ function Turn({
         >
           {message.content}
         </p>
+        <QueryRayButton messageId={message.id} />
       </li>
     );
   }
@@ -905,5 +911,105 @@ function Feedback({
         <IconThumbDown className="h-3.5 w-3.5" />
       </button>
     </span>
+  );
+}
+
+
+/**
+ * "Where did this question land?" — the query ray, in a dialog.
+ *
+ * Attached to the QUESTION rather than to the answer, because the thing being
+ * explained is the question: which region of the corpus it fell into, and
+ * whether the passages it pulled back were neighbours of one another or three
+ * unrelated stragglers. A score list cannot tell those apart.
+ *
+ * Fetched on FIRST OPEN, not with the transcript. It costs an embedding call
+ * and a projection of the whole corpus, and the overwhelming majority of turns
+ * are never asked about. Cached afterwards so reopening is instant.
+ */
+function QueryRayButton({ messageId }: { messageId: string }) {
+  const [open, setOpen] = useState(false);
+  const [data, setData] = useState<QueryRay | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // The plot carries its own ground, independent of the app theme, exactly as
+  // the Atlas does — a scatter needs a dark field to have contrast against,
+  // whatever the surrounding page is doing.
+  const [theme, setTheme] = useState<PlotTheme>("dark");
+
+  async function show() {
+    setOpen(true);
+    if (data || loading) return;
+    setLoading(true);
+    setError(null);
+    try {
+      setData(await getQueryRay(messageId));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not build the view");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => void show()}
+        title="Where did this question land in the corpus?"
+        className="md-label-small flex items-center gap-1 rounded-[var(--md-shape-full)] px-2 py-1 opacity-55 transition-opacity hover:opacity-100"
+        style={{ color: "var(--md-on-surface-variant)" }}
+      >
+        <IconAtlas className="h-3.5 w-3.5" />
+        Where did this land?
+      </button>
+
+      <Dialog
+        open={open}
+        onClose={() => setOpen(false)}
+        title="Where this question landed"
+        body={
+          data
+            ? `${data.rays.length} passage(s) retrieved from ${data.n_documents} document(s). The three axes account for ${Math.round(
+                data.explained_variance.reduce((a, b) => a + b, 0) * 100,
+              )}% of the real structure — a flat picture of a 768-dimensional space, so read it for shape, not for exact distance.`
+            : undefined
+        }
+        wide="xl"
+        contentClassName="mt-4"
+      >
+        <div className="h-[60vh] min-h-[22rem] w-full">
+          {loading && (
+            <p
+              className="md-body-medium flex h-full items-center justify-center gap-2"
+              style={{ color: "var(--md-on-surface-variant)" }}
+            >
+              <IconSpinner className="h-4 w-4" />
+              Embedding the question and projecting the corpus
+            </p>
+          )}
+          {error && (
+            <p
+              className="md-body-medium flex h-full items-center justify-center px-6 text-center"
+              style={{ color: "var(--md-on-surface-variant)" }}
+            >
+              {error}
+            </p>
+          )}
+          {data && !loading && !error && <RayView data={data} theme={theme} />}
+        </div>
+        <div className="mt-3 flex items-center justify-between gap-3">
+          <Button
+            variant="text"
+            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+          >
+            {theme === "dark" ? "Light field" : "Dark field"}
+          </Button>
+          <Button variant="tonal" onClick={() => setOpen(false)}>
+            Close
+          </Button>
+        </div>
+      </Dialog>
+    </>
   );
 }

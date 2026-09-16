@@ -306,7 +306,14 @@ class VectorStore:
                 offset=offset,
             )
             points.extend(
-                (list(pt.vector), dict(pt.payload or {}))
+                # The point id IS the chunk id (see `id=str(p.chunk_id)` in
+                # upsert) and it is NOT repeated in the payload, so dropping it
+                # here left every caller with no way to say which chunk a
+                # vector belonged to. The Atlas has been shipping empty
+                # chunk_ids because of it -- invisible, because nothing
+                # downstream used them until the query ray needed to match a
+                # stored citation against a plotted point.
+                (list(pt.vector), {**dict(pt.payload or {}), "chunk_id": str(pt.id)})
                 for pt in batch
                 if pt.vector is not None
             )

@@ -18,6 +18,10 @@ import {
   IconUpload,
 } from "../icons";
 
+/** What the ingester can parse. A folder holds whatever it holds, so anything
+ *  else is skipped and reported rather than failing the whole drop. */
+const ACCEPTED = /\.(pdf|md|markdown|txt)$/i;
+
 export default function Library() {
   const { documents, loading, refreshDocuments } = useApp();
   const [busy, setBusy] = useState(false);
@@ -25,21 +29,98 @@ export default function Library() {
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  // A SECOND input, because `webkitdirectory` is a property of the input rather
+  // than of the picker it opens. Setting it turns that input into a folder
+  // picker permanently and takes the file picker away, so one input cannot
+  // offer both.
+  const folderRef = useRef<HTMLInputElement>(null);
+  // Which file of how many, so a folder of thirty does not look frozen.
+  const [progress, setProgress] = useState<{
+    done: number;
+    total: number;
+    name: string;
+  } | null>(null);
+  const [skipped, setSkipped] = useState<string[]>([]);
+  // What the last upload actually did. The distinction matters because the
+  // library list looks identical either way: re-dropping a folder that is
+  // already indexed produces no visible change, and without this it is
+  // indistinguishable from an upload that silently did nothing.
+  const [summary, setSummary] = useState<{
+    added: number;
+    duplicates: number;
+  } | null>(null);
+
+  /**
+   * Walk a dropped directory.
+   *
+   * `dataTransfer.files` is EMPTY for a dropped folder — the browser reports
+   * the directory as an entry, never its contents — so a plain drop handler
+   * silently does nothing. `webkitGetAsEntry()` is the only way in, and the
+   * loop is needed because a reader returns at most 100 entries per call and
+   * signals the end with an empty batch.
+   */
+  async function walk(entry: FileSystemEntry, out: File[]): Promise<void> {
+    if (entry.isFile) {
+      const file = await new Promise<File | null>((resolve) =>
+        (entry as FileSystemFileEntry).file(resolve, () => resolve(null)),
+      );
+      if (file) out.push(file);
+      return;
+    }
+    if (!entry.isDirectory) return;
+    const reader = (entry as FileSystemDirectoryEntry).createReader();
+    for (;;) {
+      const batch = await new Promise<FileSystemEntry[]>((resolve) =>
+        reader.readEntries(resolve, () => resolve([])),
+      );
+      if (!batch.length) return; // an empty batch is how the API says "done"
+      for (const child of batch) await walk(child, out);
+    }
+  }
 
   async function handleFiles(files: FileList | null) {
     if (!files?.length) return;
+    await upload(Array.from(files));
+  }
+
+  async function upload(candidates: File[]) {
+    const accepted = candidates.filter((f) => ACCEPTED.test(f.name));
+    const rejected = candidates
+      .filter((f) => !ACCEPTED.test(f.name))
+      .map((f) => f.name);
+    setSkipped(rejected);
+    if (!accepted.length) {
+      setError(
+        rejected.length
+          ? `Nothing uploadable here — ${rejected.length} file(s) are not PDF, Markdown or text.`
+          : null,
+      );
+      return;
+    }
+
     setBusy(true);
     setError(null);
+    setSummary(null);
     try {
       // Sequential: parallel uploads queue behind the same token budget anyway,
       // and failures get attributed to the right file.
-      for (const file of Array.from(files)) await uploadDocument(file);
+      let added = 0;
+      let duplicates = 0;
+      for (const [i, file] of accepted.entries()) {
+        setProgress({ done: i, total: accepted.length, name: file.name });
+        const result = await uploadDocument(file);
+        if (result.duplicate) duplicates += 1;
+        else added += 1;
+      }
+      setSummary({ added, duplicates });
       await refreshDocuments();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Upload failed");
     } finally {
       setBusy(false);
+      setProgress(null);
       if (inputRef.current) inputRef.current.value = "";
+      if (folderRef.current) folderRef.current.value = "";
     }
   }
 
@@ -77,6 +158,21 @@ export default function Library() {
         onDrop={(e: React.DragEvent) => {
           e.preventDefault();
           setDragging(false);
+          // `items` before `files`: only the items list exposes entries, and
+          // entries are the only way to see inside a dropped folder. The
+          // DataTransfer is emptied as soon as this handler yields, so the
+          // entries are collected synchronously and walked afterwards.
+          const entries = Array.from(e.dataTransfer.items)
+            .map((item) => item.webkitGetAsEntry?.() ?? null)
+            .filter((entry): entry is FileSystemEntry => entry !== null);
+          if (entries.length) {
+            void (async () => {
+              const found: File[] = [];
+              for (const entry of entries) await walk(entry, found);
+              await upload(found);
+            })();
+            return;
+          }
           void handleFiles(e.dataTransfer.files);
         }}
         onClick={() => inputRef.current?.click()}
@@ -106,14 +202,39 @@ export default function Library() {
           )}
         </span>
         <p className="md-title-small">
-          {busy ? "Uploading" : "Drop files here, or click to browse"}
+          {busy && progress
+            ? `Uploading ${progress.done + 1} of ${progress.total}`
+            : busy
+              ? "Uploading"
+              : "Drop files or a folder here, or click to browse"}
         </p>
         <p
-          className="md-body-small mt-1"
+          className="md-body-small mt-1 truncate"
           style={{ color: "var(--md-on-surface-variant)" }}
         >
-          PDF, Markdown or plain text · up to 20MB · scanned PDFs need OCR
+          {busy && progress
+            ? progress.name
+            : "PDF, Markdown or plain text · up to 20MB · scanned PDFs need OCR"}
         </p>
+        {!busy && (
+          <span
+            role="button"
+            tabIndex={0}
+            // stopPropagation, or the click bubbles to the dropzone and opens
+            // the file picker on top of the folder picker.
+            onClick={(e) => {
+              e.stopPropagation();
+              folderRef.current?.click();
+            }}
+            className="md-label-large mt-4 inline-block rounded-[var(--md-shape-full)] px-4 py-2"
+            style={{
+              background: "var(--md-secondary-container)",
+              color: "var(--md-on-secondary-container)",
+            }}
+          >
+            Choose a folder
+          </span>
+        )}
         <input
           ref={inputRef}
           type="file"
@@ -122,7 +243,46 @@ export default function Library() {
           hidden
           onChange={(e) => void handleFiles(e.target.files)}
         />
+        <input
+          ref={folderRef}
+          type="file"
+          // Non-standard, and the only way to pick a directory. Spread as an
+          // object because TS does not know the attribute.
+          {...{ webkitdirectory: "" }}
+          multiple
+          hidden
+          onChange={(e) => void handleFiles(e.target.files)}
+        />
       </Ripplable>
+
+      {summary && !busy && (
+        <p
+          className="md-body-medium rounded-[var(--md-shape-md)] px-4 py-3"
+          style={{
+            background: "var(--md-secondary-container)",
+            color: "var(--md-on-secondary-container)",
+          }}
+        >
+          {summary.added > 0 && `${summary.added} uploaded`}
+          {summary.added > 0 && summary.duplicates > 0 && ", "}
+          {summary.duplicates > 0 && `${summary.duplicates} already indexed`}
+          {summary.added === 0 &&
+            summary.duplicates > 0 &&
+            " — nothing to do, no embedding quota spent"}
+          .
+        </p>
+      )}
+
+      {skipped.length > 0 && !busy && (
+        <p
+          className="md-body-small"
+          style={{ color: "var(--md-on-surface-variant)" }}
+        >
+          Skipped {skipped.length} unsupported file
+          {skipped.length === 1 ? "" : "s"}: {skipped.slice(0, 5).join(", ")}
+          {skipped.length > 5 ? ` and ${skipped.length - 5} more` : ""}.
+        </p>
+      )}
 
       {error && (
         <p

@@ -1167,6 +1167,9 @@ textarea:focus-visible {
      and two buttons; a row with an icon, a name and a line of
      description wraps three times in it. */
   .md-dialog-wide { max-width: 34rem; }
+  /* For a dialog whose content is a view rather than a form. Capped at the
+     viewport so it still fits a phone, where it simply becomes full-bleed. */
+  .md-dialog-xl { max-width: min(68rem, 96vw); }
   .md-scrim {
     position: fixed;
     inset: 0;

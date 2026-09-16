@@ -47,6 +47,16 @@ class Document(Base):
     # re-ingesting anything.
     owner_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
 
+    # SHA-256 of the uploaded bytes. The identity of a document is its CONTENT,
+    # not its name: `report.md` and `report (1).md` are the same document, and
+    # the same filename with an edit is not. Uniqueness is enforced per owner by
+    # an index created in `create_tables` -- it cannot be declared here because
+    # it has to COALESCE a nullable owner_id (see the comment there).
+    #
+    # Nullable for rows ingested before this column existed. Their bytes are not
+    # retained, so they cannot be backfilled; they simply never match.
+    content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     # Free-form document-level metadata, copied onto every vector's payload.
     # This is the extension point for LLM-based categorisation: an enricher
     # writes {"category": "...", "tags": [...]} here and retrieval can filter

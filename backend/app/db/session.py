@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.config import get_settings
@@ -77,11 +78,38 @@ async def get_session() -> AsyncIterator[AsyncSession]:
         yield session
 
 
-async def create_tables() -> None:
-    """Good enough for a learning demo.
+# Additive DDL that `create_all` cannot do, run on every boot.
+#
+# `create_all` only ever CREATEs missing tables; it will not ALTER one that
+# already exists, which is why a model change has historically meant
+# `docker compose down -v` and re-ingesting the whole corpus. These statements
+# are all `IF NOT EXISTS`, so running them every boot is a no-op once applied
+# and a migration on the boot after a model change.
+#
+# This is not a substitute for Alembic. It is the narrow subset that is safe to
+# make idempotent: adding a nullable column and adding an index. Anything that
+# rewrites or drops data belongs in a real migration tool.
+_MIGRATIONS: tuple[str, ...] = (
+    "ALTER TABLE documents ADD COLUMN IF NOT EXISTS content_sha256 VARCHAR(64)",
+    # Content identity, scoped per owner.
+    #
+    # COALESCE(owner_id, '') rather than a plain two-column index, because in
+    # SQL NULLs are DISTINCT from each other: with auth off every row has
+    # owner_id NULL, so a plain UNIQUE (content_sha256, owner_id) would never
+    # once fire. Exactly the case this is meant to catch.
+    #
+    # Partial on `content_sha256 IS NOT NULL` so rows ingested before the
+    # column existed -- whose bytes are gone and cannot be hashed -- do not all
+    # collide with each other on NULL.
+    "CREATE UNIQUE INDEX IF NOT EXISTS documents_content_owner_uniq "
+    "ON documents (content_sha256, COALESCE(owner_id, '')) "
+    "WHERE content_sha256 IS NOT NULL",
+)
 
-    A production app would use Alembic migrations instead -- create_all cannot
-    alter an existing table, so any model change needs `docker compose down -v`.
-    """
+
+async def create_tables() -> None:
+    """Create anything missing, then apply the additive DDL above."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        for statement in _MIGRATIONS:
+            await conn.execute(text(statement))

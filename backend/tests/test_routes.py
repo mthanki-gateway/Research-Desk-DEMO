@@ -29,6 +29,8 @@ REQUIRED = {
     ("GET", "/sessions"),
     ("POST", "/sessions"),
     ("GET", "/documents"),
+    ("GET", "/corpus/atlas"),
+    ("GET", "/corpus/atlas/ray/{message_id}"),
 }
 
 

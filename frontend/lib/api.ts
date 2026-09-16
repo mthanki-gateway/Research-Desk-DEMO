@@ -266,14 +266,24 @@ export async function listDocuments(): Promise<Document[]> {
   return res.json();
 }
 
-export async function uploadDocument(file: File): Promise<Document> {
+export type UploadResult = {
+  document: Document;
+  /** The API already had these exact bytes — 200, not 201. Nothing was
+   *  ingested and no embedding quota was spent. */
+  duplicate: boolean;
+};
+
+export async function uploadDocument(file: File): Promise<UploadResult> {
   const form = new FormData();
   form.append("file", file);
   // No Content-Type here on purpose: the browser must set it, because it has
   // to append the multipart boundary.
   const res = await authedFetch("/documents", { method: "POST", body: form });
   if (!res.ok) throw new Error(await detail(res));
-  return res.json();
+  // The status code carries the answer rather than a field in the body: it is
+  // what HTTP already means by 201-created versus 200-here-it-is, and it keeps
+  // DocumentOut a description of the document rather than of the request.
+  return { document: await res.json(), duplicate: res.status === 200 };
 }
 
 export async function deleteDocument(id: string): Promise<void> {
@@ -882,6 +892,8 @@ export type AtlasPoint = {
   chunk_index: number;
   n_chars: number;
   preview: string;
+  /** The whole passage, for the expanded reading card. */
+  text: string;
   x: number;
   y: number;
   z: number;
@@ -906,6 +918,37 @@ export type Atlas = {
 
 export async function getAtlas(): Promise<Atlas> {
   const res = await authedFetch("/corpus/atlas");
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+/** One retrieved chunk, as a line from the query to a point in `points`. */
+export type AtlasRay = {
+  /** Index into `points` — not a chunk id, so the UI never re-derives a
+   *  position and risks a second, disagreeing answer. */
+  index: number;
+  rank: number;
+  score: number;
+  filename: string;
+  heading: string | null;
+  chunk_index: number;
+};
+
+export type QueryRay = Atlas & {
+  question: string;
+  /** Where the question itself landed, in the corpus's own projection. */
+  query: { x: number; y: number; z: number } | null;
+  rays: AtlasRay[];
+  /** Nearest points that were NOT retrieved — the recall misses, which appear
+   *  in no log: a near miss and a distant miss are both simply absent. */
+  near_misses: { index: number; distance: number }[];
+  /** Stored citations with no point to attach to (a web result, or a chunk
+   *  deleted since). Surfaced so the UI can say why it drew fewer lines. */
+  dropped: number;
+};
+
+export async function getQueryRay(messageId: string): Promise<QueryRay> {
+  const res = await authedFetch(`/corpus/atlas/ray/${messageId}`);
   if (!res.ok) throw new Error(await detail(res));
   return res.json();
 }

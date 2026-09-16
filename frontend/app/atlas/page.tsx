@@ -150,6 +150,7 @@ export default function AtlasPage() {
         selected={selected}
         onSelect={setSelected}
         focus={focus}
+        onFocusChange={setFocus}
         theme={plotTheme}
         onThemeChange={setPlotTheme}
       />
