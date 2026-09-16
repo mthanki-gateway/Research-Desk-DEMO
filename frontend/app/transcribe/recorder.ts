@@ -72,7 +72,7 @@ export const VAD = {
  * usual 48kHz wastes three times the bandwidth to be downsampled at the other
  * end anyway.
  */
-const TARGET_RATE = 16_000;
+export const TARGET_RATE = 16_000;
 
 export type Meter = { level: number; speaking: boolean };
 
@@ -87,7 +87,7 @@ export type Recorder = {
 };
 
 /** Average `factor` input samples into one output sample. */
-function downsample(input: Float32Array, from: number, to: number): Float32Array {
+export function downsample(input: Float32Array, from: number, to: number): Float32Array {
   if (to >= from) return input;
   const ratio = from / to;
   const out = new Float32Array(Math.floor(input.length / ratio));
@@ -147,7 +147,7 @@ function clean(samples: Float32Array, threshold: number): Float32Array {
 }
 
 /** Wrap float samples in a 16-bit PCM WAV container. */
-function toWav(samples: Float32Array, sampleRate: number): Blob {
+export function toWav(samples: Float32Array, sampleRate: number): Blob {
   const buffer = new ArrayBuffer(44 + samples.length * 2);
   const view = new DataView(buffer);
   const ascii = (offset: number, text: string) => {

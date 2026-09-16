@@ -966,3 +966,81 @@ export async function getQueryRay(messageId: string): Promise<QueryRay> {
   if (!res.ok) throw new Error(await detail(res));
   return res.json();
 }
+
+
+// ---------------------------------------------------------------------------
+// Earshot — the audio-only app
+// ---------------------------------------------------------------------------
+
+export type VoiceOption = {
+  id: string;
+  label: string;
+  /** How it actually sounds. The names alone are unreadable as a menu. */
+  character: string;
+};
+
+export type VoiceStatus = {
+  enabled: boolean;
+  stt_model: string;
+  tts_model: string;
+  voices: VoiceOption[];
+  default_voice: string;
+  /** Shown because "did not search the web" and "cannot search the web" are
+   *  indistinguishable from a spoken answer. */
+  web_search: boolean;
+};
+
+export type VoiceSource = {
+  label: string;
+  kind: "document" | "web";
+  url: string | null;
+  /** How many passages from this one source. Grouped per document, because to
+   *  a listener eight chunks of one handbook is one source. */
+  passages: number;
+};
+
+export type VoiceTurn = {
+  transcript: string;
+  /** The written answer, markup and all. */
+  answer: string;
+  /** What was actually SAID — markup stripped, length capped. Differs from
+   *  `answer`, so the screen shows the words being spoken rather than a
+   *  different text that merely resembles them. */
+  spoken: string;
+  /** base64 WAV. Inline rather than a second request: one turn, one trip. */
+  audio: string;
+  mime: string;
+  sample_rate: number;
+  sources: VoiceSource[];
+  /** Nothing intelligible was heard. Answered with speech, not an error. */
+  heard_nothing: boolean;
+  truncated: boolean;
+  iterations: number;
+  partial: boolean;
+};
+
+export async function getVoiceStatus(): Promise<VoiceStatus> {
+  const res = await authedFetch("/voice/status", { cache: "no-store" });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function askByVoice(
+  wav: Blob,
+  voiceName: string,
+): Promise<VoiceTurn> {
+  const form = new FormData();
+  form.append("audio", wav, "question.wav");
+  form.append("voice_name", voiceName);
+  const res = await authedFetch("/voice/ask", { method: "POST", body: form });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+/** base64 WAV -> a URL an <audio> element can play. */
+export function audioUrl(turn: VoiceTurn): string {
+  const raw = atob(turn.audio);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  return URL.createObjectURL(new Blob([bytes], { type: turn.mime }));
+}

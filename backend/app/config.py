@@ -313,6 +313,29 @@ class Settings(BaseSettings):
     answer_tokens_per_minute: int = 250_000
     answer_requests_per_minute: int = 5
 
+    # ---- Earshot: the audio-only app -------------------------------------
+    #
+    # STT is an ORDINARY generateContent call with an audio part, not a
+    # dedicated speech endpoint -- which is why it names a normal model. The
+    # lite model was measured transcribing its own synthesised speech back
+    # correctly, and it is the cheapest thing on the list that does.
+    #
+    # There is also `models/gemini-3.5-transcribe-live`, which is bidi-only.
+    # Streaming is the right shape for continuous dictation and the wrong shape
+    # for push-to-talk turns, where the audio is complete before anything is
+    # sent.
+    voice_stt_model: str = "models/gemini-3.5-flash-lite"
+    # TTS models are separate and DO need naming: `responseModalities: [AUDIO]`
+    # is rejected by every ordinary model.
+    voice_tts_model: str = "models/gemini-3.1-flash-tts-preview"
+    voice_default: str = "Kore"
+    # Spoken answers are capped hard. A page of prose is a fine thing to read
+    # and four minutes of unskippable audio to listen to -- there is no
+    # scanning ahead in speech, so length costs the listener far more than it
+    # costs a reader. The agent is asked for brevity in the prompt; this is the
+    # backstop for when it does not comply.
+    voice_answer_max_chars: int = 1_200
+
     # Query rewriting stays on Gemma, deliberately. It is the one call where
     # throughput beats quality: multi-query fires N rewrites per turn, the
     # output is short phrases rather than prose, and Gemma's 30 rpm is the

@@ -17,6 +17,7 @@ from app.api import (
     playground,
     profile,
     sessions,
+    voice,
 )
 from app.api import auth as auth_api
 from app.config import get_settings
@@ -171,6 +172,7 @@ app.include_router(evaluation.router)
 app.include_router(profile.router)
 app.include_router(playground.router)
 app.include_router(atlas.router)
+app.include_router(voice.router)
 
 
 class Health(BaseModel):

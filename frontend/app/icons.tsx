@@ -56,6 +56,29 @@ export const IconMic = (p: Props) => (
   </Svg>
 );
 
+/** Earshot's mark: sound arriving at an ear. */
+export const IconEarshot = (p: Props) => (
+  <Svg {...p}>
+    <path d="M8.5 20c0-2.5-1-3-2.2-4.2A6.5 6.5 0 0 1 4.5 11a6 6 0 0 1 12 0c0 2-1 3-2.3 3.6-1 .5-1.2 1.2-1.2 2.1a2.5 2.5 0 0 1-4.5 1.5" />
+    <path d="M9 10.5a1.8 1.8 0 0 1 3.5.6" />
+    <path d="M19 8.5a6 6 0 0 1 0 7M21.5 6a10 10 0 0 1 0 12" />
+  </Svg>
+);
+
+/** A waveform, for the speaking state. */
+export const IconWave = (p: Props) => (
+  <Svg {...p}>
+    <path d="M3 12h2M8 7v10M12 4v16M16 8v8M20 11h1" />
+  </Svg>
+);
+
+/** Playback. */
+export const IconPlay = (p: Props) => (
+  <Svg {...p}>
+    <path d="M8 5.5 18 12 8 18.5Z" />
+  </Svg>
+);
+
 export const IconStop = (p: Props) => (
   <Svg {...p}>
     <rect x="6" y="6" width="12" height="12" rx="2" />

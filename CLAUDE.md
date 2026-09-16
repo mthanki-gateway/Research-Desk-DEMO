@@ -48,6 +48,13 @@ Apps are registered in `frontend/app/projects.ts`. Adding one is a single
 entry there plus its pages; the drawer, the app switcher and active-item
 highlighting all read from it. Do not hardcode nav items anywhere else.
 
+Three today — **Research Desk** (chat, library, lab, atlas), **Model Lab**
+(playground, transcribe) and **Earshot** (voice). Earshot is a different DOOR
+onto the Research Desk's agent, not a second assistant: same corpus, same
+graph, same tools, same web search. A document uploaded in the Library is
+answerable by voice the moment it finishes indexing. If you find yourself
+adding a second index or a parallel prompt stack for it, that is the mistake.
+
 ### Adding a frontend dependency needs an image rebuild
 
 `docker-compose.yml` mounts only `frontend/app` and `frontend/lib`.

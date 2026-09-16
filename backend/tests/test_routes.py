@@ -30,6 +30,8 @@ REQUIRED = {
     ("POST", "/sessions"),
     ("GET", "/documents"),
     ("GET", "/corpus/atlas"),
+    ("GET", "/voice/status"),
+    ("POST", "/voice/ask"),
     ("GET", "/corpus/atlas/ray/{message_id}"),
 }
 
