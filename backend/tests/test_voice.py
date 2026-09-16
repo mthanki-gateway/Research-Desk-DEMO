@@ -183,3 +183,302 @@ class TestNoSpeechGuard:
     def test_a_question_about_silence_is_not_silence(self):
         """The stem match must not eat a genuine sentence beginning with it."""
         assert voice.heard("No speech was detected in the recording, why?")
+
+
+@pytest.mark.asyncio
+class TestTheTurnCanActuallyRun:
+    """The graph in the RUNNING server is not the graph in a test process.
+
+    THE BUG THIS PINS
+
+    The route called `run_agent` with no `thread_id`, and every check here
+    passed -- because a bare Python process never runs the app's lifespan, so
+    it gets a graph compiled WITHOUT a checkpointer, which does not care. The
+    real server installs one during startup, and a checkpointed graph refuses
+    outright:
+
+        ValueError: Checkpointer requires one or more of the following
+        'configurable' keys: thread_id, checkpoint_ns, checkpoint_id
+
+    Every spoken turn 500'd. The one configuration that mattered was the one
+    not exercised, which is the whole lesson: this asserts on the ARGUMENTS the
+    route passes, not on whether a particular graph tolerates them.
+    """
+
+    async def test_a_thread_id_is_passed(self, monkeypatch):
+        from app.api import voice as api
+
+        seen: dict = {}
+
+        async def fake_run_agent(question, **kwargs):
+            seen["question"] = question
+            seen.update(kwargs)
+            return _Result()
+
+        async def fake_transcribe(data, **kwargs):
+            return "how many documents are there"
+
+        async def fake_speak(text, **kwargs):
+            return b"RIFF" + bytes(40), 24_000
+
+        monkeypatch.setattr(api, "run_agent", fake_run_agent)
+        monkeypatch.setattr(api.voice, "transcribe", fake_transcribe)
+        monkeypatch.setattr(api.voice, "speak", fake_speak)
+        monkeypatch.setattr(api, "_name_hint", _no_hint)
+
+        await api.ask(audio=_Upload(b"fake wav"), voice_name="Kore", top_k=0, user=_User())
+
+        assert seen.get("thread_id"), "no thread_id: a checkpointed graph refuses to run"
+
+    async def test_each_turn_gets_its_own_thread(self, monkeypatch):
+        """Reused threads grow without bound and leak evidence between turns.
+
+        The state accumulators use APPEND reducers, so a thread shared across
+        questions carries the previous question's passages into the next
+        answer -- which in a spoken app is invisible until the assistant cites
+        something nobody asked about.
+        """
+        from app.api import voice as api
+
+        threads: list[str] = []
+
+        async def fake_run_agent(question, **kwargs):
+            threads.append(kwargs.get("thread_id", ""))
+            return _Result()
+
+        async def fake_transcribe(data, **kwargs):
+            return "a question"
+
+        async def fake_speak(text, **kwargs):
+            return b"RIFF" + bytes(40), 24_000
+
+        monkeypatch.setattr(api, "run_agent", fake_run_agent)
+        monkeypatch.setattr(api.voice, "transcribe", fake_transcribe)
+        monkeypatch.setattr(api.voice, "speak", fake_speak)
+        monkeypatch.setattr(api, "_name_hint", _no_hint)
+
+        for _ in range(3):
+            await api.ask(audio=_Upload(b"x"), voice_name="Kore", top_k=0, user=_User())
+
+        assert len(set(threads)) == 3, threads
+
+    async def test_clarification_is_switched_off(self, monkeypatch):
+        """A human-in-the-loop pause renders as buttons, and there are none.
+
+        A paused graph here is a turn that produces no audio at all and no way
+        to continue it.
+        """
+        from app.api import voice as api
+
+        seen: dict = {}
+
+        async def fake_run_agent(question, **kwargs):
+            seen.update(kwargs)
+            return _Result()
+
+        async def fake_transcribe(data, **kwargs):
+            return "a question"
+
+        async def fake_speak(text, **kwargs):
+            return b"RIFF" + bytes(40), 24_000
+
+        monkeypatch.setattr(api, "run_agent", fake_run_agent)
+        monkeypatch.setattr(api.voice, "transcribe", fake_transcribe)
+        monkeypatch.setattr(api.voice, "speak", fake_speak)
+        monkeypatch.setattr(api, "_name_hint", _no_hint)
+
+        await api.ask(audio=_Upload(b"x"), voice_name="Kore", top_k=0, user=_User())
+        assert seen.get("clarify") is False
+
+    async def test_silence_never_reaches_the_agent(self, monkeypatch):
+        """An empty transcript must be answered with speech, not searched."""
+        from app.api import voice as api
+
+        called = False
+
+        async def fake_run_agent(question, **kwargs):
+            nonlocal called
+            called = True
+            return _Result()
+
+        async def fake_transcribe(data, **kwargs):
+            return ""  # the no-speech guard fired
+
+        async def fake_speak(text, **kwargs):
+            return b"RIFF" + bytes(40), 24_000
+
+        monkeypatch.setattr(api, "run_agent", fake_run_agent)
+        monkeypatch.setattr(api.voice, "transcribe", fake_transcribe)
+        monkeypatch.setattr(api.voice, "speak", fake_speak)
+        monkeypatch.setattr(api, "_name_hint", _no_hint)
+
+        out = await api.ask(audio=_Upload(b"x"), voice_name="Kore", top_k=0, user=_User())
+        assert not called, "silence was sent to the agent"
+        assert out["heard_nothing"] is True
+        # Still SPEAKS. The user is not looking at the screen -- that is the
+        # premise of the app -- so a silent error banner is a dead end.
+        assert out["audio"]
+
+
+class _User:
+    owner_id = None
+
+
+class _Upload:
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+        self.content_type = "audio/wav"
+
+    async def read(self) -> bytes:
+        return self._data
+
+
+class _Result:
+    answer = "You have ten documents."
+    evidence: list = []
+    iterations = 1
+    partial = False
+
+
+async def _no_hint(owner_id):
+    return ""
+
+
+class TestRetryable:
+    """Which failures are worth asking a different model about.
+
+    Measured in one pass mid-build: 3.1-flash-tts returned 429,
+    2.5-flash-preview-tts answered in 3.1 seconds, 2.5-pro-preview-tts returned
+    429. Free-tier TTS quota is per model and small, and the newest is not the
+    most available.
+
+    Falling through on the WRONG failures is its own bug: a 400 means the text
+    or the voice is wrong, every model will reject it identically, and trying
+    three turns one clear error into three slow ones.
+    """
+
+    def test_quota_and_provider_faults_fall_through(self):
+        assert voice._retryable(429)
+        assert voice._retryable(500)
+        assert voice._retryable(503)
+
+    def test_a_bad_request_does_not(self):
+        assert not voice._retryable(400)
+
+    def test_an_auth_failure_does_not(self):
+        """A different model does not have a different key."""
+        assert not voice._retryable(401)
+        assert not voice._retryable(403)
+
+
+@pytest.mark.asyncio
+class TestSpeakFallsThrough:
+    async def test_the_second_model_answers_when_the_first_is_out_of_quota(
+        self, monkeypatch
+    ):
+        import base64 as b64
+
+        calls: list[str] = []
+        pcm = b64.b64encode(bytes(64)).decode()
+
+        class FakeResponse:
+            def __init__(self, status, body):
+                self.status_code = status
+                self._body = body
+
+            def json(self):
+                return self._body
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def post(self, path, json=None):
+                calls.append(path)
+                if len(calls) == 1:
+                    return FakeResponse(429, {"error": {"message": "quota"}})
+                return FakeResponse(
+                    200,
+                    {
+                        "candidates": [
+                            {
+                                "content": {
+                                    "parts": [
+                                        {
+                                            "inlineData": {
+                                                # Capital L and a codec field:
+                                                # the real second model returns
+                                                # `audio/L16;codec=pcm;rate=24000`
+                                                # where the first returns
+                                                # `audio/l16; rate=24000`.
+                                                "mimeType": "audio/L16;codec=pcm;rate=24000",
+                                                "data": pcm,
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    },
+                )
+
+        monkeypatch.setattr(voice, "_client", lambda: FakeClient())
+        wav, rate = await voice.speak("ten documents", voice="Kore")
+
+        assert len(calls) == 2, "did not try the second model"
+        assert wav[:4] == b"RIFF"
+        assert rate == 24_000
+
+    async def test_a_bad_request_stops_immediately(self, monkeypatch):
+        calls: list[str] = []
+
+        class FakeResponse:
+            status_code = 400
+            text = ""
+
+            def json(self):
+                return {"error": {"message": "unknown voice"}}
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def post(self, path, json=None):
+                calls.append(path)
+                return FakeResponse()
+
+        monkeypatch.setattr(voice, "_client", lambda: FakeClient())
+        with pytest.raises(voice.VoiceError):
+            await voice.speak("x", voice="Kore")
+        assert len(calls) == 1, "retried a request every model will reject"
+
+    async def test_all_exhausted_names_what_was_tried(self, monkeypatch):
+        """The user is not looking at the screen. The message has to explain."""
+
+        class FakeResponse:
+            status_code = 429
+
+            def json(self):
+                return {"error": {"message": "quota"}}
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def post(self, path, json=None):
+                return FakeResponse()
+
+        monkeypatch.setattr(voice, "_client", lambda: FakeClient())
+        with pytest.raises(voice.VoiceError) as caught:
+            await voice.speak("x", voice="Kore")
+        assert "429" in str(caught.value)
+        assert "on screen" in str(caught.value)

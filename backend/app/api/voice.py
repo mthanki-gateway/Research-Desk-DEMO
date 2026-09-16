@@ -31,6 +31,7 @@ the point.
 from __future__ import annotations
 
 import base64
+import uuid
 
 import structlog
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -98,7 +99,9 @@ async def status(user: User = Depends(current_user)) -> dict:
     return {
         "enabled": voice.enabled(),
         "stt_model": settings.voice_stt_model,
-        "tts_model": settings.voice_tts_model,
+        # The chain, not one name: the UI should say what may speak, and
+        # the first entry is not always the one that does.
+        "tts_models": settings.voice_tts_models,
         "voices": voice.VOICES,
         "default_voice": settings.voice_default,
         # Shown in the UI, because "it did not search the web" and "it cannot
@@ -180,12 +183,27 @@ async def ask(
     # `clarify` is forced OFF. The human-in-the-loop pause renders as a set of
     # buttons to click, and there is nothing to click here; a paused graph in
     # this app is a turn that silently produces no audio.
+    # A thread id PER TURN, which is what the compiled graph requires.
+    #
+    # The running server installs a checkpointer during startup, and a
+    # checkpointed graph refuses to run without one -- "Checkpointer requires
+    # one or more of the following 'configurable' keys". Omitting it worked in
+    # every test here precisely because a bare Python process never runs the
+    # lifespan, so it got an UNCHECKPOINTED graph and no complaint. The one
+    # configuration that mattered was the one not exercised.
+    #
+    # Per turn rather than per session, matching the chat path: the state
+    # accumulators use append reducers, so a reused thread grows without bound
+    # and leaks an earlier question's evidence into a later answer. Earshot
+    # keeps no conversation in graph state at all, so a fresh uuid is exactly
+    # right -- the checkpointer's job here is durability within one run.
     result = await run_agent(
         transcript,
         owner_id=user.owner_id,
         top_k=top_k or None,
         preferences=SPOKEN_STYLE,
         clarify=False,
+        thread_id=f"earshot:{uuid.uuid4()}",
     )
 
     answer = (result.answer or "").strip()

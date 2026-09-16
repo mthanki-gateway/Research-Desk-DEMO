@@ -982,7 +982,9 @@ export type VoiceOption = {
 export type VoiceStatus = {
   enabled: boolean;
   stt_model: string;
-  tts_model: string;
+  /** Tried in order — free-tier TTS quota is per model and small, so the
+   *  first is not always the one that answers. */
+  tts_models: string[];
   voices: VoiceOption[];
   default_voice: string;
   /** Shown because "did not search the web" and "cannot search the web" are

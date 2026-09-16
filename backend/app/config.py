@@ -327,7 +327,21 @@ class Settings(BaseSettings):
     voice_stt_model: str = "models/gemini-3.5-flash-lite"
     # TTS models are separate and DO need naming: `responseModalities: [AUDIO]`
     # is rejected by every ordinary model.
-    voice_tts_model: str = "models/gemini-3.1-flash-tts-preview"
+    #
+    # A LIST, tried in order, for the same reason the answer pool is a list:
+    # the newest is not the most available. Free-tier TTS quota is per model
+    # and small, and it is genuinely normal for one of these to return 429
+    # while another answers in three seconds -- measured, in that exact
+    # configuration, mid-build.
+    #
+    # Falling back matters more here than anywhere else in the app: a turn
+    # whose synthesis fails has nothing to show at all. Everywhere else a
+    # degraded answer is still an answer; in an audio-only app it is silence.
+    voice_tts_models: list[str] = [
+        "models/gemini-3.1-flash-tts-preview",
+        "models/gemini-2.5-flash-preview-tts",
+        "models/gemini-2.5-pro-preview-tts",
+    ]
     voice_default: str = "Kore"
     # Spoken answers are capped hard. A page of prose is a fine thing to read
     # and four minutes of unskippable audio to listen to -- there is no

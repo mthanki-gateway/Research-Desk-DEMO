@@ -205,13 +205,27 @@ def heard(raw: str) -> str:
 
 
 async def speak(text: str, *, voice: str = DEFAULT_VOICE) -> tuple[bytes, int]:
-    """Text to speech. Returns (wav_bytes, sample_rate).
+    """Text to speech, falling through the configured models. (wav, rate).
 
-    The rate is returned alongside rather than assumed by the caller, because
-    it is read from the response -- see `_rate_from_mime`.
+    WHY A FALLBACK CHAIN AND NOT ONE MODEL
+
+    Free-tier TTS quota is per model and small. Measured mid-build, in one
+    pass: 3.1-flash-tts returned 429, 2.5-flash-preview-tts answered in 3.1
+    seconds, 2.5-pro-preview-tts returned 429. The newest is not the most
+    available -- the same thing the answer pool exists to handle.
+
+    It matters more here than anywhere else in the app. A degraded answer
+    elsewhere is still an answer; a turn whose synthesis fails in an audio-only
+    app produces nothing at all.
+
+    Only RETRYABLE failures fall through. A 400 means this text or this voice
+    is wrong and the next model will reject it identically, so trying three of
+    them turns one clear error into a slow one.
+
+    The rate is returned alongside rather than assumed, because it is read from
+    the response -- see `_rate_from_mime`.
     """
     settings = get_settings()
-    model = settings.voice_tts_model.removeprefix("models/")
     if voice not in {v["id"] for v in VOICES}:
         voice = DEFAULT_VOICE
 
@@ -225,25 +239,55 @@ async def speak(text: str, *, voice: str = DEFAULT_VOICE) -> tuple[bytes, int]:
         },
     }
 
+    attempts: list[str] = []
     async with _client() as client:
-        response = await client.post(f"/models/{model}:generateContent", json=payload)
-    if response.status_code >= 400:
-        raise VoiceError(_explain(response, "Speech synthesis"))
+        for configured in settings.voice_tts_models:
+            model = configured.removeprefix("models/")
+            response = await client.post(
+                f"/models/{model}:generateContent", json=payload
+            )
 
-    body = response.json()
-    try:
-        inline = body["candidates"][0]["content"]["parts"][0]["inlineData"]
-    except (KeyError, IndexError) as exc:
-        # A TTS model that returns TEXT has usually refused, and its refusal is
-        # more useful to the caller than "no audio part".
-        spoken = _first_text(body)
-        detail = f" It replied with text instead: {spoken[:200]}" if spoken else ""
-        raise VoiceError(f"The speech model returned no audio.{detail}") from exc
+            if response.status_code >= 400:
+                attempts.append(f"{model} ({response.status_code})")
+                if _retryable(response.status_code):
+                    log.warning(
+                        "tts_unavailable", model=model, status=response.status_code
+                    )
+                    continue
+                raise VoiceError(_explain(response, "Speech synthesis"))
 
-    rate = _rate_from_mime(inline.get("mimeType", ""))
-    pcm = base64.b64decode(inline["data"])
-    log.info("tts_done", model=model, voice=voice, rate=rate, bytes=len(pcm))
-    return to_wav(pcm, rate=rate), rate
+            body = response.json()
+            try:
+                inline = body["candidates"][0]["content"]["parts"][0]["inlineData"]
+            except (KeyError, IndexError):
+                # A TTS model that returns TEXT has usually refused. Its refusal
+                # is more useful than "no audio part" -- but another model may
+                # still oblige, so this falls through rather than stopping.
+                attempts.append(f"{model} (no audio)")
+                log.warning("tts_no_audio", model=model, said=_first_text(body)[:120])
+                continue
+
+            rate = _rate_from_mime(inline.get("mimeType", ""))
+            pcm = base64.b64decode(inline["data"])
+            log.info("tts_done", model=model, voice=voice, rate=rate, bytes=len(pcm))
+            return to_wav(pcm, rate=rate), rate
+
+    raise VoiceError(
+        "Every speech model is currently unavailable or out of quota — tried "
+        + ", ".join(attempts)
+        + ". The answer is on screen; wait a minute and play it again."
+    )
+
+
+def _retryable(status: int) -> bool:
+    """Worth trying the next model for.
+
+    429 is quota, 5xx is the provider. A 400 means the request itself is wrong
+    -- bad voice, bad text -- and every model will reject it the same way, so
+    falling through would turn one clear error into three slow ones. 403 is the
+    key, which does not improve by asking a different model either.
+    """
+    return status == 429 or status >= 500
 
 
 def _first_text(body: dict) -> str:

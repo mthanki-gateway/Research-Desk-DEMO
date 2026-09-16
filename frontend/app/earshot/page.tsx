@@ -9,7 +9,7 @@ import {
   audioUrl,
   getVoiceStatus,
 } from "@/lib/api";
-import { Button } from "../md";
+import { Button, Switch } from "../md";
 import {
   IconEarshot,
   IconExternal,
@@ -242,49 +242,79 @@ export default function Earshot() {
         </p>
       </section>
 
-      {/* ---- settings, kept out of the way -------------------------------- */}
+      {/* ---- settings ------------------------------------------------------
+          A card with M3 rows, matching the chat rail. A bare checkbox and a
+          bare <select> inherit the browser's own widgets, which is the one
+          place in this app that looked like an unstyled form. */}
       {status?.enabled && (
-        <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
-          <label className="md-body-small flex items-center gap-2">
-            <span style={{ color: "var(--md-on-surface-variant)" }}>Voice</span>
+        <section className="md-card md-card-outlined divide-y" style={{ borderColor: "var(--md-outline-variant)" }}>
+          <div className="flex items-center justify-between gap-4 p-4">
+            <span className="md-body-medium">
+              Voice
+              <span
+                className="md-body-small mt-0.5 block"
+                style={{ color: "var(--md-on-surface-variant)" }}
+              >
+                {status.voices.find((v) => v.id === voiceName)?.character ??
+                  "How the answer sounds"}
+              </span>
+            </span>
             <select
-              className="md-body-medium rounded-[var(--md-shape-sm)] px-3 py-2"
-              style={{
-                background: "var(--md-surface)",
-                color: "var(--md-on-surface)",
-                border: "1px solid var(--md-outline)",
-              }}
               value={voiceName}
               onChange={(e) => setVoiceName(e.target.value)}
               disabled={listening || busy}
+              aria-label="Voice"
+              className="md-body-medium shrink-0 rounded-[var(--md-shape-sm)] px-3 py-2"
+              style={{
+                background: "var(--md-surface-container-high)",
+                color: "var(--md-on-surface)",
+                border: "1px solid var(--md-outline-variant)",
+              }}
             >
               {status.voices.map((v) => (
                 <option key={v.id} value={v.id}>
-                  {v.label} — {v.character}
+                  {v.label}
                 </option>
               ))}
             </select>
-          </label>
+          </div>
 
-          <label className="md-body-small flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={autoplay}
-              onChange={(e) => setAutoplay(e.target.checked)}
-            />
-            <span style={{ color: "var(--md-on-surface-variant)" }}>
-              Play the answer automatically
-            </span>
-          </label>
-
-          <span
-            className="md-body-small ml-auto"
-            style={{ color: "var(--md-on-surface-variant)" }}
+          <div
+            className="flex items-center justify-between gap-4 p-4"
+            style={{ borderColor: "var(--md-outline-variant)" }}
           >
-            {status.stt_model.replace("models/", "")} ·{" "}
-            {status.tts_model.replace("models/", "")}
-          </span>
-        </div>
+            <span className="md-body-medium">
+              Play the answer automatically
+              <span
+                className="md-body-small mt-0.5 block"
+                style={{ color: "var(--md-on-surface-variant)" }}
+              >
+                Off if you would rather read first and listen on demand
+              </span>
+            </span>
+            <Switch
+              on={autoplay}
+              onChange={setAutoplay}
+              aria-label="Play the answer automatically"
+            />
+          </div>
+
+          <div
+            className="md-body-small flex items-center justify-between gap-4 px-4 py-3"
+            style={{
+              color: "var(--md-on-surface-variant)",
+              borderColor: "var(--md-outline-variant)",
+            }}
+          >
+            <span>Models</span>
+            <span className="truncate text-right">
+              {status.stt_model.replace("models/", "")} hears ·{" "}
+              {status.tts_models[0]?.replace("models/", "")} speaks
+              {status.tts_models.length > 1 &&
+                `, +${status.tts_models.length - 1} spare`}
+            </span>
+          </div>
+        </section>
       )}
 
       {/* ---- the transcript ---------------------------------------------- */}
