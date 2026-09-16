@@ -83,7 +83,10 @@ def tool_specs() -> list[dict[str, Any]]:
                 "place their private material exists, so it is the right tool "
                 "for anything specific to them or their organisation. Returns "
                 "passages that can be cited. Call it again with different "
-                "wording if the first results are not relevant."
+                "wording if the first results are not relevant. Pass "
+                "`filename` to search ONE document, which is worth doing "
+                "alongside an unscoped search when list_documents shows an "
+                "obviously relevant file."
             ),
             "parameters": {
                 "type": "object",
@@ -95,7 +98,16 @@ def tool_specs() -> list[dict[str, Any]]:
                             "phrased as it would appear in the document. Not a "
                             "keyword list."
                         ),
-                    }
+                    },
+                    "filename": {
+                        "type": "string",
+                        "description": (
+                            "Optional. Restrict the search to this one "
+                            "document, as named by list_documents. Omit it to "
+                            "search everything, which is the default and "
+                            "usually right."
+                        ),
+                    },
                 },
                 "required": ["query"],
             },
@@ -340,14 +352,39 @@ async def run_tool(
 
     try:
         if name == SEARCH_DOCUMENTS:
-            hits = await retrieve(query, top_k=top_k, document_ids=document_ids, owner_id=owner_id)
+            scope = document_ids
+            note = ""
+            wanted = str(args.get("filename", "")).strip()
+            if wanted:
+                found = await corpus.resolve_document(wanted, owner_id)
+                if found is None:
+                    # NOT a silent fallback to searching everything. The model
+                    # asked for one document; quietly answering from all of
+                    # them would return passages it would then attribute to a
+                    # file it never actually searched.
+                    names = ", ".join(
+                        d["filename"] for d in await corpus.documents(owner_id)
+                    )
+                    return [], (
+                        f"No document matching {wanted!r}. Available: {names}. "
+                        "Retry with one of those, or omit filename to search "
+                        "everything."
+                    )
+                doc_id, actual = found
+                scope = [uuid.UUID(doc_id)]
+                # Says which file it really got, because the match is fuzzy and
+                # a wrong resolution is otherwise invisible.
+                note = f"Searched only {actual}. "
+
+            hits = await retrieve(query, top_k=top_k, document_ids=scope, owner_id=owner_id)
             if not hits:
-                return [], (
+                return [], note + (
                     f"No passages matched {query!r}. Either nothing in the "
                     "documents covers it, or the wording is too far from how "
                     "the document puts it -- try different terms."
                 )
-            return hits, f"{_coverage_note(hits, top_k)}\n\n{_render_for_model(hits)}"
+            body = f"{_coverage_note(hits, top_k)}\n\n{_render_for_model(hits)}"
+            return hits, note + body
 
         if name == READ_AROUND:
             raw_id = str(args.get("chunk_id", "")).strip()

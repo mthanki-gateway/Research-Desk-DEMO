@@ -48,6 +48,23 @@ Apps are registered in `frontend/app/projects.ts`. Adding one is a single
 entry there plus its pages; the drawer, the app switcher and active-item
 highlighting all read from it. Do not hardcode nav items anywhere else.
 
+### Adding a frontend dependency needs an image rebuild
+
+`docker-compose.yml` mounts only `frontend/app` and `frontend/lib`.
+`package.json` and `node_modules` live **inside** the `web` image, so an
+`npm install` on the host never reaches the running container — the dev server
+keeps resolving against the image it was built from and reports
+`Module not found`.
+
+```powershell
+npm install <pkg>          # updates package.json + lockfile on the host
+docker compose build web   # the step that actually installs it
+docker compose up -d web
+```
+
+Deployed builds are unaffected: they build the image from the committed
+`package.json`, so the dependency is present.
+
 ## Backend
 
 - Every DB query that touches user data is scoped by `owner_id`, passed

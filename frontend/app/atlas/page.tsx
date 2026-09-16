@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { getAtlas, type Atlas } from "@/lib/api";
 import { useApp } from "../providers";
 import { Button } from "../md";
-import Scatter from "./scatter";
+import Scatter, { PALETTES, type PlotTheme } from "./scatter";
 import Heatmap from "./heatmap";
 
 /**
@@ -20,6 +20,12 @@ export default function AtlasPage() {
   const [atlas, setAtlas] = useState<Atlas | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
+  // Which document the camera is framing, or null for the whole corpus.
+  const [focus, setFocus] = useState<string | null>(null);
+  // Lifted out of the plot so the LEGEND uses the same palette the points
+  // do. Held separately from the app theme: the right ground for a point
+  // cloud is not the right ground for a page of text.
+  const [plotTheme, setPlotTheme] = useState<PlotTheme>("dark");
   const { showChunk } = useApp();
 
   const load = useCallback(async () => {
@@ -92,27 +98,61 @@ export default function AtlasPage() {
         >
           {atlas.points.length} chunks from {atlas.n_documents} document
           {atlas.n_documents === 1 ? "" : "s"}, laid out by what they mean.
-          Drag to rotate, scroll to zoom, click a point to inspect it.
+          Hover a point for its metadata, click to inspect it, and click a
+          document below to fly to it.
         </p>
       </header>
 
+      {/* The legend IS the navigation. A colour key that only explains is a
+          wasted control when the obvious question looking at it is "show me
+          that one" -- clicking flies the camera to that document and fades
+          the rest. */}
       <div className="flex flex-wrap items-center gap-2">
-        {files.map((f, i) => (
-          <span
-            key={f}
-            className="md-label-small flex items-center gap-1.5 rounded-[var(--md-shape-full)] px-2.5 py-1"
-            style={{ background: "var(--md-surface-container-high)" }}
-          >
-            <span
-              className="inline-block h-2.5 w-2.5 rounded-full"
-              style={{ background: LEGEND[i % LEGEND.length] }}
-            />
-            {f}
-          </span>
-        ))}
+        {files.map((f, i) => {
+          const on = focus === f;
+          return (
+            <button
+              key={f}
+              type="button"
+              onClick={() => setFocus(on ? null : f)}
+              className="md-label-small flex items-center gap-1.5 rounded-[var(--md-shape-full)] px-2.5 py-1"
+              style={{
+                background: on
+                  ? "var(--md-secondary-container)"
+                  : "var(--md-surface-container-high)",
+                color: on ? "var(--md-on-secondary-container)" : undefined,
+              }}
+              aria-pressed={on}
+            >
+              <span
+                className="inline-block h-2.5 w-2.5 rounded-full"
+                style={{
+                  background:
+                    PALETTES[plotTheme][i % PALETTES[plotTheme].length],
+                }}
+              />
+              {f}
+              <span style={{ opacity: 0.6 }}>
+                {atlas.points.filter((p) => p.filename === f).length}
+              </span>
+            </button>
+          );
+        })}
+        {focus && (
+          <Button variant="text" onClick={() => setFocus(null)}>
+            Show all
+          </Button>
+        )}
       </div>
 
-      <Scatter points={atlas.points} selected={selected} onSelect={setSelected} />
+      <Scatter
+        points={atlas.points}
+        selected={selected}
+        onSelect={setSelected}
+        focus={focus}
+        theme={plotTheme}
+        onThemeChange={setPlotTheme}
+      />
 
       {/* SAID PLAINLY, because a 3D plot implies a faithful map and this one
           is not. Three linear axes cannot carry 768 dimensions; the number
@@ -208,15 +248,3 @@ export default function AtlasPage() {
     </div>
   );
 }
-
-/** Must match PALETTE in scatter.tsx — same order, CSS form. */
-const LEGEND = [
-  "#6750a4",
-  "#2e7d32",
-  "#c62828",
-  "#ef6c00",
-  "#0277bd",
-  "#00838f",
-  "#6a1b9a",
-  "#827717",
-];

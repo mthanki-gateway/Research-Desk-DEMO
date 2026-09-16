@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { AtlasPoint } from "@/lib/api";
 
 /**
@@ -45,6 +45,17 @@ export default function Heatmap({
 }) {
   const canvas = useRef<HTMLCanvasElement | null>(null);
   const n = points.length;
+  /**
+   * The cell under the cursor.
+   *
+   * Added because the grid was unreadable without it: a wall of squares says
+   * nothing about WHICH chunks any square compares, so the pattern was
+   * visible and unusable. Naming both chunks and the score turns it from a
+   * texture into a measurement.
+   */
+  const [at, setAt] = useState<{ i: number; j: number; x: number; y: number } | null>(
+    null,
+  );
 
   useEffect(() => {
     const el = canvas.current;
@@ -94,19 +105,56 @@ export default function Heatmap({
     }
   }, [points, similarity, selected, n]);
 
+  const a = at ? points[at.i] : null;
+  const b = at ? points[at.j] : null;
+  const score = at ? similarity[at.i]?.[at.j] : null;
+
+  const cellFrom = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const i = Math.floor((y / rect.height) * n);
+    const j = Math.floor((x / rect.width) * n);
+    if (i < 0 || i >= n || j < 0 || j >= n) return null;
+    return { i, j, x, y };
+  };
+
   return (
-    <canvas
-      ref={canvas}
-      className="aspect-square w-full cursor-crosshair rounded-[var(--md-shape-md)]"
-      onClick={(e) => {
-        const rect = e.currentTarget.getBoundingClientRect();
-        const i = Math.floor(((e.clientY - rect.top) / rect.height) * n);
-        onSelect(i >= 0 && i < n ? i : null);
-      }}
-      // The row is the chunk; the column is what it is being compared to.
-      // Selecting on the row keeps this consistent with the scatter, where a
-      // click selects one chunk.
-      aria-label="Chunk similarity matrix. Click a row to select that chunk."
-    />
+    <div className="relative">
+      <canvas
+        ref={canvas}
+        className="aspect-square w-full cursor-crosshair rounded-[var(--md-shape-md)]"
+        onMouseMove={(e) => setAt(cellFrom(e))}
+        onMouseLeave={() => setAt(null)}
+        onClick={(e) => {
+          const cell = cellFrom(e);
+          // The ROW is the chunk. Selecting on the row keeps this consistent
+          // with the scatter, where a click selects one chunk rather than a
+          // pair.
+          onSelect(cell ? cell.i : null);
+        }}
+        aria-label="Chunk similarity matrix. Click a row to select that chunk."
+      />
+
+      {at && a && b && score !== null && (
+        <div
+          className="pointer-events-none absolute z-10 w-[17rem] rounded-[var(--md-shape-md)] p-2.5"
+          style={{
+            left: Math.min(at.x + 14, (canvas.current?.clientWidth ?? 0) - 280),
+            top: Math.min(at.y + 14, (canvas.current?.clientHeight ?? 0) - 120),
+            background: "var(--md-inverse-surface)",
+            color: "var(--md-inverse-on-surface)",
+          }}
+        >
+          <p className="md-label-large">{score.toFixed(3)}</p>
+          <p className="md-body-small mt-1 break-words">
+            {a.filename} · chunk {a.chunk_index}
+          </p>
+          <p className="md-body-small break-words" style={{ opacity: 0.75 }}>
+            vs {b.filename} · chunk {b.chunk_index}
+          </p>
+        </div>
+      )}
+    </div>
   );
 }

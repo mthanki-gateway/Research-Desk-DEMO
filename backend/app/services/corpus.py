@@ -81,6 +81,9 @@ async def documents(owner_id: str | None) -> list[dict[str, Any]]:
 
     return [
         {
+            # Needed to SCOPE a search to this document. Without it the agent
+            # can learn a filename and then has no way to act on it.
+            "id": str(doc.id),
             "filename": doc.filename,
             "status": doc.status.value if hasattr(doc.status, "value") else doc.status,
             "n_chunks": doc.n_chunks,
@@ -298,3 +301,36 @@ def render_stats(title: str, stats: dict[str, Any]) -> str:
         else:
             lines.append(_line(label, value))
     return "\n".join(lines)
+
+
+async def resolve_document(name: str, owner_id: str | None) -> tuple[str, str] | None:
+    """Find a document id from a filename the model produced.
+
+    FORGIVING ON PURPOSE. The agent gets filenames from `list_documents` and
+    then retypes one, so it arrives with the extension dropped, the case
+    changed, or only the distinctive part of the name. An exact match would
+    fail on all three and the failure would look like "that document does not
+    exist", which is a worse answer than searching everything.
+
+    Returns (id, actual filename) so the caller can tell the model which
+    document it really got -- a fuzzy match that silently resolves to the
+    wrong file is the failure mode this ordering is designed to surface.
+    """
+    wanted = name.strip().lower()
+    if not wanted:
+        return None
+
+    rows = await documents(owner_id)
+    # Exact, then prefix, then substring. Ordered most specific first so a
+    # request for "acme-report" cannot be captured by a longer name that
+    # merely contains it.
+    for row in rows:
+        if row["filename"].lower() == wanted:
+            return row["id"], row["filename"]
+    for row in rows:
+        if row["filename"].lower().startswith(wanted):
+            return row["id"], row["filename"]
+    for row in rows:
+        if wanted in row["filename"].lower():
+            return row["id"], row["filename"]
+    return None
