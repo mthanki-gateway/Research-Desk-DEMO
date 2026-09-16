@@ -494,6 +494,55 @@ async def ask_human(state: ResearchState) -> dict:
 # --------------------------------------------------------------------------
 
 
+# Phrases that describe WHERE a thing should have been, not WHAT it is.
+#
+# The critic writes gaps as sentences about the corpus -- "A height for the Red
+# Pyramid FROM YOUR DOCUMENTS" -- and those sentences were being embedded and
+# searched verbatim. Every one of these words pulls the query vector towards
+# passages that talk about documents and away from passages that state a
+# height. The retry then returns nothing, and the turn concludes the fact does
+# not exist.
+_META = re.compile(
+    r"\b("
+    r"(?:in|from|within|according to|per)\s+"
+    r"(?:the\s+|your\s+|these\s+|his\s+|her\s+|their\s+)?"
+    r"(?:user'?s?\s+)?"
+    r"(?:own\s+)?"
+    r"(?:provided\s+|uploaded\s+|attached\s+|supplied\s+)?"
+    r"(?:documents?|files?|corpus|sources?|library|passages?|context)"
+    r"|document'?s?\s+(?:mention|statement)s?\s+of"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# A leading article or hedge on a NOUN PHRASE gap: "A height for...",
+# "The original height of...", "Any mention of...".
+_LEAD = re.compile(
+    r"^\s*(?:a|an|the|any|some|specific|explicit|separate|exact)\s+", re.IGNORECASE
+)
+
+
+def as_query(text: str) -> str:
+    """Turn a critic's gap description into something worth searching for.
+
+    A gap is written to be READ by the drafter -- "A separate height for the
+    Great Pyramid of Khufu distinct from the Great Pyramid of Giza in your
+    documents" -- and was being sent to the embedder unchanged. Most of that
+    sentence is about the SHAPE of the omission, and it dominates the vector.
+
+    Conservative on purpose. It strips phrases that refer to the corpus itself
+    and a leading article, and leaves everything else alone: a gap that is
+    already a decent query must come through unharmed, and over-trimming a
+    query is as bad as not trimming it.
+    """
+    out = _META.sub(" ", text or "")
+    out = re.sub(r"\s{2,}", " ", out).strip(" ,.;:")
+    out = _LEAD.sub("", out).strip()
+    # If the strip ate everything, the original was pure meta-language and the
+    # original is still the better of two bad options.
+    return out or (text or "").strip()
+
+
 async def retrieve_node(state: ResearchState) -> dict:
     """Retrieve for every pending query. This is the node the cycle re-enters.
 
@@ -517,9 +566,13 @@ async def retrieve_node(state: ResearchState) -> dict:
     # Only on a RETRY -- on the first pass the set is empty and this is a no-op.
     seen = set(state.get("seen_chunk_ids") or ())
 
+    # A RETRY, which is what `seen` being non-empty means.
+    retry = bool(seen)
+
     gathered = []
     per_query = []
-    for query in queries:
+    for raw_query in queries:
+        query = as_query(raw_query)
         hits = await retrieve(
             query,
             top_k=top_k,
@@ -529,13 +582,45 @@ async def retrieve_node(state: ResearchState) -> dict:
             exclude_chunk_ids=seen,
         )
         gathered.extend(hits)
-        per_query.append({"query": query, "n": len(hits)})
+        entry = {"query": query, "n": len(hits)}
+
+        # THE WEB IS RETRIED TOO, and this is the fix for a whole class of
+        # wrong answer.
+        #
+        # Measured on "the height of the Great Pyramid and the Red Pyramid":
+        # the critic correctly identified the gap -- no Red Pyramid height --
+        # and this node then re-searched THE SAME CORPUS with a reworded query,
+        # got nothing, and the turn concluded "your documents do not give the
+        # height of the Red Pyramid". They never would. The corpus does not
+        # contain it and no rewording can make it. One web search returns
+        # "Height 105 m (344 ft)" as the first result.
+        #
+        # Re-asking a corpus that has already been asked is the one retry that
+        # cannot possibly succeed: the critic raised the gap precisely because
+        # the corpus did not answer it. Only a different SOURCE can.
+        #
+        # Retry only. On the first pass the ReAct loop already has `search_web`
+        # as a tool and chooses for itself; duplicating it here would double
+        # every web call on every turn.
+        if retry and not document_ids and websearch.enabled():
+            try:
+                web_hits = await websearch.search_web(query, limit=top_k)
+                gathered.extend(web_hits)
+                entry["web"] = len(web_hits)
+            except Exception as exc:  # noqa: BLE001 - the web is optional
+                # A failed web search must not fail the turn. The document
+                # results are still worth drafting from.
+                log.warning("retry_web_failed", query=query[:80], error=str(exc))
+                entry["web"] = 0
+
+        per_query.append(entry)
 
     log.info(
         "retrieved_for_plan",
         n_queries=len(queries),
         n_hits=len(gathered),
         n_excluded=len(seen),
+        retry=retry,
     )
     return {
         "evidence": gathered,  # merge_evidence dedupes against what we have
