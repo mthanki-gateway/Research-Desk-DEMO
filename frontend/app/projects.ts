@@ -67,7 +67,7 @@ export const PROJECTS: Project[] = [
   {
     id: "earshot",
     name: "Earshot",
-    blurb: "Ask out loud, listen to the answer. The same documents, spoken.",
+    blurb: "Talk to a native audio model. The same documents, heard and spoken.",
     Icon: IconEarshot,
     home: "/earshot",
     owns: ["/earshot"],

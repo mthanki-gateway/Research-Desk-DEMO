@@ -49,11 +49,34 @@ entry there plus its pages; the drawer, the app switcher and active-item
 highlighting all read from it. Do not hardcode nav items anywhere else.
 
 Three today — **Research Desk** (chat, library, lab, atlas), **Model Lab**
-(playground, transcribe) and **Earshot** (voice). Earshot is a different DOOR
-onto the Research Desk's agent, not a second assistant: same corpus, same
-graph, same tools, same web search. A document uploaded in the Library is
-answerable by voice the moment it finishes indexing. If you find yourself
-adding a second index or a parallel prompt stack for it, that is the mistake.
+(playground, transcribe) and **Earshot** (voice).
+
+Earshot is a different DOOR onto the same corpus, not a second assistant. A
+document uploaded in the Library is answerable out loud the moment it finishes
+indexing. If you find yourself adding a second index for it, that is the
+mistake.
+
+It is **audio to audio**, over a WebSocket to a native audio model — the audio
+is tokenised into the same sequence the model generates from, with no
+transcript in the middle. It does NOT use the LangGraph agent; the live model
+decides for itself when to search. What it shares is the TOOLS: `live.py`
+builds its declarations from `agent_tools.tool_specs()` and executes them
+through `agent_tools.run_tool`, so a tool description improved for the typed
+agent improves here too.
+
+The cascade it replaced (`POST /voice/ask`: transcribe, run the graph,
+synthesise) is deliberately kept. It is a working reference implementation of
+the other architecture, and the measured difference is the most instructive
+thing in this repo — 12-53s to the first sound versus about 3s.
+
+Two things about Live that fail SILENTLY, both pinned by tests:
+
+- A turn does not end without **trailing silence**. Live decides the speaker
+  stopped by hearing them stop; `audio_stream_end` does not substitute. Without
+  it the model accepts the audio and never replies, with no error anywhere.
+- `session.receive()` **ends at a tool call**. The spoken answer arrives on the
+  next generator, so treating the first end as the end of the turn yields a
+  tool call and zero audio.
 
 ### Adding a frontend dependency needs an image rebuild
 

@@ -343,6 +343,23 @@ class Settings(BaseSettings):
         "models/gemini-2.5-pro-preview-tts",
     ]
     voice_default: str = "Kore"
+
+    # THE NATIVE AUDIO MODEL. Earshot's engine.
+    #
+    # Not a TTS model and not an STT model -- audio in and audio out, with no
+    # transcript in the middle. Measured on this deployment, same question and
+    # same corpus: the cascade took 12-53 seconds to the first sound, this
+    # takes 2.0.
+    #
+    # `gemini-3.8-live` over the 2.5 native-audio models because it is the only
+    # one that also accepts TEXT output, which makes it debuggable: a session
+    # that misbehaves can be re-run in text mode to see what it would have
+    # said. The 2.5 models reject TEXT outright.
+    #
+    # Live models are bidi-only (WebSocket) and, per the quota console, carry
+    # unlimited requests per minute -- unlike the TTS models, which are the
+    # constrained ones and which this replaces.
+    live_model: str = "models/gemini-3.8-live"
     # Spoken answers are capped hard. A page of prose is a fine thing to read
     # and four minutes of unskippable audio to listen to -- there is no
     # scanning ahead in speech, so length costs the listener far more than it

@@ -1046,3 +1046,30 @@ export function audioUrl(turn: VoiceTurn): string {
   for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
   return URL.createObjectURL(new Blob([bytes], { type: turn.mime }));
 }
+
+
+// ---------------------------------------------------------------------------
+// Earshot — the live, native-audio session
+//
+// The cascade endpoints above (`/voice/ask`) are kept: they are a working
+// reference implementation of the other architecture, and the difference
+// between the two is the most instructive thing in this project. The app uses
+// the live path.
+// ---------------------------------------------------------------------------
+
+export type LiveStatus = {
+  enabled: boolean;
+  /** The native audio model — audio in, audio out, no transcript between. */
+  model: string;
+  voices: VoiceOption[];
+  default_voice: string;
+  web_search: boolean;
+  input_rate: number;
+  output_rate: number;
+};
+
+export async function getLiveStatus(): Promise<LiveStatus> {
+  const res = await authedFetch("/live/status", { cache: "no-store" });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
