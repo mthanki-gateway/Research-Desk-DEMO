@@ -576,22 +576,38 @@ class CapturingLLM:
 
 @pytest.mark.asyncio
 class TestDraftKnowsItsCoverage:
-    """The drafter is told whether the web was reachable AT ALL.
+    """The drafter is told what it ACTUALLY did, not what it could have done.
 
-    Without it, "searched the web and found nothing" is indistinguishable from
-    "never had a web tool", and an unconfigured deployment answers as though
-    the information does not exist -- when in truth nobody looked. That was
-    invisible from the UI: a general question got a flat "not in the provided
-    sources" with no hint that web search was switched off.
+    THE BUG THESE PIN
+
+    The coverage line used to read "Both the user's documents and the web were
+    SEARCHABLE for this question" whenever web search was configured -- a
+    statement about capability. The answer rules tell the model to report its
+    work from that line, so a turn that touched only the metadata tools opened
+    with "I searched your documents and the web." Nothing had been searched.
+
+    Asked about it on the next turn, the model correctly said no web search had
+    happened and called its own opening a "boilerplate artifact". That reads as
+    a model contradicting itself; it was in fact being told two different
+    things and reporting each of them faithfully.
+
+    Availability is not use. These assert that distinction in both directions.
     """
 
-    async def _prompt_for(self, monkeypatch, *, web_enabled):
+    async def _prompt_for(self, monkeypatch, *, web_enabled, evidence=None, facts=None):
         from app.agent import nodes
 
         llm = CapturingLLM('{"answer": "x [1]", "sources_used": [1]}')
         monkeypatch.setattr(nodes, "get_pool", lambda role: _StubPool(llm))
         monkeypatch.setattr(nodes.websearch, "enabled", lambda: web_enabled)
-        await nodes.draft({"question": "q", "evidence": [_hit(1)], "chat_context": ""})
+        state = {
+            "question": "q",
+            "evidence": [_hit(1)] if evidence is None else evidence,
+            "chat_context": "",
+        }
+        if facts:
+            state["corpus_facts"] = facts
+        await nodes.draft(state)
         return llm.prompt
 
     async def test_says_so_when_web_is_unavailable(self, monkeypatch):
@@ -599,9 +615,62 @@ class TestDraftKnowsItsCoverage:
         assert "NOT configured" in prompt
         assert "do not imply the information does not exist" in prompt
 
-    async def test_says_so_when_web_is_available(self, monkeypatch):
+    async def test_an_available_web_is_not_reported_as_a_search(self, monkeypatch):
+        """The exact regression. Available and unused must not read as used."""
         prompt = await self._prompt_for(monkeypatch, web_enabled=True)
-        assert "the web were searchable" in prompt
+        assert "searched the web" not in prompt
+        assert "was NOT used" in prompt
+
+    async def test_a_web_hit_is_reported_as_a_web_search(self, monkeypatch):
+        prompt = await self._prompt_for(
+            monkeypatch,
+            web_enabled=True,
+            evidence=[_hit(1), _hit(2, source="web")],
+        )
+        assert "searched the web" in prompt
+        assert "searched the user's documents" in prompt
+
+    async def test_metadata_only_is_not_reported_as_searching_anything(
+        self, monkeypatch
+    ):
+        """Counting documents is not reading them.
+
+        This is the turn that produced the false claim: "how many docs do we
+        have" resolved entirely from the metadata tools, with no retrieval at
+        all, and was reported as a search of both the corpus and the web.
+        """
+        prompt = await self._prompt_for(
+            monkeypatch,
+            web_enabled=True,
+            evidence=[],
+            facts=["10 documents in the collection."],
+        )
+        assert "WITHOUT searching their contents" in prompt
+        assert "searched the web" not in prompt
+
+    async def test_resolve_is_given_the_same_line(self, monkeypatch):
+        """`resolve` shares ANSWER_RULES, which cite the coverage line.
+
+        It was never given one, so every turn that exhausted the critique loop
+        invented its opening sentence out of nothing. A rule referring to a
+        block that only one of its two readers receives is the same drift that
+        put the formatting rules in `draft` alone.
+        """
+        from app.agent import nodes
+
+        llm = CapturingLLM('{"answer": "x [1]", "sources_used": [1]}')
+        monkeypatch.setattr(nodes, "get_pool", lambda role: _StubPool(llm))
+        monkeypatch.setattr(nodes.websearch, "enabled", lambda: True)
+        await nodes.resolve(
+            {
+                "question": "q",
+                "evidence": [_hit(1)],
+                "draft": "d",
+                "missing": ["m"],
+                "chat_context": "",
+            }
+        )
+        assert "Search coverage" in llm.prompt
 
 
 @pytest.mark.asyncio

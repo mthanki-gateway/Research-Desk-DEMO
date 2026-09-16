@@ -3,6 +3,7 @@
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  type Activity,
   type ChatMessage,
   type InterruptEvent,
   type ClarifyDecision,
@@ -107,7 +108,16 @@ function Conversation({ id }: { id: string }) {
    * than appended again, which would otherwise make the list jump.
    */
   const [activity, setActivity] = useState<
-    { key: string; source: string; query: string; done: boolean; n?: number }[]
+    {
+      key: string;
+      /** "search" | "lookup" | "remember" — decides the verb, not the styling. */
+      kind: "search" | "lookup" | "remember";
+      source: string;
+      /** The query, the tool name, or the stored text, per `kind`. */
+      label: string;
+      done: boolean;
+      n?: number;
+    }[]
   >([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -289,29 +299,7 @@ function Conversation({ id }: { id: string }) {
           modelProfile: settings.modelProfile,
         },
         (_node, detail) => setProgress(detail),
-        (a) => {
-          // Reranks have no query to show and would add a line saying
-          // nothing the user can act on.
-          if (a.kind === "rerank" || !a.query) return;
-          const key = a.source + ':' + a.query;
-          setActivity((prev) => {
-            const at = prev.findIndex((x) => x.key === key);
-            if (at >= 0) {
-              const next = [...prev];
-              next[at] = { ...next[at], done: a.kind === "search_done", n: a.n };
-              return next;
-            }
-            return [
-              {
-                key,
-                source: a.source ?? "documents",
-                query: a.query ?? "",
-                done: false,
-              },
-              ...prev,
-            ].slice(0, 6);
-          });
-        },
+        (a) => onActivity(a, setActivity),
       );
       await settle(outcome, q);
     } catch (err) {
@@ -373,29 +361,7 @@ function Conversation({ id }: { id: string }) {
     try {
       const outcome = await resumeTurn(id, thread, q, decision, (_n, detail) =>
         setProgress(detail),
-        (a) => {
-          // Reranks have no query to show and would add a line saying
-          // nothing the user can act on.
-          if (a.kind === "rerank" || !a.query) return;
-          const key = a.source + ':' + a.query;
-          setActivity((prev) => {
-            const at = prev.findIndex((x) => x.key === key);
-            if (at >= 0) {
-              const next = [...prev];
-              next[at] = { ...next[at], done: a.kind === "search_done", n: a.n };
-              return next;
-            }
-            return [
-              {
-                key,
-                source: a.source ?? "documents",
-                query: a.query ?? "",
-                done: false,
-              },
-              ...prev,
-            ].slice(0, 6);
-          });
-        },
+        (a) => onActivity(a, setActivity),
       );
       await settle(outcome, q);
     } catch (err) {
@@ -530,9 +496,19 @@ function Conversation({ id }: { id: string }) {
                     <IconSpinner className="h-3.5 w-3.5 shrink-0" />
                   )}
                   <span className="truncate">
-                    {a.done ? "Searched" : "Searching"}{" "}
-                    {a.source === "web" ? "the web" : "your documents"} for “
-                    {a.query}”
+                    {a.kind === "lookup" ? (
+                      <>
+                        {a.done ? "Checked" : "Checking"} {toolLabel(a.label)}
+                      </>
+                    ) : a.kind === "remember" ? (
+                      <>Remembered “{a.label}”</>
+                    ) : (
+                      <>
+                        {a.done ? "Searched" : "Searching"}{" "}
+                        {a.source === "web" ? "the web" : "your documents"} for
+                        “{a.label}”
+                      </>
+                    )}
                   </span>
                   {a.done && a.n != null && (
                     <span className="shrink-0 tabular-nums opacity-70">
@@ -1013,3 +989,83 @@ function QueryRayButton({ messageId }: { messageId: string }) {
     </>
   );
 }
+
+
+/** Plain English for the metadata tools, which are named for the code. */
+function toolLabel(tool: string): string {
+  if (tool === "list_documents") return "your document list";
+  if (tool === "corpus_stats") return "collection statistics";
+  if (tool === "conversation_stats") return "your conversation history";
+  return tool;
+}
+
+/**
+ * Fold one progress event into the activity list.
+ *
+ * Extracted because the streaming call site appears twice -- a fresh turn and a
+ * resumed one -- and the two copies had to agree. They did, until this grew a
+ * second and third event kind.
+ *
+ * Keyed so a finished step is marked done IN PLACE rather than appended again,
+ * which would make the list jump while the user is reading it.
+ */
+function onActivity(
+  a: Activity,
+  set: React.Dispatch<React.SetStateAction<ActivityRow[]>>,
+) {
+  let row: ActivityRow | null = null;
+  if (a.kind === "search" || a.kind === "search_done") {
+    if (!a.query) return;
+    row = {
+      key: `s:${a.source}:${a.query}`,
+      kind: "search",
+      source: a.source ?? "documents",
+      label: a.query,
+      done: a.kind === "search_done",
+      n: a.n,
+    };
+  } else if (a.kind === "lookup" || a.kind === "lookup_done") {
+    if (!a.tool) return;
+    row = {
+      key: `l:${a.tool}`,
+      kind: "lookup",
+      source: "documents",
+      label: a.tool,
+      done: a.kind === "lookup_done",
+    };
+  } else if (a.kind === "remember") {
+    if (!a.text) return;
+    // No paired done event: the write is over by the time it is announced.
+    row = {
+      key: `m:${a.text}`,
+      kind: "remember",
+      source: "documents",
+      label: a.text,
+      done: true,
+    };
+  } else {
+    // "rerank" and anything added later: no query to show, and a line the
+    // user cannot act on is worse than no line.
+    return;
+  }
+
+  const next = row;
+  set((prev) => {
+    const at = prev.findIndex((x) => x.key === next.key);
+    if (at >= 0) {
+      const merged = [...prev];
+      merged[at] = { ...merged[at], done: next.done, n: next.n ?? merged[at].n };
+      return merged;
+    }
+    return [next, ...prev].slice(0, 6);
+  });
+}
+
+type ActivityRow = {
+  key: string;
+  kind: "search" | "lookup" | "remember";
+  source: string;
+  label: string;
+  done: boolean;
+  n?: number;
+};

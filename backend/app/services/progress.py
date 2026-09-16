@@ -62,3 +62,28 @@ def searching(source: str, query: str) -> None:
 
 def searched(source: str, query: str, n: int) -> None:
     emit("search_done", source=source, query=query[:120], n=n)
+
+
+def looked_up(tool: str) -> None:
+    """A METADATA tool is starting -- names, counts, sizes, not contents.
+
+    A separate verb from `searching` on purpose. These were emitting nothing,
+    so a turn that answered "how many documents do we have?" entirely from the
+    collection metadata showed an empty activity list, and the only visible
+    trace of the agent's work was whatever searches happened to run alongside
+    it. The user reasonably read that as the agent having searched for the
+    answer it in fact looked up.
+
+    Distinguishing them in the UI matters for the same reason it matters in the
+    answer: reading a document and counting documents are different claims.
+    """
+    emit("lookup", tool=tool)
+
+
+def looked_up_done(tool: str) -> None:
+    emit("lookup_done", tool=tool)
+
+
+def remembering(text: str) -> None:
+    """A preference is being stored. The one tool that WRITES."""
+    emit("remember", text=text[:120])

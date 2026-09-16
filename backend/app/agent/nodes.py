@@ -570,12 +570,21 @@ answer. The reader cannot see the retrieval, so without this they cannot tell \
 a thin answer from a thin corpus -- "I don't know" reads identically whether \
 nothing was searched or everything was.
 
-Report only what the "Search coverage" line and the source list actually show, \
-naming both halves when both were used:
+The "Search coverage" line below says what this turn ACTUALLY did. Report that \
+and nothing else. It is a record of work PERFORMED, never a list of what was \
+available -- if it does not say the web was searched, the web was not \
+searched, and claiming otherwise is a false statement about your own \
+behaviour.
+
+Looking up collection metadata -- how many documents exist, their names, their \
+sizes -- is NOT a search. Nothing inside them was read, so do not report it as \
+reading them. Say precisely what happened:
+
+    I checked your document list without searching inside the documents.
+
+    I searched your documents.
 
     I searched your documents and the web.
-
-    I searched your documents; the web was not available for this answer.
 
     I searched your documents and found nothing on this, so the answer below \
 is from the web.
@@ -587,7 +596,9 @@ plainly, and quoting what was stored:
 searched your documents and the web.
 
 Never claim a search you were not told about, never pad this into a paragraph, \
-and never repeat it at the end.
+and never repeat it at the end. If a later turn asks what you searched, answer \
+from what the coverage line said -- never dismiss a report you made as \
+boilerplate.
 
 FORMAT IT SO IT CAN BE READ
 
@@ -798,6 +809,64 @@ def _memory_block(state: ResearchState) -> str:
     return "\n\n".join(parts) + "\n\n"
 
 
+def _coverage_block(state: ResearchState) -> str:
+    """What was ACTUALLY searched this turn, as a fact rather than a capability.
+
+    THE BUG THIS REPLACES
+
+    This line used to read "Both the user's documents and the web were
+    SEARCHABLE for this question" whenever web search was configured. The
+    answer rules directly above it tell the model to report its work from this
+    line -- so on a turn that touched only the metadata tools, the model dutifully
+    opened with "I searched your documents and the web." Nothing had been
+    searched at all. Asked about it on the next turn it correctly said no web
+    search happened, which reads as the model contradicting itself when in fact
+    it was told two different things.
+
+    Availability is not use. This reports use, derived from the evidence that
+    actually came back, and states availability only where its absence changes
+    what an honest answer can claim.
+    """
+    evidence = state.get("evidence") or []
+    used_web = any(getattr(h, "source", "document") == "web" for h in evidence)
+    used_docs = any(getattr(h, "source", "document") != "web" for h in evidence)
+    used_metadata = bool(state.get("corpus_facts"))
+
+    did: list[str] = []
+    if used_docs:
+        did.append("searched the user's documents")
+    if used_web:
+        did.append("searched the web")
+    if used_metadata:
+        # Named precisely, because it is the thing the model kept mis-reporting
+        # as a search. Looking up how many documents exist is not retrieval.
+        did.append(
+            "looked up collection metadata (document names, counts, sizes) "
+            "WITHOUT searching their contents"
+        )
+
+    if did:
+        done = "This turn: " + "; ".join(did) + "."
+    else:
+        done = "This turn: nothing was searched or looked up."
+
+    # Only stated when it changes what may honestly be claimed. On a turn that
+    # did search the web, saying the web is available is noise.
+    caveat = ""
+    if not websearch.enabled() and not used_web:
+        caveat = (
+            " Web search is NOT configured on this deployment, so public "
+            "information could not be looked up at all. If part of the question "
+            "needs it, say that it is not in their documents AND that web "
+            "search is not enabled -- do not imply the information does not "
+            "exist."
+        )
+    elif websearch.enabled() and not used_web:
+        caveat = " The web was available but was NOT used; do not claim it was."
+
+    return f"Search coverage -- {done}{caveat}\n\n"
+
+
 def _facts_block(state: ResearchState) -> str:
     """Metadata results, labelled so they are not mistaken for sources.
 
@@ -859,24 +928,6 @@ async def draft(state: ResearchState) -> dict:
     history_block = (
         f"Conversation so far:\n{chat_context}\n\n" if chat_context else ""
     )
-    # Whether the web was even reachable, stated plainly.
-    #
-    # Without this the drafter cannot tell "searched the web and found nothing"
-    # from "never had a web tool", so an unconfigured deployment produces
-    # answers implying the information does not exist -- when the truth is that
-    # nobody looked. That was invisible from the UI: a user asking a general
-    # question got a flat "not in the provided sources" and no hint that web
-    # search was switched off.
-    reach = (
-        "Both the user's documents and the web were searchable for this "
-        "question."
-        if websearch.enabled()
-        else "Web search is NOT configured on this deployment, so only the "
-        "user's own documents could be searched. If part of the question "
-        "needs public information, say that it is not in their documents "
-        "AND that web search is not enabled -- do not imply the "
-        "information does not exist."
-    )
     # A REGENERATION carries the critic's objection, and nothing else changes.
     #
     # This is the remedy for `unsupported_claim`: the passages were right and
@@ -905,7 +956,7 @@ async def draft(state: ResearchState) -> dict:
     prompt = (
         f"{history_block}"
         f"{sources_block}"
-        f"Search coverage: {reach}\n\n"
+        f"{_coverage_block(state)}"
         f"{_memory_block(state)}"
         f"{_facts_block(state)}"
         f"{redo_block}"
@@ -1131,6 +1182,11 @@ async def resolve(state: ResearchState) -> dict:
         # it.
         f"{_memory_block(state)}"
         f"{_facts_block(state)}"
+        # The OTHER half of the same bug. `resolve` shares ANSWER_RULES, which
+        # says to report the work from the "Search coverage" line -- and
+        # `resolve` was never given one. So on every turn the critique loop
+        # exhausted, the opening sentence was invented from nothing.
+        f"{_coverage_block(state)}"
         "Write the most useful honest answer available."
     )
 

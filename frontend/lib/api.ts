@@ -639,12 +639,26 @@ async function readTurnStream(
  * without these.
  */
 export type Activity = {
-  /** "search" | "search_done" | "rerank" */
+  /**
+   * "search" | "search_done" — reading inside documents or the web.
+   * "lookup" | "lookup_done" — collection metadata: names, counts, sizes.
+   * "remember"               — storing a preference. The one tool that writes.
+   * "rerank"                 — no query to show; not rendered.
+   *
+   * Lookups are a separate verb from searches because they are a different
+   * claim. Counting documents is not reading them, and showing both as
+   * "Searched your documents" is what made an answer derived entirely from
+   * metadata look like it came from retrieval.
+   */
   kind: string;
   /** "documents" | "web" */
   source?: string;
   query?: string;
   n?: number;
+  /** For lookups: which metadata tool ran. */
+  tool?: string;
+  /** For "remember": what was stored. */
+  text?: string;
 };
 
 /** Start a turn. Resolves either with an answer or with a pause. */

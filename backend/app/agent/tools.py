@@ -40,7 +40,7 @@ from typing import Any
 import structlog
 
 from app.config import get_settings
-from app.services import corpus, preferences, websearch
+from app.services import corpus, preferences, progress, websearch
 from app.services.parents import read_around
 from app.services.retrieval import retrieve
 from app.services.vectorstore import SearchHit
@@ -323,6 +323,7 @@ async def run_tool(
     # Checked BEFORE the query guard below: these take no query, and falling
     # through would reject every call with "the query parameter was empty".
     if name == REMEMBER_PREFERENCE:
+        progress.remembering(str(args.get("text") or ""))
         return [], await _remember(
             args,
             owner_id=owner_id,
@@ -332,7 +333,9 @@ async def run_tool(
         )
 
     if name in (LIST_DOCUMENTS, CORPUS_STATS, CONVERSATION_STATS):
+        progress.looked_up(name)
         observation = await _metadata(name, owner_id=owner_id)
+        progress.looked_up_done(name)
         # Recorded so the fact survives to whichever node writes the answer.
         #
         # The agent's own prose is discarded on the retrieval path -- `draft`
