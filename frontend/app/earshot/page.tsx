@@ -176,6 +176,10 @@ export default function Earshot() {
       await session.current.beginTurn();
       setPhase("listening");
       setElapsed(0);
+      // CLEAR BEFORE SETTING. Without this every start left its interval
+      // running, so the second turn counted two seconds per second and the
+      // third counted three -- which is exactly what it looked like.
+      if (timer.current) window.clearInterval(timer.current);
       timer.current = window.setInterval(
         () => setElapsed((n) => n + 1),
         1000,
@@ -192,7 +196,10 @@ export default function Earshot() {
   }, [voiceName, onEvent]);
 
   const stop = useCallback(() => {
-    if (timer.current) window.clearInterval(timer.current);
+    if (timer.current) {
+      window.clearInterval(timer.current);
+      timer.current = null;
+    }
     setLevel(0);
     session.current?.endTurn();
     setPhase("thinking");
@@ -251,7 +258,7 @@ export default function Earshot() {
           {phase === "connecting"
             ? "Opening the session"
             : listening
-              ? `Listening — ${elapsed}s. Click when you're done.`
+              ? `Listening — ${elapsed}s. Pause as long as you like; click when you're done.`
               : phase === "thinking"
                 ? "Thinking"
                 : speaking
@@ -264,7 +271,7 @@ export default function Earshot() {
           style={{ color: "var(--md-on-surface-variant)" }}
         >
           {listening
-            ? "Take as long as you need — nothing is sent until you click."
+            ? "It will not answer until you click. Pausing mid-sentence is fine."
             : status?.web_search
               ? "Your documents and the web."
               : "Your documents. Web search is not configured."}

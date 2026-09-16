@@ -63,9 +63,23 @@ def main() -> None:
             if first.get("type") != "ready":
                 return
 
-            for i in range(0, len(pcm), frame):
+            ws.send_json({"type": "start"})
+
+            # A THREE-SECOND PAUSE, DELIBERATELY, halfway through.
+            #
+            # This is the behaviour being tested. With automatic activity
+            # detection the model would treat this silence as the end of the
+            # question and answer half of it. With the button owning the turn,
+            # it must wait.
+            half = (len(pcm) // 2 // frame) * frame
+            for i in range(0, half, frame):
                 ws.send_bytes(pcm[i : i + frame])
-            # The button was released. The SERVER appends the trailing silence.
+            print("  ...pausing 3s mid-question...", flush=True)
+            time.sleep(3)
+            for i in range(half, len(pcm), frame):
+                ws.send_bytes(pcm[i : i + frame])
+
+            # The button was clicked. THIS is what ends the turn.
             ws.send_json({"type": "end"})
             sent = time.time()
             print("sent, waiting...", flush=True)

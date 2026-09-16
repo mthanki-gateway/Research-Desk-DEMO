@@ -147,6 +147,15 @@ export async function openLiveSession(
     // and its callback simply never fires.
     processor.connect(input.destination);
 
+    // THE TURN OPENS HERE, not when audio starts arriving.
+    //
+    // Automatic activity detection is disabled server-side, so the model is
+    // not listening for speech to begin -- it is waiting to be told. Without
+    // this marker the audio is accepted and nothing is ever treated as a turn.
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "start" }));
+    }
+
     processor.onaudioprocess = (e) => {
       if (!capturing || ws.readyState !== WebSocket.OPEN) return;
       const floats = e.inputBuffer.getChannelData(0);
@@ -182,9 +191,8 @@ export async function openLiveSession(
   function endTurn() {
     releaseMicrophone();
     if (ws.readyState === WebSocket.OPEN) {
-      // The SERVER appends the trailing silence the model needs to notice the
-      // speaker stopped. Doing it here would send a second of silence over the
-      // wire for no reason.
+      // THE ONLY THING THAT ENDS A TURN. The model does not decide; a pause
+      // does not decide; this click decides.
       ws.send(JSON.stringify({ type: "end" }));
     }
   }

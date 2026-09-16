@@ -60,6 +60,40 @@ class TestToolsAreShared:
         assert "query" in (search.parameters.required or [])
 
 
+class TestTheButtonOwnsTheTurn:
+    """Automatic activity detection is OFF, and that is the whole design.
+
+    With it on, the model answers whenever it hears a pause -- and people pause
+    constantly while speaking: to think, to find a word, to check a figure.
+    Every one of those was read as "they have finished", so the assistant talked
+    over the second half of the question.
+
+    Tuning the threshold does not solve it, it only moves it. Short enough to
+    feel responsive is short enough to interrupt; long enough never to interrupt
+    is long enough to feel broken. The only reliable signal for "I have finished
+    speaking" is a person saying so.
+
+    Verified end to end: a three-second pause deliberately inserted halfway
+    through a question produced no reply, and the complete question -- both
+    halves -- was transcribed and answered after the button.
+    """
+
+    def test_automatic_detection_is_disabled(self):
+        cfg = live.config("Kore")
+        assert cfg.realtime_input_config is not None
+        detection = cfg.realtime_input_config.automatic_activity_detection
+        assert detection is not None
+        assert detection.disabled is True
+
+    def test_no_silence_threshold_is_configured(self):
+        """A threshold here would mean the decision was still being tuned.
+
+        It is not tuned, it is removed: nothing about the audio ends a turn.
+        """
+        detection = live.config("Kore").realtime_input_config.automatic_activity_detection
+        assert detection.silence_duration_ms is None
+
+
 class TestTrailingSilence:
     """The single least obvious thing in the app.
 

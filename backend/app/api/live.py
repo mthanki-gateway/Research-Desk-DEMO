@@ -17,8 +17,9 @@ So the audio passes through, and the tool calls stop here.
 THE PROTOCOL
 
 Browser to us:
-    binary            raw 16kHz mono PCM, as captured
-    {"type":"end"}    the speaker released the button
+    binary             raw 16kHz mono PCM, as captured
+    {"type":"start"}   the speaker pressed the button
+    {"type":"end"}     the speaker pressed it again; answer now
 
 Us to browser:
     binary                      raw 24kHz mono PCM, to play
@@ -155,11 +156,17 @@ async def live_socket(
     except WebSocketDisconnect:
         log.info("live_client_left")
     except Exception as exc:  # noqa: BLE001 - report, never 500 a socket
-        log.warning("live_session_failed", error=str(exc)[:300])
-        with contextlib.suppress(Exception):
-            await ws.send_text(
-                json.dumps({"type": "error", "detail": _explain(exc)})
-            )
+        if _idle_disconnect(exc):
+            # Expected. Logged at info and reported as a plain close, so the
+            # client reconnects on the next turn without showing a red banner
+            # for something that is not a fault.
+            log.info("live_session_idle_out", error=str(exc)[:160])
+        else:
+            log.warning("live_session_failed", error=str(exc)[:300])
+            with contextlib.suppress(Exception):
+                await ws.send_text(
+                    json.dumps({"type": "error", "detail": _explain(exc)})
+                )
     finally:
         with contextlib.suppress(Exception):
             await ws.close()
@@ -191,23 +198,18 @@ async def _uplink(ws: WebSocket, session) -> None:
         except json.JSONDecodeError:
             continue
 
-        if event.get("type") == "end":
-            # A SECOND OF SILENCE, then the end marker.
-            #
-            # This is the single least obvious thing in the whole app. Live
-            # decides a turn is over by hearing the speaker stop; audio that
-            # ends on the last word gives it nothing to detect, and
-            # `audio_stream_end` alone does NOT substitute. Measured: five
-            # seconds of clear speech, accepted, no transcript, no reply, no
-            # error -- the session simply sat there. With the silence, the same
-            # audio is transcribed correctly and answered in two seconds.
-            async for frame in live.frames(live.TRAILING_SILENCE):
-                await session.send_realtime_input(
-                    audio=types.Blob(
-                        data=frame, mime_type=f"audio/pcm;rate={live.INPUT_RATE}"
-                    )
-                )
-            await session.send_realtime_input(audio_stream_end=True)
+        kind = event.get("type")
+
+        # MANUAL TURN BOUNDARIES. The button, and nothing else, decides.
+        #
+        # Automatic activity detection is disabled in `live.config`, so the
+        # model will not answer because it heard a pause -- and people pause
+        # constantly while speaking. These two markers are now the only things
+        # that open and close a turn.
+        if kind == "start":
+            await session.send_realtime_input(activity_start=types.ActivityStart())
+        elif kind == "end":
+            await session.send_realtime_input(activity_end=types.ActivityEnd())
 
 
 async def _downlink(ws: WebSocket, session, user: User) -> None:
@@ -267,6 +269,19 @@ async def _downlink(ws: WebSocket, session, user: User) -> None:
             # An empty generator means the session is finished with us. Looping
             # again would spin at full speed.
             return
+
+
+def _idle_disconnect(exc: Exception) -> bool:
+    """A session that timed out doing nothing, rather than a failure.
+
+    Gemini drops a live socket that has been idle, and the browser holds one
+    open between questions so the next one starts instantly. The result reached
+    the user as a red banner reading "The live session failed:
+    ConnectionClosedError" -- alarming, and describing nothing they did or need
+    to do. The next turn simply opens a new session.
+    """
+    text = str(exc).lower()
+    return "keepalive" in text or "1011" in text or "no close frame" in text
 
 
 def _explain(exc: Exception) -> str:

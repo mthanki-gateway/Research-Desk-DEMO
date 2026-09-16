@@ -65,7 +65,17 @@ log = structlog.get_logger()
 INPUT_RATE = 16_000
 OUTPUT_RATE = 24_000
 
-# Appended to every turn before it is closed. See note 1 above.
+# Kept, though the app no longer needs it.
+#
+# It was the workaround for AUTOMATIC activity detection, which decides a turn
+# has ended by hearing the speaker stop -- and which this app now disables
+# outright, because a person pausing mid-sentence is not a person who has
+# finished. With manual activity control the turn ends when `activity_end` is
+# sent, and silence means nothing at all.
+#
+# Left here because anything that re-enables automatic detection needs it
+# again, and the failure without it is completely silent: the model accepts the
+# audio, reports no transcript, and never replies.
 TRAILING_SILENCE = bytes(INPUT_RATE * 2)
 
 # Tools the live model may call.
@@ -183,6 +193,25 @@ def config(voice: str) -> types.LiveConnectConfig:
         # is not reading them, and nothing in the answer path depends on them.
         input_audio_transcription=types.AudioTranscriptionConfig(),
         output_audio_transcription=types.AudioTranscriptionConfig(),
+        # THE BUTTON OWNS THE TURN. Automatic detection is switched off.
+        #
+        # With it on, the model answers whenever it hears a pause -- and people
+        # pause constantly while speaking: to think, to find a word, to check a
+        # figure. Every one of those was read as "they have finished", so the
+        # assistant talked over the second half of the question. Tuning the
+        # silence threshold only moves the problem: short enough to feel
+        # responsive is short enough to interrupt, and long enough never to
+        # interrupt is long enough to feel broken.
+        #
+        # Disabled, the turn begins at `activity_start` and ends at
+        # `activity_end`, both sent when the user clicks. Nothing about the
+        # audio itself can end a turn, so a ten-second pause mid-question is
+        # just part of the question.
+        realtime_input_config=types.RealtimeInputConfig(
+            automatic_activity_detection=types.AutomaticActivityDetection(
+                disabled=True
+            )
+        ),
     )
 
 
