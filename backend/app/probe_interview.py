@@ -29,6 +29,9 @@ ANSWERS = [
     "Mostly Python and Postgres. Some Kubernetes, and I've been doing a lot of Terraform lately.",
     "I'd like to get deeper into distributed systems, and I'm curious about observability.",
     "Hybrid, ideally. Two days in the office is about right.",
+    # The thing that used to vanish: real information with no field to hold it.
+    "One more thing -- I'm looking for something that pays well. Honestly I "
+    "think I'm underpaid where I am.",
     "Nothing else really, thanks.",
 ]
 
@@ -79,7 +82,9 @@ async def main() -> None:
                                 session_id=chat.id,
                             )
                             responses.append(response)
-                            if call.name == profile.TOOL_NAME:
+                            if call.name == profile.END_TOOL:
+                                print(f"    [END_INTERVIEW {dict(call.args or {})}]")
+                            elif call.name == profile.TOOL_NAME:
                                 print(
                                     f"    [record_profile {sorted(dict(call.args or {}))}"
                                     f" -> missing {report['missing']}]"

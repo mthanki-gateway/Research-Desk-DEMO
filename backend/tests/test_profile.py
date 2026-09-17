@@ -192,6 +192,55 @@ class TestQuotes:
         assert p["notes"] == {"other": ["restores motorbikes"]}
 
 
+class TestEnding:
+    """The model decides when the conversation is over.
+
+    SEPARATE FROM COMPLETENESS, deliberately. "Every required field is filled"
+    and "this interview is finished" are different facts: the interviewer fills
+    the last field, then asks whether there is anything to add -- and that
+    answer is frequently the most useful thing in the profile, because it is
+    the only part the participant chose. Ending on completeness would cut the
+    conversation off exactly there.
+    """
+
+    def test_the_end_tool_is_declared(self):
+        assert profile.end_declaration()["name"] == profile.END_TOOL
+
+    def test_it_asks_for_a_summary_but_does_not_demand_one(self):
+        """A model with nothing to say should still be able to end."""
+        params = profile.end_declaration()["parameters"]
+        assert "summary" in params["properties"]
+        assert params["required"] == []
+
+    def test_it_says_when_not_to_call(self):
+        """Called early, it closes the microphone mid-question."""
+        text = profile.end_declaration()["description"]
+        assert "do not call it while you are still" in text
+
+
+class TestBucketValidation:
+    """An invented bucket must not become a section of the card.
+
+    The fallback that recovers a note from {field_name: text} can REASSIGN the
+    field, so validating before it runs lets a made-up name through. Observed:
+    a quote sent as {"note": "..."} was filed under a bucket literally called
+    "note" instead of landing in `other`.
+    """
+
+    def test_a_made_up_bucket_is_corrected(self):
+        p = profile.merge({}, {"quotes": [{"note": "two days is about right"}]})
+        assert p["quotes"] == {"other": ["two days is about right"]}
+
+    def test_a_real_field_survives_the_fallback(self):
+        p = profile.merge({}, {"quotes": [{"field": "skills", "quote": "Terraform"}]})
+        assert p["quotes"] == {"skills": ["Terraform"]}
+
+    @pytest.mark.parametrize("bucket", ["general", "other"])
+    def test_the_extra_buckets_are_allowed(self, bucket):
+        p = profile.merge({}, {"notes": [{"field": bucket, "note": "x"}]})
+        assert list(p["notes"]) == [bucket]
+
+
 class TestDensity:
     """A thin profile is the failure mode, not a missing field.
 

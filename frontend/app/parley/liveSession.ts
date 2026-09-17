@@ -57,6 +57,9 @@ export type LiveEvent =
       profile?: Record<string, string | number | string[]>;
       missing?: string[];
       complete?: boolean;
+      /** `end_interview` only: the model has closed the conversation. */
+      ended?: boolean;
+      summary?: string;
     }
   /** A COMPLETED exchange, assembled server-side. The client stores this
    *  rather than reconstructing boundaries from streaming fragments, which it

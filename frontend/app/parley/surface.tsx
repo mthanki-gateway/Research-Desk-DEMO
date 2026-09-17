@@ -78,12 +78,13 @@ type Phase =
  * deliberate click, which is exactly the friction a voice interface exists to
  * remove.
  *
- * Three seconds. Five was long enough to feel like waiting for permission --
- * the pause between an answer ending and being able to reply is dead air in a
- * conversation, and a follow-up is usually already formed by then. Still
- * cancellable, and clicking through it starts listening immediately.
+ * Two seconds. Five felt like waiting for permission, and three still did once
+ * the round trip is counted -- the gap the user experiences is always longer
+ * than the number, because the countdown starts after playback drains rather
+ * than when the model stops generating.
+ * Still cancellable, and clicking through it starts listening immediately.
  */
-const RESTART_SECONDS = 3;
+const RESTART_SECONDS = 2;
 
 type Source = { label: string; kind: "document" | "web"; url: string | null };
 
@@ -165,6 +166,8 @@ function Parley({ mode }: { mode: Mode }) {
   const [profileData, setProfileData] = useState<Profile>({});
   const [missing, setMissing] = useState<string[]>([]);
   const [profileDone, setProfileDone] = useState(false);
+  /** The model has called `end_interview`. The microphone stops reopening. */
+  const [ended, setEnded] = useState(false);
 
   /**
    * The turn in flight.
@@ -177,6 +180,7 @@ function Parley({ mode }: { mode: Mode }) {
   const [tick, setTick] = useState(0);
 
   const session = useRef<LiveSession | null>(null);
+  const endedRef = useRef(false);
   const timer = useRef<number | null>(null);
   /** The auto-restart countdown, separate from the listening clock. */
   const countdown = useRef<number | null>(null);
@@ -250,6 +254,10 @@ function Parley({ mode }: { mode: Mode }) {
    */
   const startRef = useRef<() => void>(() => {});
 
+  useEffect(() => {
+    endedRef.current = ended;
+  }, [ended]);
+
   const beginCountdown = useCallback(() => {
     stopCountdown();
     setPhase("counting");
@@ -290,6 +298,14 @@ function Parley({ mode }: { mode: Mode }) {
             setMissing(event.missing ?? []);
             setProfileDone(Boolean(event.complete));
           }
+          if (event.ended) {
+            // The model decided the conversation is over. Distinct from "the
+            // required fields are filled" -- it fills the last one, then asks
+            // whether there is anything to add, and that answer is often the
+            // most useful thing in the profile.
+            setEnded(true);
+            stopCountdown();
+          }
           for (const s of event.sources) {
             const key = `${s.kind}:${s.url ?? s.label}`;
             const known = live.current.sources.some(
@@ -321,7 +337,11 @@ function Parley({ mode }: { mode: Mode }) {
         case "playback_end":
           // Only the countdown. The exchange was stored when `turn` arrived;
           // this is purely "the speakers have gone quiet".
-          beginCountdown();
+          //
+          // Read through a ref rather than the state value: this callback is
+          // captured when the socket opens, so a plain `ended` here would be
+          // whatever it was at that moment -- always false.
+          if (!endedRef.current) beginCountdown();
           break;
         case "turn_end":
           // The model has finished GENERATING. Playback is still draining, so
@@ -429,6 +449,7 @@ function Parley({ mode }: { mode: Mode }) {
     setProfileData({});
     setMissing([]);
     setProfileDone(false);
+    setEnded(false);
     setResumed(false);
     setPhase("idle");
   }, [clearInFlight, stopCountdown]);
@@ -448,6 +469,7 @@ function Parley({ mode }: { mode: Mode }) {
         setProfileData(detail.profile ?? {});
         setMissing(detail.missing ?? []);
         setProfileDone(Boolean(detail.complete));
+        setEnded(Boolean((detail.profile ?? {}).ended));
         // Newest first, matching the live view -- the turn just spoken should
         // be the one under the button, not buried at the bottom.
         setExchanges(
@@ -532,7 +554,10 @@ function Parley({ mode }: { mode: Mode }) {
           phase={phase}
           level={level}
           remaining={remaining}
-          disabled={!status?.enabled}
+          // Once the model has closed the interview there is nothing to say to
+          // it. Leaving the button live invites a question that reopens a
+          // conversation the model has already finished.
+          disabled={!status?.enabled || ended}
           onStart={() => void start()}
           onStop={stop}
           onStopSpeaking={() => {
@@ -544,7 +569,9 @@ function Parley({ mode }: { mode: Mode }) {
         />
 
         <p className="md-title-small text-center">
-          {phase === "connecting"
+          {ended
+            ? "Interview complete"
+            : phase === "connecting"
             ? "Opening the session"
             : listening
               ? `Listening — ${elapsed}s. Pause as long as you like; click when you're done.`
@@ -561,15 +588,19 @@ function Parley({ mode }: { mode: Mode }) {
           className="md-body-small text-center"
           style={{ color: "var(--md-on-surface-variant)" }}
         >
-          {listening
-            ? "It will not answer until you click. Pausing mid-sentence is fine."
+          {ended
+            ? "The interviewer has everything it needs. Start a new one to go again."
+            : listening
+              ? "It will not answer until you click. Pausing mid-sentence is fine."
             : speaking
               ? "Nothing is being sent while it speaks."
-            : counting
-              ? "Click to start now, or stay quiet to cancel."
-              : status?.web_search
-                ? "Your documents and the web."
-                : "Your documents. Web search is not configured."}
+              : counting
+                ? "Click to start now, or stay quiet to cancel."
+                : mode === "interview"
+                  ? "It will ask; you answer. It stops when it has what it needs."
+                  : status?.web_search
+                    ? "Your documents and the web."
+                    : "Your documents. Web search is not configured."}
         </p>
 
         {counting && (
@@ -1020,6 +1051,15 @@ function ProfileCard({
         </span>
       </div>
 
+      {typeof profile.summary === "string" && profile.summary && (
+        <p
+          className="md-body-medium mb-3 italic"
+          style={{ color: "var(--md-on-surface-variant)" }}
+        >
+          {profile.summary}
+        </p>
+      )}
+
       <dl className="space-y-2">
         {shown.map((f) => {
           const value = profile[f.name] as string | number | string[] | undefined;
@@ -1063,7 +1103,10 @@ function ProfileCard({
           largest: the fields were chosen in advance and the person was not, so
           the most interesting thing they say usually belongs nowhere. */}
       {(["general", "other"] as const).map((bucket) =>
-        buckets.has(bucket) ? (
+        // `other` is shown even when EMPTY, because it is the one section
+        // whose emptiness is a finding: if nothing landed there, the
+        // interviewer summarised instead of organising.
+        buckets.has(bucket) || bucket === "other" ? (
           <div
             key={bucket}
             className="mt-4 border-t pt-3"
@@ -1073,9 +1116,18 @@ function ProfileCard({
               className="md-label-medium mb-1"
               style={{ color: "var(--md-on-surface-variant)" }}
             >
-              {bucket === "general" ? "Impressions" : "Everything else"}
+              {bucket === "general" ? "Impressions" : "Other notes"}
             </p>
-            <Detail notes={notes[bucket]} quotes={quotes[bucket]} />
+            {buckets.has(bucket) ? (
+              <Detail notes={notes[bucket]} quotes={quotes[bucket]} />
+            ) : (
+              <p
+                className="md-body-small"
+                style={{ color: "var(--md-on-surface-variant)" }}
+              >
+                Nothing yet. Everything that fits no field belongs here.
+              </p>
+            )}
           </div>
         ) : null,
       )}

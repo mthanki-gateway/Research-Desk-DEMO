@@ -147,10 +147,14 @@ def _declarations(mode: str = DEFAULT_MODE) -> list[types.FunctionDeclaration]:
     # has no use for it.
     if mode_of(mode) == "interview":
         declared.append(profile.declaration())
+        declared.append(profile.end_declaration())
 
     out = []
     for spec in declared:
-        if spec["name"] not in allowed and spec["name"] != profile.TOOL_NAME:
+        if spec["name"] not in allowed and spec["name"] not in (
+            profile.TOOL_NAME,
+            profile.END_TOOL,
+        ):
             continue
         params = spec.get("parameters") or {}
         properties = {
@@ -324,6 +328,27 @@ async def run_tool_call(
     name = call.name
     args = dict(call.args or {})
 
+    # The model declaring the conversation over. Nothing is retrieved and
+    # nothing is asked; the browser stops reopening the microphone.
+    if name == profile.END_TOOL:
+        summary = str(args.get("summary") or "").strip()
+        if session_id is not None and summary:
+            await store_summary(session_id, summary)
+        return (
+            types.FunctionResponse(
+                id=call.id,
+                name=name,
+                response={
+                    "result": (
+                        "The interview is closed. Say a brief goodbye and stop "
+                        "asking questions."
+                    )
+                },
+            ),
+            {"tool": name, "args": args, "n": 0, "sources": [], "ended": True,
+             "summary": summary},
+        )
+
     # Not a retrieval tool: it writes, and its result steers the next question.
     if name == profile.TOOL_NAME:
         if session_id is None:
@@ -488,6 +513,24 @@ async def save_turn(
             await db.commit()
     except Exception as exc:  # noqa: BLE001 - never interrupt a live call
         log.warning("live_save_turn_failed", error=str(exc)[:200])
+
+
+async def store_summary(session_id: uuid.UUID, summary: str) -> None:
+    """One line on who this person is, for the top of the card. Never raises."""
+    from app.db.models import ChatSession
+    from app.db.session import SessionLocal
+
+    try:
+        async with SessionLocal() as db:
+            chat = await db.get(ChatSession, session_id)
+            if chat is not None:
+                merged = dict(chat.profile or {})
+                merged["summary"] = summary
+                merged["ended"] = True
+                chat.profile = merged
+                await db.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("live_store_summary_failed", error=str(exc)[:200])
 
 
 async def store_handle(session_id: uuid.UUID, handle: str) -> None:

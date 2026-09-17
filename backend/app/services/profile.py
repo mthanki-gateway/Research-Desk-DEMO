@@ -183,6 +183,43 @@ _QUOTE_KEYS = ("quote", "text", "said", "value")
 REQUIRED = [f["name"] for f in FIELDS if f["required"]]
 FIELD_NAMES = [f["name"] for f in FIELDS]
 TOOL_NAME = "record_profile"
+END_TOOL = "end_interview"
+
+
+def end_declaration() -> dict[str, Any]:
+    """The tool that closes an interview.
+
+    SEPARATE FROM COMPLETENESS, deliberately. "Every required field is filled"
+    and "this conversation is over" are different facts: the interviewer fills
+    the last field, then asks whether there is anything to add, and the answer
+    to THAT is often the most useful thing in the profile. Ending on
+    completeness would cut the conversation off exactly there.
+
+    So the model says when it is done, and the microphone stops reopening.
+    """
+    return {
+        "name": END_TOOL,
+        "description": (
+            "End the interview. Call this only after you have told the person "
+            "you have everything you need, asked whether they want to add "
+            "anything, and recorded whatever they added. After this the "
+            "microphone will not reopen, so do not call it while you are still "
+            "expecting an answer."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "STRING",
+                    "description": (
+                        "One sentence on who this person is, for the top of "
+                        "the card."
+                    ),
+                }
+            },
+            "required": [],
+        },
+    }
 
 
 def declaration() -> dict[str, Any]:
@@ -312,11 +349,6 @@ def _fold(merged: dict, incoming: list, bucket_key: str, text_keys: tuple) -> di
             if not isinstance(note, dict):
                 continue
             field = str(note.get("field") or GENERAL).strip() or GENERAL
-            # An unknown field name is filed under `general` rather than
-            # dropped. A misattributed observation is still an observation;
-            # a discarded one is gone.
-            if field not in FIELD_NAMES and field not in EXTRA_BUCKETS:
-                field = OTHER
             text = ""
             for key in text_keys:
                 if note.get(key):
@@ -336,6 +368,17 @@ def _fold(merged: dict, incoming: list, bucket_key: str, text_keys: tuple) -> di
                     text = value.strip()
             if not text:
                 continue
+
+            # VALIDATED LAST, not first. The fallback above can REASSIGN the
+            # field, and checking before it ran let an invented bucket through:
+            # a quote sent as {"note": "..."} was filed under a bucket called
+            # "note" instead of landing in `other`.
+            #
+            # An unknown field is filed rather than dropped. A misattributed
+            # observation is still an observation; a discarded one is gone.
+            if field not in FIELD_NAMES and field not in EXTRA_BUCKETS:
+                field = OTHER
+
             bucket = notes.setdefault(field, [])
             if text.lower() not in {n.lower() for n in bucket}:
                 bucket.append(text)
