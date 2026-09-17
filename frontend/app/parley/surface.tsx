@@ -90,13 +90,14 @@ type Source = { label: string; kind: "document" | "web"; url: string | null };
 
 type Exchange = {
   id: string;
-  question: string;
   answer: string;
   tools: { tool: string; n: number }[];
   sources: Source[];
+  /** What was captured from the participant's answer. */
+  recorded: Record<string, unknown>[];
 };
 
-const EMPTY = { question: "", answer: "", tools: [], sources: [] };
+const EMPTY = { answer: "", tools: [], sources: [], recorded: [] };
 
 /**
  * THE SURFACE BOTH MODES SHARE.
@@ -233,7 +234,7 @@ function Parley({ mode }: { mode: Mode }) {
    * could land as one stray word.
    */
   const clearInFlight = useCallback(() => {
-    live.current = { question: "", answer: "", tools: [], sources: [] };
+    live.current = { answer: "", tools: [], sources: [], recorded: [] };
     setTick((n) => n + 1);
   }, []);
 
@@ -281,10 +282,17 @@ function Parley({ mode }: { mode: Mode }) {
           setLevel(event.level);
           break;
         case "heard":
-          // APPENDED, not replaced: each frame carries the next few words, not
-          // the whole transcript so far.
-          live.current.question += event.text;
-          setTick((n) => n + 1);
+          // DELIBERATELY IGNORED.
+          //
+          // `input_transcription` is a separate, lossier pass than the model's
+          // own understanding -- it rendered a participant saying their name
+          // was John as "madre es un", in a turn the model answered with
+          // "Thanks, John". Showing it next to a correct answer does not
+          // merely look wrong, it looks authoritative and wrong, and invites
+          // the reader to doubt an answer that was right.
+          //
+          // What the participant said is captured accurately elsewhere: by
+          // the model itself, as quotes and notes on the profile.
           break;
         case "said":
           live.current.answer += event.text;
@@ -318,14 +326,14 @@ function Parley({ mode }: { mode: Mode }) {
         }
         case "turn":
           // The record, from the one place that knows the boundary.
-          if (event.question || event.answer) {
+          if (event.answer) {
             setExchanges((prev) => [
               {
                 id: `${Date.now()}`,
-                question: event.question,
                 answer: event.answer,
                 sources: event.sources,
                 tools: event.tools.map((tool) => ({ tool, n: 0 })),
+                recorded: event.recorded ?? [],
               },
               ...prev,
             ]);
@@ -474,11 +482,13 @@ function Parley({ mode }: { mode: Mode }) {
         // be the one under the button, not buried at the bottom.
         setExchanges(
           detail.turns
+            .filter((t) => t.answer)
             .map((t, i) => ({
               id: `${id}:${i}`,
-              question: t.question,
               answer: t.answer,
               sources: t.sources,
+              // Not stored per turn; the profile card carries the whole of it.
+              recorded: [],
               // Restored turns carry tool NAMES only; the hit counts were live
               // telemetry and are not stored. 0 renders as a bare label.
               tools: t.tools.map((tool) => ({ tool, n: 0 })),
@@ -629,13 +639,8 @@ function Parley({ mode }: { mode: Mode }) {
           </p>
         )}
 
-        {(inFlight.question || inFlight.tools.length > 0 || inFlight.answer) && (
+        {(inFlight.tools.length > 0 || inFlight.answer) && (
           <div className="w-full space-y-2 pt-2" key={tick}>
-            {inFlight.question && (
-              <p className="md-body-medium text-center font-medium">
-                &ldquo;{inFlight.question}&rdquo;
-              </p>
-            )}
             {inFlight.tools.map((t, i) => (
               <p
                 key={`${t.tool}-${i}`}
@@ -778,7 +783,7 @@ function Parley({ mode }: { mode: Mode }) {
         <div className="space-y-2" aria-hidden>
           <span className="md-skeleton block h-4 w-80" />
         </div>
-      ) : exchanges.length === 0 && !inFlight.question ? (
+      ) : exchanges.length === 0 && !inFlight.answer ? (
         <p
           className="md-body-medium"
           style={{ color: "var(--md-on-surface-variant)" }}
@@ -928,26 +933,36 @@ function MicButton({
 function Turn({ exchange }: { exchange: Exchange }) {
   return (
     <li className="md-card md-card-elevated space-y-3 p-5">
-      <p className="md-body-medium flex items-start gap-2">
-        <span
-          className="mt-0.5 shrink-0"
-          style={{ color: "var(--md-on-surface-variant)" }}
-        >
-          <IconMic className="h-4 w-4" />
-        </span>
-        <span className="font-medium">
-          {exchange.question || <em>nothing intelligible</em>}
-        </span>
+      {/* THE ANSWER ONLY. What the participant said used to sit above it, taken
+          from `input_transcription` -- a separate, lossier pass that rendered
+          someone saying their name was John as "madre es un", directly above
+          the model's correct reply of "Thanks, John". A wrong transcript beside
+          a right answer is worse than no transcript: it reads as authoritative
+          and invites doubt about the half that was correct.
+
+          The reply carries the question anyway. "Thanks, John, how many years
+          of experience do you have?" tells you what was asked and confirms what
+          was heard, in the words of the thing that actually heard it. */}
+      <p className="md-body-medium whitespace-pre-wrap">
+        {exchange.answer || <em>no answer</em>}
       </p>
 
-      <div
-        className="border-t pt-3"
-        style={{ borderColor: "var(--md-outline-variant)" }}
-      >
-        <p className="md-body-medium whitespace-pre-wrap">
-          {exchange.answer || <em>no answer</em>}
-        </p>
-      </div>
+      {exchange.recorded.length > 0 && (
+        <div
+          className="border-t pt-3"
+          style={{ borderColor: "var(--md-outline-variant)" }}
+        >
+          <p
+            className="md-label-medium mb-1"
+            style={{ color: "var(--md-on-surface-variant)" }}
+          >
+            Taken from your answer
+          </p>
+          {exchange.recorded.map((entry, i) => (
+            <Recorded key={i} entry={entry} />
+          ))}
+        </div>
+      )}
 
       <div className="flex flex-wrap items-center gap-2">
         {exchange.tools.map((t, i) => (
@@ -1192,4 +1207,37 @@ function Detail({
 function label(name: string): string {
   const words = name.replace(/_/g, " ");
   return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+
+/**
+ * What one `record_profile` call captured, in plain English.
+ *
+ * This is the honest version of "what you said": it comes from the model,
+ * which heard the audio, rather than from the transcription pass, which
+ * frequently did not. It is also more useful -- a participant can see that
+ * their answer was understood as "six years" without reading a transcript of
+ * themselves.
+ */
+function Recorded({ entry }: { entry: Record<string, unknown> }) {
+  const lines: string[] = [];
+  for (const [key, value] of Object.entries(entry)) {
+    if (value === null || value === undefined || value === "") continue;
+    if (key === "notes" || key === "quotes") {
+      const n = Array.isArray(value) ? value.length : 1;
+      lines.push(`${n} ${key === "notes" ? "note" : "quote"}${n === 1 ? "" : "s"}`);
+      continue;
+    }
+    const shown = Array.isArray(value) ? value.join(", ") : String(value);
+    lines.push(`${label(key)}: ${shown}`);
+  }
+  if (!lines.length) return null;
+  return (
+    <p
+      className="md-body-small"
+      style={{ color: "var(--md-on-surface-variant)" }}
+    >
+      {lines.join(" · ")}
+    </p>
+  );
 }

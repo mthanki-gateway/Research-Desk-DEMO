@@ -26,7 +26,9 @@ Us to browser:
     {"type":"heard","text"}     what it understood, for the screen
     {"type":"said","text"}      what it is saying, for the screen
     {"type":"tool", ...}        which tool ran, and what it found
-    {"type":"turn", ...}        the COMPLETED exchange; the client stores this
+    {"type":"turn", ...}        the COMPLETED exchange, including what was
+                                RECORDED from it -- which is accurate, where
+                                the transcript is not
     {"type":"turn_end"}         the model has finished speaking
     {"type":"resume","handle"}  hold this; it restores the conversation
     {"type":"going_away","in"}  the server is about to drop us; reconnect
@@ -425,6 +427,10 @@ async def _downlink(ws: WebSocket, session, user: User, chat_id) -> None:
     said: list[str] = []
     sources: list[dict] = []
     tools: list[str] = []
+    # What the model RECORDED this turn, as it passed it. The accurate record
+    # of what the participant said -- unlike `heard`, which is a separate and
+    # demonstrably lossier transcription pass.
+    recorded: list[dict] = []
 
     while True:
         received_anything = False
@@ -501,10 +507,11 @@ async def _downlink(ws: WebSocket, session, user: User, chat_id) -> None:
                                 "answer": "".join(said).strip(),
                                 "sources": sources,
                                 "tools": tools,
+                                "recorded": recorded,
                             }
                         )
                     )
-                    heard, said, sources, tools = [], [], [], []
+                    heard, said, sources, tools, recorded = [], [], [], [], []
                     await ws.send_text(json.dumps({"type": "turn_end"}))
 
             # THE HANDLE THAT MAKES A RECONNECT INVISIBLE.
@@ -547,6 +554,8 @@ async def _downlink(ws: WebSocket, session, user: User, chat_id) -> None:
                     # this the app looks frozen at exactly the moment it is
                     # doing the most interesting thing.
                     tools.append(report["tool"])
+                    if report["tool"] == live.profile.TOOL_NAME and report["args"]:
+                        recorded.append(report["args"])
                     for source in report["sources"]:
                         if source not in sources:
                             sources.append(source)

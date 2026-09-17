@@ -70,6 +70,9 @@ export type LiveEvent =
       answer: string;
       sources: { label: string; kind: "document" | "web"; url: string | null }[];
       tools: string[];
+      /** What the model RECORDED from this turn. Accurate, where the
+       *  transcript is not — it comes from the thing that heard the audio. */
+      recorded?: Record<string, unknown>[];
     }
   | { type: "turn_end" }
   /** The server has stored a resumption handle; the conversation is safe. */
