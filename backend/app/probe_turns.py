@@ -86,7 +86,11 @@ def turn(ws, pcm: bytes, label: str) -> None:
 def main() -> None:
     pcm = question_pcm()
     with TestClient(app) as http:
-        with http.websocket_connect("/live/ws?voice_name=Kore") as ws:
+        import os
+        mode = os.environ.get("PROBE_MODE", "speak")
+        with http.websocket_connect(
+            f"/live/ws?voice_name=Kore&mode={mode}"
+        ) as ws:
             print("ready:", ws.receive_json())
             turn(ws, pcm, "TURN 1")
             turn(ws, pcm, "TURN 2")

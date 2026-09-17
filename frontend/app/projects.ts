@@ -2,6 +2,7 @@ import {
   IconChat,
   IconAtlas,
   IconChip,
+  IconInterview,
   IconParley,
   IconMic,
   IconLab,
@@ -67,11 +68,14 @@ export const PROJECTS: Project[] = [
   {
     id: "parley",
     name: "Parley",
-    blurb: "Talk it through out loud. The same documents, heard and answered.",
+    blurb: "Talk it through out loud, or be interviewed. Speech in, speech out.",
     Icon: IconParley,
     home: "/parley",
     owns: ["/parley"],
-    nav: [{ href: "/parley", label: "Speak", Icon: IconParley }],
+    nav: [
+      { href: "/parley", label: "Speak", Icon: IconParley },
+      { href: "/parley/interview", label: "Interview", Icon: IconInterview },
+    ],
   },
 ];
 

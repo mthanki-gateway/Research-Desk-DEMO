@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Suspense, useEffect, useState } from "react";
+import { Fragment, Suspense, useEffect, useState } from "react";
 import { createSession } from "@/lib/api";
 import { useApp } from "./providers";
 import CommandPalette from "./command-palette";
@@ -73,6 +73,16 @@ export default function Shell({ children }: { children: React.ReactNode }) {
   // so the nav cannot disagree with the page being shown.
   const project = projectFor(pathname);
   const isResearchDesk = project.id === "research-desk";
+
+  // The nav href the current path belongs to: the longest one that matches.
+  const activeHref = project.nav.reduce(
+    (best, { href }) =>
+      (pathname === href || pathname.startsWith(`${href}/`)) &&
+      href.length > best.length
+        ? href
+        : best,
+    "",
+  );
   const scroller = useAutoHideScroll<HTMLElement>();
 
   // /login and /auth/* must render without the drawer, and must never be
@@ -274,7 +284,14 @@ export default function Shell({ children }: { children: React.ReactNode }) {
 
         <nav className="md-nav-group space-y-1">
           {project.nav.map(({ href, label, Icon }) => {
-            const active = pathname.startsWith(href);
+            // LONGEST MATCH WINS, not merely "starts with".
+            //
+            // Parley owns both /parley and /parley/interview, and a plain
+            // prefix test lights BOTH rows on the interview page -- so the
+            // drawer says you are in two places at once. Same rule as
+            // projectFor(): the most specific route that matches is the one
+            // you are in.
+            const active = href === activeHref;
             return (
               /* A real <Link>, not a div with role="link" calling
                  router.push(). Two reasons, and the first is the bigger cause
@@ -287,8 +304,8 @@ export default function Shell({ children }: { children: React.ReactNode }) {
                  2. It is an anchor, so middle-click, ctrl-click, "open in new
                     tab" and screen-reader link navigation all work. A div with
                     role="link" only *claims* to be a link. */
+              <Fragment key={href}>
               <Ripplable
-                key={href}
                 as={Link}
                 href={href}
                 prefetch
@@ -302,23 +319,29 @@ export default function Shell({ children }: { children: React.ReactNode }) {
                 </span>
                 {label}
               </Ripplable>
+
+              {/* Parley's stored conversations hang off the nav item that
+                  produces them -- Conversations under Speak, Profiles under
+                  Interview. Rendered here rather than as one block after the
+                  nav, because "which list belongs to which mode" is exactly
+                  what the nesting is there to say.
+
+                  Its own Suspense boundary: it reads the query string, which
+                  opts the subtree into client rendering, and the drawer lives
+                  OUTSIDE the page's boundary -- without one here, prerendering
+                  the route fails entirely. */}
+              {project.id === "parley" && (
+                <Suspense fallback={null}>
+                  <ParleyNav
+                    pathname={pathname}
+                    mode={href === "/parley/interview" ? "interview" : "speak"}
+                  />
+                </Suspense>
+              )}
+              </Fragment>
             );
           })}
         </nav>
-
-        {/* Parley contributes its conversations to the drawer, directly under
-            its own nav item. Kept in its own component rather than branching
-            here again: the shell already carries one app-specific block, and a
-            second inline would turn the drawer into a switch over apps. */}
-        {project.id === "parley" && (
-          // Its own boundary: ParleyNav reads the query string, which opts its
-          // subtree into client rendering, and the drawer lives OUTSIDE the
-          // page's boundary -- so without one here, prerendering /parley fails
-          // for the whole route.
-          <Suspense fallback={null}>
-            <ParleyNav pathname={pathname} />
-          </Suspense>
-        )}
 
         {ingesting && (
           <div

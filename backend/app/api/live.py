@@ -93,8 +93,17 @@ async def status() -> dict:
 
 
 @router.get("/live/conversations")
-async def conversations(user: User = Depends(current_user)) -> list[dict]:
-    """Spoken conversations, newest first, for the "continue" list."""
+async def conversations(
+    mode: str = Query(default="speak"), user: User = Depends(current_user)
+) -> list[dict]:
+    """Conversations for one mode, newest first.
+
+    Filtered by `kind` rather than returning everything and letting the client
+    sort it out: Speak and Interview are separate lists in separate places, and
+    a drawer that briefly shows the other app's conversations before filtering
+    them is worse than one that waits.
+    """
+    kind = live.kind_of(mode)
     from sqlalchemy import func as sql_func
 
     async with SessionLocal() as db:
@@ -106,7 +115,7 @@ async def conversations(user: User = Depends(current_user)) -> list[dict]:
                 )
                 .outerjoin(Message, Message.session_id == ChatSession.id)
                 .where(
-                    ChatSession.kind == "parley",
+                    ChatSession.kind == kind,
                     ChatSession.owner_id.is_(None)
                     if user.owner_id is None
                     else ChatSession.owner_id == user.owner_id,
@@ -140,7 +149,7 @@ async def conversation(
     """One spoken conversation, as alternating turns."""
     async with SessionLocal() as db:
         chat = await db.get(ChatSession, conversation_id)
-        if chat is None or chat.kind != "parley":
+        if chat is None or chat.kind not in ("parley", "interview"):
             raise HTTPException(status_code=404, detail="Conversation not found.")
         forbid_if_not_owner(chat.owner_id, user)
 
@@ -192,7 +201,7 @@ async def rename_conversation(
 
     async with SessionLocal() as db:
         chat = await db.get(ChatSession, conversation_id)
-        if chat is None or chat.kind != "parley":
+        if chat is None or chat.kind not in ("parley", "interview"):
             raise HTTPException(status_code=404, detail="Conversation not found.")
         forbid_if_not_owner(chat.owner_id, user)
         chat.title = title
@@ -206,7 +215,7 @@ async def remove_conversation(
 ) -> None:
     async with SessionLocal() as db:
         chat = await db.get(ChatSession, conversation_id)
-        if chat is None or chat.kind != "parley":
+        if chat is None or chat.kind not in ("parley", "interview"):
             raise HTTPException(status_code=404, detail="Conversation not found.")
         forbid_if_not_owner(chat.owner_id, user)
         await db.delete(chat)
@@ -241,6 +250,7 @@ async def live_socket(
     token: str = Query(default=""),
     voice_name: str = Query(default=""),
     session_id: str = Query(default=""),
+    mode: str = Query(default="speak"),
 ) -> None:
     await ws.accept()
 
@@ -270,13 +280,17 @@ async def live_socket(
     # The conversation this socket appends to. Found or created BEFORE the live
     # session opens, because its stored handle is what the live session needs
     # in order to resume rather than start blank.
-    chat = await live.open_conversation(user.owner_id, session_id or None)
+    chosen_mode = live.mode_of(mode)
+    chat = await live.open_conversation(
+        user.owner_id, session_id or None, live.kind_of(chosen_mode)
+    )
     resume = chat.live_handle
 
     try:
         client = live.client()
         async with client.aio.live.connect(
-            model=settings.live_model, config=live.config(chosen, resume)
+            model=settings.live_model,
+            config=live.config(chosen, resume, chosen_mode),
         ) as session:
             await ws.send_text(
                 json.dumps(
@@ -285,6 +299,7 @@ async def live_socket(
                         "voice": chosen,
                         "resumed": bool(resume),
                         "session_id": str(chat.id),
+                        "mode": chosen_mode,
                     }
                 )
             )
@@ -294,6 +309,7 @@ async def live_socket(
                 voice=chosen,
                 resumed=bool(resume),
                 session=str(chat.id),
+                mode=chosen_mode,
             )
 
             # Two directions at once, which is the whole point of a live model:

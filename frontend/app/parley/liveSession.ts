@@ -1,4 +1,4 @@
-import { browserBase } from "@/lib/api";
+import { type Mode, browserBase } from "@/lib/api";
 import { getAccessToken } from "@/lib/supabase";
 
 /**
@@ -37,7 +37,13 @@ const OUTPUT_RATE = 24_000;
  * knows how to restore it.
  */
 export type LiveEvent =
-  | { type: "ready"; voice: string; resumed: boolean; session_id: string }
+  | {
+      type: "ready";
+      voice: string;
+      resumed: boolean;
+      session_id: string;
+      mode: Mode;
+    }
   | { type: "heard"; text: string }
   | { type: "said"; text: string }
   | {
@@ -83,6 +89,7 @@ export type LiveSession = {
 export async function openLiveSession(
   voiceName: string,
   conversationId: string | null,
+  mode: Mode,
   onEvent: (event: LiveEvent) => void,
 ): Promise<LiveSession> {
   // The token travels in the query string because a browser CANNOT set headers
@@ -93,6 +100,8 @@ export async function openLiveSession(
   if (token) url.searchParams.set("token", token);
   url.searchParams.set("voice_name", voiceName);
   if (conversationId) url.searchParams.set("session_id", conversationId);
+  // Picks the system prompt, server-side. Everything else is identical.
+  url.searchParams.set("mode", mode);
 
   const ws = new WebSocket(url.toString());
   ws.binaryType = "arraybuffer";

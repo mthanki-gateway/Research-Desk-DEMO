@@ -65,6 +65,15 @@ export const IconParley = (p: Props) => (
   </Svg>
 );
 
+/** Interview: two people, one asking. */
+export const IconInterview = (p: Props) => (
+  <Svg {...p}>
+    <circle cx="8" cy="8" r="3" />
+    <path d="M2.5 20a5.5 5.5 0 0 1 11 0" />
+    <path d="M16 5h5.5v6H19l-1.5 2.5V11H16z" />
+  </Svg>
+);
+
 /** A waveform, for the speaking state. */
 export const IconWave = (p: Props) => (
   <Svg {...p}>

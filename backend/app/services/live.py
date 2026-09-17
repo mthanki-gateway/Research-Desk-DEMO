@@ -58,7 +58,7 @@ from google.genai import types
 
 from app.agent import tools as agent_tools
 from app.config import get_settings
-from app.services import websearch
+from app.services import live_prompts, websearch
 
 log = structlog.get_logger()
 
@@ -88,40 +88,27 @@ TRAILING_SILENCE = bytes(INPUT_RATE * 2)
 # adjacent chunks in their head to compare them.
 SPOKEN_TOOLS = ("search_documents", "search_web", "list_documents", "corpus_stats")
 
-SYSTEM = """You are Parley, a research assistant that is LISTENED TO rather \
-than read. Everything you say is spoken aloud and heard once.
+# Which prompt, and which kind of stored conversation, each mode uses.
+#
+# ONE PIPELINE, TWO PROMPTS. Speak and Interview share every piece of
+# machinery: the socket, the audio handling, the turn boundaries, the tools,
+# the persistence. What differs is what the model is told it is for -- and that
+# is genuinely the only difference, which is why it is a lookup rather than a
+# second implementation.
+MODES: dict[str, dict[str, str]] = {
+    "speak": {"system": live_prompts.SPEAK, "kind": "parley"},
+    "interview": {"system": live_prompts.INTERVIEW, "kind": "interview"},
+}
+DEFAULT_MODE = "speak"
 
-YOUR TOOLS ARE THE POINT. You have the user's own uploaded documents and the \
-public web. Before answering any factual question, search. Never answer a \
-question about their material from memory -- you have not read their documents, \
-you can only search them.
 
-- search_documents: their private material. Use it first for anything about \
-their reports, incidents, handbooks or transcripts.
-- search_web: public knowledge, definitions, current events, anything not \
-theirs. Use it ALONGSIDE the documents when a question spans both.
-- list_documents: what they actually have, and what it covers. Use it for \
-"what do you have", and before claiming something is not in their documents.
-- corpus_stats: counts and sizes of the collection as a whole.
+def mode_of(name: str) -> str:
+    """The requested mode, or the default. Never raises on a bad value."""
+    return name if name in MODES else DEFAULT_MODE
 
-HOW TO SPEAK
 
-Be brief. Aim for under eighty words. A listener cannot skim, so lead with the \
-answer and stop.
-
-Name your sources in words -- "your engineering handbook says", "according to \
-the incident report". Never say a citation number; there is nothing on screen \
-to match it to.
-
-Never refer to anything visual: no "above", no "below", no "as listed", no \
-"see the table".
-
-Say numbers as they are spoken: "sixty four passages", "the eleventh of \
-November".
-
-If you searched and found nothing, say that plainly and say where you looked. \
-Do not invent a plausible answer -- being wrong out loud is worse than being \
-wrong in text, because there is nothing to re-read."""
+def kind_of(mode: str) -> str:
+    return MODES[mode_of(mode)]["kind"]
 
 
 def enabled() -> bool:
@@ -169,7 +156,9 @@ def _declarations() -> list[types.FunctionDeclaration]:
     return out
 
 
-def config(voice: str, resume: str | None = None) -> types.LiveConnectConfig:
+def config(
+    voice: str, resume: str | None = None, mode: str = DEFAULT_MODE
+) -> types.LiveConnectConfig:
     reach = (
         ""
         if websearch.enabled()
@@ -188,7 +177,9 @@ def config(voice: str, resume: str | None = None) -> types.LiveConnectConfig:
             )
         ),
         tools=[types.Tool(function_declarations=_declarations())],
-        system_instruction=types.Content(parts=[types.Part(text=SYSTEM + reach)]),
+        system_instruction=types.Content(
+            parts=[types.Part(text=MODES[mode_of(mode)]["system"] + reach)]
+        ),
         # Both transcripts are requested purely so the SCREEN can show what was
         # heard and said. They are a side output, not the mechanism -- the model
         # is not reading them, and nothing in the answer path depends on them.
@@ -318,7 +309,9 @@ async def frames(audio: bytes, *, size: int = INPUT_RATE * 2 // 10) -> AsyncIter
 # ---------------------------------------------------------------------------
 
 
-async def open_conversation(owner_id: str | None, session_id: str | None):
+async def open_conversation(
+    owner_id: str | None, session_id: str | None, kind: str = "parley"
+):
     """Find the conversation to append to, or start one."""
 
     from app.db.models import ChatSession
@@ -329,13 +322,13 @@ async def open_conversation(owner_id: str | None, session_id: str | None):
             chat = await db.get(ChatSession, uuid.UUID(session_id))
             # Ownership is checked HERE rather than trusted from the client: a
             # session id in a query string is a guess anyone can make.
-            if chat is not None and chat.owner_id == owner_id and chat.kind == "parley":
+            if chat is not None and chat.owner_id == owner_id and chat.kind == kind:
                 return chat
 
         chat = ChatSession(
-            title="Spoken conversation",
+            title="Interview" if kind == "interview" else "Spoken conversation",
             owner_id=owner_id,
-            kind="parley",
+            kind=kind,
         )
         db.add(chat)
         await db.commit()
@@ -387,7 +380,10 @@ async def save_turn(
             # The first real question becomes the title. "Spoken conversation"
             # tells a list of conversations nothing at all.
             chat = await db.get(ChatSession, session_id)
-            if chat is not None and chat.title == "Spoken conversation" and question:
+            if chat is not None and question and chat.title in (
+                "Spoken conversation",
+                "Interview",
+            ):
                 chat.title = question[:120]
 
             await db.commit()

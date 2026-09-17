@@ -49,7 +49,15 @@ entry there plus its pages; the drawer, the app switcher and active-item
 highlighting all read from it. Do not hardcode nav items anywhere else.
 
 Three today — **Research Desk** (chat, library, lab, atlas), **Model Lab**
-(playground, transcribe) and **Parley** (voice).
+(playground, transcribe) and **Parley** (speak, interview).
+
+Parley has TWO MODES and they are one pipeline. Speak answers questions from
+the corpus; Interview profiles the participant. The socket, audio handling,
+manual turn boundaries, tools, persistence and resumption are shared — the
+only difference is the system prompt (`live_prompts.py`) and the `kind` the
+conversation is stored under. Adding a third mode should be an entry in
+`live.MODES` plus a route, and nothing else. If it needs more than that,
+something that ought to be shared has been duplicated.
 
 Parley is a different DOOR onto the same corpus, not a second assistant. A
 document uploaded in the Library is answerable out loud the moment it finishes

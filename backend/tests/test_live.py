@@ -239,19 +239,89 @@ class TestToolBridge:
         assert report["n"] == 2  # the count is still the true number of hits
 
 
-class TestSystemPrompt:
-    """What the model is told about speaking, since nothing else enforces it."""
+class TestModes:
+    """Speak and Interview are one pipeline and two prompts.
 
-    def test_it_is_told_to_search_before_answering(self):
-        assert "before answering" in live.SYSTEM.lower()
+    Everything else is shared -- the socket, the audio handling, the manual
+    turn boundaries, the tools, the persistence, the resumption. If these two
+    ever stop being the only difference, this file is where that shows up.
+    """
 
-    def test_it_is_told_not_to_say_citation_numbers(self):
-        """There is no screen to match "[3]" to, and it is read as a number."""
-        assert "citation number" in live.SYSTEM.lower()
+    def test_both_modes_exist_and_differ(self):
+        assert set(live.MODES) == {"speak", "interview"}
+        assert (
+            live.MODES["speak"]["system"] != live.MODES["interview"]["system"]
+        )
 
-    def test_it_is_told_not_to_refer_to_anything_visual(self):
-        assert "above" in live.SYSTEM and "below" in live.SYSTEM
+    def test_they_are_stored_separately(self):
+        """Interviews must not appear in the Speak list, or the reverse.
 
+        Same table, different `kind` -- one conversation table for one concept,
+        with the app it belongs to as a column.
+        """
+        assert live.kind_of("speak") == "parley"
+        assert live.kind_of("interview") == "interview"
+
+    def test_an_unknown_mode_falls_back_rather_than_failing(self):
+        """A bad query parameter must not take the socket down.
+
+        The mode arrives in a URL, so it is whatever anyone types.
+        """
+        assert live.mode_of("nonsense") == "speak"
+        assert live.mode_of("") == "speak"
+
+    @pytest.mark.parametrize("mode", ["speak", "interview"])
+    def test_every_mode_forbids_citation_numbers(self, mode):
+        """There is no screen to match "[3]" to, and it is read out as a number."""
+        assert "citation number" in _flat(mode).lower()
+
+    @pytest.mark.parametrize("mode", ["speak", "interview"])
+    def test_every_mode_forbids_visual_references(self, mode):
+        system = _flat(mode)
+        assert "above" in system and "below" in system
+
+    @pytest.mark.parametrize("mode", ["speak", "interview"])
+    def test_every_mode_reaches_the_tools(self, mode):
+        """An interview that cannot look anything up asks worse questions."""
+        system = _flat(mode)
+        assert "search_documents" in system or "search the user" in system.lower()
+
+
+def _flat(mode: str) -> str:
+    """The prompt with its hard wrapping removed.
+
+    The prompts are wrapped prose, so a phrase worth asserting on is as likely
+    as not to straddle a newline -- "doing most of
+the talking". Matching the
+    raw string makes the test depend on where the paragraph happened to wrap.
+    """
+    return " ".join(live.MODES[mode]["system"].split())
+
+
+class TestInterviewPrompt:
+    """The behaviours that make an interview an interview rather than a chat."""
+
+    def test_one_question_at_a_time(self):
+        """Two questions in one breath gets an answer to the second only."""
+        assert "ONE question at a time" in _flat("interview")
+
+    def test_it_is_told_to_follow_up_on_vague_answers(self):
+        """"It's going well" is a deflection, not an answer."""
+        assert "FOLLOW UP ON VAGUE" in _flat("interview")
+
+    def test_it_is_told_not_to_lead(self):
+        """A leading question buys agreement, which is not information."""
+        assert "DO NOT LEAD" in _flat("interview")
+
+    def test_it_is_told_the_participant_does_the_talking(self):
+        assert "most of the talking" in _flat("interview")
+
+    def test_it_asks_who_it_is_talking_to(self):
+        """A profile with no name attached is not a profile."""
+        assert "their name" in _flat("interview")
+
+
+class TestWebReach:
     def test_an_unconfigured_web_is_declared(self, monkeypatch):
         """Otherwise "did not search" and "cannot search" sound identical."""
         monkeypatch.setattr(live.websearch, "enabled", lambda: False)
@@ -262,6 +332,12 @@ class TestSystemPrompt:
         monkeypatch.setattr(live.websearch, "enabled", lambda: True)
         text = live.config("Kore").system_instruction.parts[0].text
         assert "NOT CONFIGURED" not in text
+
+    @pytest.mark.parametrize("mode", ["speak", "interview"])
+    def test_the_caveat_reaches_every_mode(self, mode, monkeypatch):
+        monkeypatch.setattr(live.websearch, "enabled", lambda: False)
+        text = live.config("Kore", None, mode).system_instruction.parts[0].text
+        assert "NOT CONFIGURED" in text
 
 
 class _Call:

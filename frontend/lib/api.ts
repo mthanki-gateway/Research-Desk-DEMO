@@ -1075,6 +1075,15 @@ export async function getLiveStatus(): Promise<LiveStatus> {
 }
 
 
+/**
+ * Which spoken app a conversation belongs to.
+ *
+ * Speak and Interview run the same pipeline against a different system
+ * prompt, and this is the whole of the difference on the client: it picks the
+ * prompt server-side, and separates the two lists of conversations.
+ */
+export type Mode = "speak" | "interview";
+
 /** A spoken conversation, as a row in the "continue" list. */
 export type ParleyConversation = {
   id: string;
@@ -1103,8 +1112,12 @@ export type ParleyTurn = {
   tools: string[];
 };
 
-export async function getParleyConversations(): Promise<ParleyConversation[]> {
-  const res = await authedFetch("/live/conversations", { cache: "no-store" });
+export async function getParleyConversations(
+  mode: Mode = "speak",
+): Promise<ParleyConversation[]> {
+  const res = await authedFetch(`/live/conversations?mode=${mode}`, {
+    cache: "no-store",
+  });
   if (!res.ok) throw new Error(await detail(res));
   return res.json();
 }

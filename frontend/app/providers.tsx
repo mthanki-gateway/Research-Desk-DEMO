@@ -16,6 +16,7 @@ import {
   getChunk,
   listDocuments,
   listSessions,
+  type Mode,
   type ParleyConversation,
   getParleyConversations,
 } from "@/lib/api";
@@ -31,13 +32,15 @@ import { ACCENTS, type Accent, DEFAULT_ACCENT } from "@/lib/accents";
  */
 type AppData = {
   sessions: ChatSession[];
-  /** Parley's spoken conversations, so the drawer and the page agree. */
-  parleyConversations: ParleyConversation[];
+  /** Spoken conversations per mode, so the drawer and the page agree.
+   *  Keyed because Speak and Interview are separate lists in separate places,
+   *  and mixing them would show one app's conversations inside the other. */
+  parleyConversations: Record<Mode, ParleyConversation[]>;
   documents: Document[];
   loading: boolean;
   error: string | null;
   refreshSessions: () => Promise<void>;
-  refreshParleyConversations: () => Promise<void>;
+  refreshParleyConversations: (mode?: Mode) => Promise<void>;
   refreshDocuments: () => Promise<void>;
   /** Documents finished ingesting and searchable. */
   readyDocuments: Document[];
@@ -96,8 +99,8 @@ export function useApp(): AppData {
 export function Providers({ children }: { children: React.ReactNode }) {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [parleyConversations, setParleyConversations] = useState<
-    ParleyConversation[]
-  >([]);
+    Record<Mode, ParleyConversation[]>
+  >({ speak: [], interview: [] });
   const [documents, setDocuments] = useState<Document[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -196,9 +199,17 @@ export function Providers({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  const refreshParleyConversations = useCallback(async () => {
+  const refreshParleyConversations = useCallback(async (mode?: Mode) => {
+    const modes: Mode[] = mode ? [mode] : ["speak", "interview"];
     try {
-      setParleyConversations(await getParleyConversations());
+      const lists = await Promise.all(modes.map(getParleyConversations));
+      setParleyConversations((prev) => {
+        const next = { ...prev };
+        modes.forEach((m, i) => {
+          next[m] = lists[i];
+        });
+        return next;
+      });
     } catch {
       // Deliberately silent. An empty spoken-conversation list is not worth an
       // error banner over the whole app, and it is the ONE list that is empty

@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
+  type Mode,
   deleteParleyConversation,
   renameParleyConversation,
 } from "@/lib/api";
@@ -25,9 +26,29 @@ import { IconChevron } from "./icons";
  * this person's screen rather than about the data.
  */
 
-const OPEN_KEY = "parley.nav.open";
+/** What each mode calls its stored conversations, and where they live. */
+const SECTION: Record<Mode, { label: string; empty: string; href: string }> = {
+  speak: {
+    label: "Conversations",
+    empty: "Nothing spoken yet",
+    href: "/parley",
+  },
+  interview: {
+    // "Profiles", because that is what an interview PRODUCES. Calling them
+    // conversations would describe the mechanism rather than the point.
+    label: "Profiles",
+    empty: "No interviews yet",
+    href: "/parley/interview",
+  },
+};
 
-export default function ParleyNav({ pathname }: { pathname: string }) {
+export default function ParleyNav({
+  pathname,
+  mode,
+}: {
+  pathname: string;
+  mode: Mode;
+}) {
   const router = useRouter();
   // Which conversation the page is showing, so the row can be highlighted.
   // It lives in the URL rather than in shared state: the drawer and the page
@@ -35,6 +56,8 @@ export default function ParleyNav({ pathname }: { pathname: string }) {
   // already see.
   const current = useSearchParams().get("c");
   const { parleyConversations, refreshParleyConversations } = useApp();
+  const items = parleyConversations[mode];
+  const section = SECTION[mode];
   const [open, setOpen] = useState(true);
   /** Which row's menu is showing. One at a time. */
   const [menu, setMenu] = useState<string | null>(null);
@@ -47,17 +70,17 @@ export default function ParleyNav({ pathname }: { pathname: string }) {
   // `localStorage` does not exist — reading it there is a hydration mismatch.
   useEffect(() => {
     try {
-      setOpen(localStorage.getItem(OPEN_KEY) !== "0");
+      setOpen(localStorage.getItem(`parley.nav.${mode}`) !== "0");
     } catch {
       /* private window; the default stands */
     }
-  }, []);
+  }, [mode]);
 
   function toggle() {
     setOpen((was) => {
       const next = !was;
       try {
-        localStorage.setItem(OPEN_KEY, next ? "1" : "0");
+        localStorage.setItem(`parley.nav.${mode}`, next ? "1" : "0");
       } catch {
         /* nothing to do */
       }
@@ -84,7 +107,7 @@ export default function ParleyNav({ pathname }: { pathname: string }) {
     if (!title) return;
     try {
       await renameParleyConversation(id, title);
-      await refreshParleyConversations();
+      await refreshParleyConversations(mode);
     } catch {
       /* the old title stands */
     }
@@ -94,10 +117,10 @@ export default function ParleyNav({ pathname }: { pathname: string }) {
     setMenu(null);
     try {
       await deleteParleyConversation(id);
-      await refreshParleyConversations();
+      await refreshParleyConversations(mode);
       // Leaving the page pointed at a conversation that no longer exists would
       // show its turns until the next reload.
-      if (pathname.startsWith("/parley")) router.replace("/parley");
+      if (current === id) router.replace(section.href);
     } catch {
       /* it stays in the list */
     }
@@ -121,26 +144,24 @@ export default function ParleyNav({ pathname }: { pathname: string }) {
         style={{ color: "var(--md-nav-on-surface-variant)" }}
       >
         <IconChevron className="h-3.5 w-3.5" open={open} />
-        <span className="flex-1 text-left">Conversations</span>
-        {parleyConversations.length > 0 && (
-          <span className="md-label-small opacity-70">
-            {parleyConversations.length}
-          </span>
+        <span className="flex-1 text-left">{section.label}</span>
+        {items.length > 0 && (
+          <span className="md-label-small opacity-70">{items.length}</span>
         )}
       </button>
 
       {open &&
-        (parleyConversations.length === 0 ? (
+        (items.length === 0 ? (
           <p
             className="md-body-small px-2 pb-1"
             style={{ color: "var(--md-nav-on-surface-variant)" }}
           >
-            Nothing spoken yet
+            {section.empty}
           </p>
         ) : (
           <ul className="scroll-thin max-h-72 overflow-y-auto">
-            {parleyConversations.map((c) => {
-              const active = pathname.startsWith("/parley") && current === c.id;
+            {items.map((c) => {
+              const active = pathname === section.href && current === c.id;
               return (
                 <li key={c.id} className="relative">
                   {renaming === c.id ? (
@@ -165,7 +186,7 @@ export default function ParleyNav({ pathname }: { pathname: string }) {
                       as="div"
                       className="md-nav-item md-nav-item-dense"
                       data-active={active}
-                      onClick={() => router.push(`/parley?c=${c.id}`)}
+                      onClick={() => router.push(`${section.href}?c=${c.id}`)}
                       title={c.title}
                       role="link"
                       tabIndex={0}
