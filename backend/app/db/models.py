@@ -131,6 +131,22 @@ class ChatSession(Base):
 
     owner_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
 
+    # Which app this conversation belongs to: "chat" or "parley".
+    #
+    # One table rather than two, because a conversation is a conversation --
+    # same owner scoping, same message shape, same deletion. What differs is
+    # only how the turns arrived, and a column says that more honestly than a
+    # parallel set of tables that would drift apart.
+    kind: Mapped[str] = mapped_column(String(16), default="chat", server_default="chat")
+
+    # Parley only: the Live API's session resumption handle.
+    #
+    # A live session's history lives SERVER-SIDE inside the socket -- we send
+    # no transcript and no prior turns. This handle is the only thing that can
+    # restore it, so a conversation continued tomorrow needs it persisted
+    # rather than held in the browser's sessionStorage, which dies with the tab.
+    live_handle: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

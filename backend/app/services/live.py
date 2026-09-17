@@ -48,6 +48,7 @@ TWO THINGS THAT ARE NOT OBVIOUS AND COST A DAY EACH IF MISSED
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -299,3 +300,111 @@ async def frames(audio: bytes, *, size: int = INPUT_RATE * 2 // 10) -> AsyncIter
         # Yield to the loop between frames so a long buffer does not starve
         # everything else on the connection.
         await asyncio.sleep(0)
+
+
+# ---------------------------------------------------------------------------
+# Persistence
+#
+# Parley conversations live in the SAME tables as the Research Desk's, marked
+# with `kind="parley"`. One table rather than two: a conversation is a
+# conversation -- same owner scoping, same message shape, same deletion -- and
+# what differs is only how the turns arrived.
+#
+# The transcripts are a SIDE OUTPUT here, not the mechanism. The model is not
+# reading them back; they exist so the screen can show what was said and so a
+# conversation can be looked at again tomorrow. The live context itself is
+# restored by the resumption handle, which is a different thing entirely and is
+# stored on the session.
+# ---------------------------------------------------------------------------
+
+
+async def open_conversation(owner_id: str | None, session_id: str | None):
+    """Find the conversation to append to, or start one."""
+
+    from app.db.models import ChatSession
+    from app.db.session import SessionLocal
+
+    async with SessionLocal() as db:
+        if session_id:
+            chat = await db.get(ChatSession, uuid.UUID(session_id))
+            # Ownership is checked HERE rather than trusted from the client: a
+            # session id in a query string is a guess anyone can make.
+            if chat is not None and chat.owner_id == owner_id and chat.kind == "parley":
+                return chat
+
+        chat = ChatSession(
+            title="Spoken conversation",
+            owner_id=owner_id,
+            kind="parley",
+        )
+        db.add(chat)
+        await db.commit()
+        await db.refresh(chat)
+        return chat
+
+
+async def save_turn(
+    session_id: uuid.UUID,
+    question: str,
+    answer: str,
+    sources: list[dict],
+    tools: list[str],
+) -> None:
+    """Append one spoken exchange. Never raises.
+
+    A failure to write the transcript must not end the call -- the
+    conversation is happening in the socket, and losing a row is a smaller harm
+    than dropping someone mid-sentence to report it.
+    """
+
+    from app.db.models import ChatSession, Message, Role
+    from app.db.session import SessionLocal
+
+    if not question and not answer:
+        return
+
+    try:
+        async with SessionLocal() as db:
+            db.add(
+                Message(
+                    session_id=session_id,
+                    role=Role.user,
+                    content=question or "(nothing intelligible)",
+                    sources=[],
+                    agent_meta={"spoken": True},
+                )
+            )
+            db.add(
+                Message(
+                    session_id=session_id,
+                    role=Role.assistant,
+                    content=answer,
+                    sources=sources,
+                    agent_meta={"spoken": True, "tools": tools},
+                )
+            )
+
+            # The first real question becomes the title. "Spoken conversation"
+            # tells a list of conversations nothing at all.
+            chat = await db.get(ChatSession, session_id)
+            if chat is not None and chat.title == "Spoken conversation" and question:
+                chat.title = question[:120]
+
+            await db.commit()
+    except Exception as exc:  # noqa: BLE001 - never interrupt a live call
+        log.warning("live_save_turn_failed", error=str(exc)[:200])
+
+
+async def store_handle(session_id: uuid.UUID, handle: str) -> None:
+    """Remember how to resume this conversation. Never raises."""
+    from app.db.models import ChatSession
+    from app.db.session import SessionLocal
+
+    try:
+        async with SessionLocal() as db:
+            chat = await db.get(ChatSession, session_id)
+            if chat is not None:
+                chat.live_handle = handle
+                await db.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("live_store_handle_failed", error=str(exc)[:200])

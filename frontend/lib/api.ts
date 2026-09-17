@@ -1073,3 +1073,55 @@ export async function getLiveStatus(): Promise<LiveStatus> {
   if (!res.ok) throw new Error(await detail(res));
   return res.json();
 }
+
+
+/** A spoken conversation, as a row in the "continue" list. */
+export type ParleyConversation = {
+  id: string;
+  title: string;
+  turns: number;
+  updated_at: string;
+  /** Whether the live CONTEXT can be restored, not merely the transcript read.
+   *  Without a handle it can be reread but not continued. */
+  resumable: boolean;
+};
+
+/** Where a spoken answer came from. Grouped per document, not per passage —
+ *  to a listener, eight chunks of one handbook is one source. */
+export type ParleySource = {
+  label: string;
+  kind: "document" | "web";
+  url: string | null;
+};
+
+export type ParleyTurn = {
+  question: string;
+  answer: string;
+  sources: ParleySource[];
+  /** Tool NAMES only. The hit counts are live-only telemetry and are not
+   *  worth a column. */
+  tools: string[];
+};
+
+export async function getParleyConversations(): Promise<ParleyConversation[]> {
+  const res = await authedFetch("/live/conversations", { cache: "no-store" });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function getParleyConversation(
+  id: string,
+): Promise<{ id: string; title: string; resumable: boolean; turns: ParleyTurn[] }> {
+  const res = await authedFetch(`/live/conversations/${id}`, {
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function deleteParleyConversation(id: string): Promise<void> {
+  const res = await authedFetch(`/live/conversations/${id}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(await detail(res));
+}

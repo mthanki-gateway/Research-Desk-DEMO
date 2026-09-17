@@ -28,50 +28,16 @@ const INPUT_RATE = 16_000;
 const OUTPUT_RATE = 24_000;
 
 /**
- * The handle that survives a dropped socket.
+ * The conversation the socket appends to.
  *
- * A live session's history lives SERVER-SIDE, inside the connection: we send
- * no transcript and no prior turns. Measured — within one socket the model
- * recalls turn 1 at turn 3; on a fresh socket it correctly says it has no
- * access to anything said before.
- *
- * The socket closes on its own (idle timeout, a `go_away`, a voice change), so
- * without this a conversation with a pause in the middle silently forgets
- * everything before it, and the user is given no sign at all.
- *
- * `sessionStorage`, not `localStorage`: a handle belongs to one tab's
- * conversation, and a second tab resuming the first one's session would put
- * two microphones into a single context. It is also wrapped, because storage
- * throws in a private window.
+ * The RESUME HANDLE IS NOT HELD HERE. It lives on the conversation row in
+ * Postgres, keyed by the session id, because a handle in sessionStorage dies
+ * with the tab -- which is exactly when somebody wants to pick a conversation
+ * up again. The browser only has to remember WHICH conversation; the server
+ * knows how to restore it.
  */
-const HANDLE_KEY = "parley.resume";
-
-function rememberHandle(handle: string) {
-  try {
-    sessionStorage.setItem(HANDLE_KEY, handle);
-  } catch {
-    // A conversation that cannot survive a reconnect is still a conversation.
-  }
-}
-
-export function forgetHandle() {
-  try {
-    sessionStorage.removeItem(HANDLE_KEY);
-  } catch {
-    /* nothing to do */
-  }
-}
-
-function storedHandle(): string {
-  try {
-    return sessionStorage.getItem(HANDLE_KEY) ?? "";
-  } catch {
-    return "";
-  }
-}
-
 export type LiveEvent =
-  | { type: "ready"; voice: string; resumed: boolean }
+  | { type: "ready"; voice: string; resumed: boolean; session_id: string }
   | { type: "heard"; text: string }
   | { type: "said"; text: string }
   | {
@@ -82,8 +48,8 @@ export type LiveEvent =
       sources: { label: string; kind: "document" | "web"; url: string | null }[];
     }
   | { type: "turn_end" }
-  /** Held by the session; surfaced so the UI can say the history is safe. */
-  | { type: "resume"; handle: string }
+  /** The server has stored a resumption handle; the conversation is safe. */
+  | { type: "resume" }
   /** The server is about to drop us. Reconnecting now keeps the context. */
   | { type: "going_away"; in: string }
   | { type: "error"; detail: string }
@@ -106,6 +72,7 @@ export type LiveSession = {
 
 export async function openLiveSession(
   voiceName: string,
+  conversationId: string | null,
   onEvent: (event: LiveEvent) => void,
 ): Promise<LiveSession> {
   // The token travels in the query string because a browser CANNOT set headers
@@ -115,8 +82,7 @@ export async function openLiveSession(
   const url = new URL(browserBase.replace(/^http/, "ws") + "/live/ws");
   if (token) url.searchParams.set("token", token);
   url.searchParams.set("voice_name", voiceName);
-  const resume = storedHandle();
-  if (resume) url.searchParams.set("resume", resume);
+  if (conversationId) url.searchParams.set("session_id", conversationId);
 
   const ws = new WebSocket(url.toString());
   ws.binaryType = "arraybuffer";
@@ -127,7 +93,19 @@ export async function openLiveSession(
   // an AudioContext runs on its own high-resolution timeline and scheduling
   // against `Date.now()` drifts audibly within a couple of seconds.
   let playHead = 0;
-  let playing = 0;
+  /**
+   * The model has finished GENERATING, per the server.
+   *
+   * Separate from "the speakers have gone quiet", and conflating the two was
+   * a real bug: playback was declared over whenever the scheduled queue
+   * momentarily drained, which happens constantly between chunks arriving over
+   * a network. Every one of those gaps ended the turn, so a single long answer
+   * was committed to the transcript as three or four separate exchanges -- and
+   * only the first of them kept the question, because the rest began on a
+   * freshly reset turn. On screen that read as "nothing intelligible".
+   */
+  let generated = false;
+  let drainTimer: number | null = null;
 
   function enqueue(pcm: ArrayBuffer) {
     const samples = new Int16Array(pcm);
@@ -150,21 +128,45 @@ export async function openLiveSession(
     if (playHead < now) playHead = now + 0.08;
     source.start(playHead);
     playHead += buffer.duration;
+    // More audio after the server called the turn complete simply pushes the
+    // finish out; without this the tail of a long answer is cut off.
+    scheduleFinish();
 
-    playing += 1;
-    source.onended = () => {
-      playing -= 1;
-      if (playing === 0) onEvent({ type: "playback_end" });
-    };
+  }
+
+  /**
+   * Announce the end of the turn once the audio has actually finished.
+   *
+   * `playHead` is the exact moment the last scheduled chunk ends, on the
+   * AudioContext's own clock -- so the remaining time is known rather than
+   * guessed at, and no per-source bookkeeping is needed. Rescheduled on every
+   * new chunk, because more audio can still arrive after the server says the
+   * model has stopped generating.
+   */
+  function scheduleFinish() {
+    if (!generated) return;
+    if (drainTimer) window.clearTimeout(drainTimer);
+    const remaining = Math.max(0, playHead - out.currentTime);
+    drainTimer = window.setTimeout(
+      () => {
+        drainTimer = null;
+        onEvent({ type: "playback_end" });
+      },
+      remaining * 1000 + 60,
+    ) as unknown as number;
   }
 
   function stopSpeaking() {
     // Rebuilding the head is what actually stops queued audio: every scheduled
     // source is already committed to the graph, so the context is suspended
     // and resumed to flush them.
+    if (drainTimer) {
+      window.clearTimeout(drainTimer);
+      drainTimer = null;
+    }
+    generated = false;
     void out.suspend().then(() => {
       playHead = 0;
-      playing = 0;
       void out.resume();
     });
   }
@@ -253,10 +255,18 @@ export async function openLiveSession(
     }
     try {
       const parsed = JSON.parse(event.data) as LiveEvent;
-      // Stored here rather than passed up: every caller would have to
-      // remember to persist it, and the one that forgot would lose the
-      // conversation silently.
-      if (parsed.type === "resume") rememberHandle(parsed.handle);
+      if (parsed.type === "turn_end") {
+        // The server says the model has stopped generating. The turn is over
+        // when the audio ALREADY QUEUED has finished playing, which may be
+        // several seconds later.
+        generated = true;
+        scheduleFinish();
+      }
+      if (parsed.type === "heard" || parsed.type === "said") {
+        // A new turn has begun producing content, so any pending finish from
+        // the previous one is stale.
+        if (parsed.type === "heard") generated = false;
+      }
       onEvent(parsed);
     } catch {
       // A frame we cannot parse is not worth killing the session over.

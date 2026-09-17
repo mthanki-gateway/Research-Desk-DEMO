@@ -104,6 +104,14 @@ _MIGRATIONS: tuple[str, ...] = (
     "CREATE UNIQUE INDEX IF NOT EXISTS documents_content_owner_uniq "
     "ON documents (content_sha256, COALESCE(owner_id, '')) "
     "WHERE content_sha256 IS NOT NULL",
+    # Parley shares the conversation tables with the Research Desk. `kind`
+    # separates them; `live_handle` is what lets a spoken conversation be
+    # picked up again later, since its history lives inside the Live session
+    # rather than in anything we send.
+    "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS kind VARCHAR(16) "
+    "NOT NULL DEFAULT 'chat'",
+    "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS live_handle TEXT",
+    "CREATE INDEX IF NOT EXISTS chat_sessions_kind_idx ON chat_sessions (kind)",
 )
 
 

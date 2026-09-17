@@ -1,7 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { type LiveStatus, getLiveStatus } from "@/lib/api";
+import {
+  type LiveStatus,
+  type ParleyConversation,
+  deleteParleyConversation,
+  getLiveStatus,
+  getParleyConversation,
+  getParleyConversations,
+} from "@/lib/api";
 import { Switch } from "../md";
 import {
   IconParley,
@@ -10,14 +17,10 @@ import {
   IconSearch,
   IconSpinner,
   IconStop,
+  IconTrash,
   IconWave,
 } from "../icons";
-import {
-  type LiveEvent,
-  type LiveSession,
-  forgetHandle,
-  openLiveSession,
-} from "./liveSession";
+import { type LiveEvent, type LiveSession, openLiveSession } from "./liveSession";
 
 /**
  * Parley — audio to audio, natively.
@@ -99,6 +102,10 @@ export default function Parley() {
   /** Keep the socket open between questions — reconnecting costs a second. */
   const [keepOpen, setKeepOpen] = useState(true);
   const [exchanges, setExchanges] = useState<Exchange[]>([]);
+  /** Which stored conversation this socket appends to. */
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [conversations, setConversations] = useState<ParleyConversation[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(false);
 
   /**
    * The turn in flight.
@@ -128,6 +135,18 @@ export default function Parley() {
         setError(e instanceof Error ? e.message : "Could not reach the API"),
       );
   }, []);
+
+  const refreshConversations = useCallback(async () => {
+    try {
+      setConversations(await getParleyConversations());
+    } catch {
+      // A missing list is not worth an error banner over the microphone.
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshConversations();
+  }, [refreshConversations]);
 
   useEffect(
     () => () => {
@@ -210,6 +229,9 @@ export default function Parley() {
         }
         case "playback_end":
           commit();
+          // The turn is now written server-side, so the list's titles and
+          // counts are stale.
+          void refreshConversations();
           // Not straight back to idle: the microphone reopens on a countdown
           // the user can see and stop.
           beginCountdown();
@@ -221,6 +243,9 @@ export default function Parley() {
           break;
         case "ready":
           setResumed(event.resumed);
+          // The server decides which conversation this is -- it may have
+          // created one. Adopting its answer keeps the two in step.
+          setConversationId(event.session_id);
           break;
         case "going_away":
           // The server has announced its own disconnection. Dropping the
@@ -246,7 +271,7 @@ export default function Parley() {
           break;
       }
     },
-    [commit, beginCountdown, stopCountdown],
+    [commit, beginCountdown, stopCountdown, refreshConversations],
   );
 
   const start = useCallback(async () => {
@@ -257,7 +282,11 @@ export default function Parley() {
     try {
       if (!session.current) {
         setPhase("connecting");
-        session.current = await openLiveSession(voiceName, onEvent);
+        session.current = await openLiveSession(
+          voiceName,
+          conversationId,
+          onEvent,
+        );
       }
       await session.current.beginTurn();
       setPhase("listening");
@@ -279,7 +308,7 @@ export default function Parley() {
           : "The microphone was refused, or the session could not open.",
       );
     }
-  }, [voiceName, onEvent, stopCountdown]);
+  }, [voiceName, conversationId, onEvent, stopCountdown]);
 
   // The countdown calls whatever `start` currently is, without either of them
   // having to be declared before the other.
@@ -297,18 +326,60 @@ export default function Parley() {
     setPhase("thinking");
   }, []);
 
-  const hangUp = useCallback(() => {
+  /** Leave this conversation intact and begin a new one. */
+  const startFresh = useCallback(() => {
     stopCountdown();
+    commit();
     session.current?.close();
     session.current = null;
-    setPhase("idle");
-    commit();
-    // A deliberate hang-up ENDS the conversation. Keeping the handle would
-    // silently resume it days later, which is not what closing a session
-    // means to anyone.
-    forgetHandle();
+    setConversationId(null);
+    setExchanges([]);
     setResumed(false);
+    setPhase("idle");
   }, [commit, stopCountdown]);
+
+  /** Open a stored conversation and continue it. */
+  const openConversation = useCallback(
+    async (id: string) => {
+      stopCountdown();
+      session.current?.close();
+      session.current = null;
+      setPhase("idle");
+      setLoadingHistory(true);
+      setError(null);
+      try {
+        const detail = await getParleyConversation(id);
+        setConversationId(id);
+        // Newest first, matching the live view -- the turn just spoken should
+        // be the one under the button, not buried at the bottom.
+        setExchanges(
+          detail.turns
+            .map((t, i) => ({
+              id: `${id}:${i}`,
+              question: t.question,
+              answer: t.answer,
+              sources: t.sources,
+              // Restored turns carry tool NAMES only; the hit counts were live
+              // telemetry and are not stored. 0 renders as a bare label.
+              tools: t.tools.map((tool) => ({ tool, n: 0 })),
+            }))
+            .reverse(),
+        );
+        setResumed(false);
+        if (!detail.resumable) {
+          setError(
+            "This conversation can be read, but its live context has expired — " +
+              "the assistant will not remember what was said before.",
+          );
+        }
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Could not open that conversation");
+      } finally {
+        setLoadingHistory(false);
+      }
+    },
+    [stopCountdown],
+  );
 
   const busy = phase === "thinking" || phase === "connecting";
   const listening = phase === "listening";
@@ -515,7 +586,10 @@ export default function Parley() {
               on={keepOpen}
               onChange={(v) => {
                 setKeepOpen(v);
-                if (!v) hangUp();
+                if (!v) {
+                  session.current?.close();
+                  session.current = null;
+                }
               }}
               aria-label="Stay connected between questions"
             />
@@ -533,7 +607,35 @@ export default function Parley() {
         </section>
       )}
 
-      {!status && !error ? (
+      {/* ---- the conversation, and the ones before it -------------------- */}
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="md-title-medium">
+          {conversationId && exchanges.length > 0
+            ? "This conversation"
+            : "Conversation"}
+        </h2>
+        {(exchanges.length > 0 || conversationId) && (
+          <button
+            type="button"
+            onClick={startFresh}
+            className="md-label-large rounded-[var(--md-shape-full)] px-3 py-1.5"
+            style={{
+              background: "var(--md-surface-container-high)",
+              color: "var(--md-on-surface)",
+            }}
+          >
+            Start a new one
+          </button>
+        )}
+      </div>
+
+      {loadingHistory ? (
+        <div className="space-y-3" aria-hidden>
+          {[0, 1].map((i) => (
+            <div key={i} className="md-skeleton h-[104px]" />
+          ))}
+        </div>
+      ) : !status && !error ? (
         <div className="space-y-2" aria-hidden>
           <span className="md-skeleton block h-4 w-80" />
         </div>
@@ -551,6 +653,60 @@ export default function Parley() {
             <Turn key={x.id} exchange={x} />
           ))}
         </ol>
+      )}
+
+      {/* ---- earlier conversations --------------------------------------
+          Shown like the chat app's session list, because that is what it is:
+          the same table, the same owner scoping, and the same expectation
+          that a conversation can be picked up again. */}
+      {conversations.filter((c) => c.id !== conversationId).length > 0 && (
+        <section className="space-y-3 pt-2">
+          <h2 className="md-title-medium">Earlier conversations</h2>
+          <ul className="space-y-2">
+            {conversations
+              .filter((c) => c.id !== conversationId)
+              .map((c) => (
+                <li
+                  key={c.id}
+                  className="md-card md-card-outlined flex items-center gap-3 p-3"
+                >
+                  <button
+                    type="button"
+                    onClick={() => void openConversation(c.id)}
+                    className="min-w-0 flex-1 text-left"
+                  >
+                    <span className="md-body-medium block truncate font-medium">
+                      {c.title}
+                    </span>
+                    <span
+                      className="md-body-small mt-0.5 block"
+                      style={{ color: "var(--md-on-surface-variant)" }}
+                    >
+                      {c.turns} turn{c.turns === 1 ? "" : "s"} ·{" "}
+                      {new Date(c.updated_at).toLocaleString()}
+                      {/* Readable and continuable are different things, and
+                          the difference is invisible until you try to speak. */}
+                      {c.resumable ? "" : " · context expired, read only"}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`Delete ${c.title}`}
+                    onClick={() => {
+                      void deleteParleyConversation(c.id).then(() => {
+                        if (c.id === conversationId) startFresh();
+                        void refreshConversations();
+                      });
+                    }}
+                    className="shrink-0 rounded-[var(--md-shape-full)] p-2"
+                    style={{ color: "var(--md-on-surface-variant)" }}
+                  >
+                    <IconTrash className="h-4 w-4" />
+                  </button>
+                </li>
+              ))}
+          </ul>
+        </section>
       )}
     </div>
   );

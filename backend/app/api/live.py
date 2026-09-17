@@ -41,13 +41,30 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import uuid
 
 import structlog
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from google.genai import types
+from sqlalchemy import select
 
-from app.auth import ANONYMOUS, User, _verify
+from app.auth import (
+    ANONYMOUS,
+    User,
+    _verify,
+    current_user,
+    forbid_if_not_owner,
+)
 from app.config import get_settings
+from app.db.models import ChatSession, Message, Role
+from app.db.session import SessionLocal
 from app.services import live, voice, websearch
 
 log = structlog.get_logger()
@@ -72,6 +89,101 @@ async def status() -> dict:
         "input_rate": live.INPUT_RATE,
         "output_rate": live.OUTPUT_RATE,
     }
+
+
+@router.get("/live/conversations")
+async def conversations(user: User = Depends(current_user)) -> list[dict]:
+    """Spoken conversations, newest first, for the "continue" list."""
+    from sqlalchemy import func as sql_func
+
+    async with SessionLocal() as db:
+        rows = (
+            await db.execute(
+                select(
+                    ChatSession,
+                    sql_func.count(Message.id).label("n"),
+                )
+                .outerjoin(Message, Message.session_id == ChatSession.id)
+                .where(
+                    ChatSession.kind == "parley",
+                    ChatSession.owner_id.is_(None)
+                    if user.owner_id is None
+                    else ChatSession.owner_id == user.owner_id,
+                )
+                .group_by(ChatSession.id)
+                .order_by(ChatSession.updated_at.desc())
+                .limit(30)
+            )
+        ).all()
+
+    return [
+        {
+            "id": str(chat.id),
+            "title": chat.title,
+            "turns": n // 2,
+            "updated_at": chat.updated_at.isoformat(),
+            # Whether the live CONTEXT can be restored, as opposed to merely
+            # the transcript being readable. Without a handle the conversation
+            # can be reread but not continued, and those are different things.
+            "resumable": bool(chat.live_handle),
+        }
+        for chat, n in rows
+        if n
+    ]
+
+
+@router.get("/live/conversations/{conversation_id}")
+async def conversation(
+    conversation_id: uuid.UUID, user: User = Depends(current_user)
+) -> dict:
+    """One spoken conversation, as alternating turns."""
+    async with SessionLocal() as db:
+        chat = await db.get(ChatSession, conversation_id)
+        if chat is None or chat.kind != "parley":
+            raise HTTPException(status_code=404, detail="Conversation not found.")
+        forbid_if_not_owner(chat.owner_id, user)
+
+        rows = (
+            await db.execute(
+                select(Message)
+                .where(Message.session_id == conversation_id)
+                .order_by(Message.created_at.asc())
+            )
+        ).scalars().all()
+
+    # Paired back into exchanges. They were written as two rows so the table
+    # stays the same shape as the Research Desk's, and the UI wants them as
+    # one card.
+    turns: list[dict] = []
+    for row in rows:
+        if row.role is Role.user:
+            turns.append(
+                {"question": row.content, "answer": "", "sources": [], "tools": []}
+            )
+        elif turns:
+            turns[-1]["answer"] = row.content
+            turns[-1]["sources"] = row.sources or []
+            turns[-1]["tools"] = (row.agent_meta or {}).get("tools", [])
+
+    return {
+        "id": str(chat.id),
+        "title": chat.title,
+        "resumable": bool(chat.live_handle),
+        "turns": turns,
+    }
+
+
+@router.delete("/live/conversations/{conversation_id}", status_code=204)
+async def remove_conversation(
+    conversation_id: uuid.UUID, user: User = Depends(current_user)
+) -> None:
+    async with SessionLocal() as db:
+        chat = await db.get(ChatSession, conversation_id)
+        if chat is None or chat.kind != "parley":
+            raise HTTPException(status_code=404, detail="Conversation not found.")
+        forbid_if_not_owner(chat.owner_id, user)
+        await db.delete(chat)
+        await db.commit()
 
 
 async def _authenticate(token: str) -> User | None:
@@ -101,7 +213,7 @@ async def live_socket(
     ws: WebSocket,
     token: str = Query(default=""),
     voice_name: str = Query(default=""),
-    resume: str = Query(default=""),
+    session_id: str = Query(default=""),
 ) -> None:
     await ws.accept()
 
@@ -128,14 +240,25 @@ async def live_socket(
     if chosen not in {v["id"] for v in voice.VOICES}:
         chosen = settings.voice_default
 
+    # The conversation this socket appends to. Found or created BEFORE the live
+    # session opens, because its stored handle is what the live session needs
+    # in order to resume rather than start blank.
+    chat = await live.open_conversation(user.owner_id, session_id or None)
+    resume = chat.live_handle
+
     try:
         client = live.client()
         async with client.aio.live.connect(
-            model=settings.live_model, config=live.config(chosen, resume or None)
+            model=settings.live_model, config=live.config(chosen, resume)
         ) as session:
             await ws.send_text(
                 json.dumps(
-                    {"type": "ready", "voice": chosen, "resumed": bool(resume)}
+                    {
+                        "type": "ready",
+                        "voice": chosen,
+                        "resumed": bool(resume),
+                        "session_id": str(chat.id),
+                    }
                 )
             )
             log.info(
@@ -143,6 +266,7 @@ async def live_socket(
                 owner=bool(user.owner_id),
                 voice=chosen,
                 resumed=bool(resume),
+                session=str(chat.id),
             )
 
             # Two directions at once, which is the whole point of a live model:
@@ -150,7 +274,7 @@ async def live_socket(
             # these sequentially would reintroduce the turn-taking the cascade
             # was stuck with.
             uplink = asyncio.create_task(_uplink(ws, session))
-            downlink = asyncio.create_task(_downlink(ws, session, user))
+            downlink = asyncio.create_task(_downlink(ws, session, user, chat.id))
 
             done, pending = await asyncio.wait(
                 {uplink, downlink}, return_when=asyncio.FIRST_COMPLETED
@@ -224,10 +348,16 @@ async def _uplink(ws: WebSocket, session) -> None:
             await session.send_realtime_input(activity_end=types.ActivityEnd())
 
 
-async def _downlink(ws: WebSocket, session, user: User) -> None:
+async def _downlink(ws: WebSocket, session, user: User, chat_id) -> None:
     """Model audio, transcripts and tool calls out to the browser."""
     settings = get_settings()
     spoke = False
+    # Accumulated per turn, so the exchange is written as ONE row pair rather
+    # than a row per transcript fragment.
+    heard: list[str] = []
+    said: list[str] = []
+    sources: list[dict] = []
+    tools: list[str] = []
 
     while True:
         received_anything = False
@@ -242,12 +372,14 @@ async def _downlink(ws: WebSocket, session, user: User) -> None:
             sc = message.server_content
             if sc:
                 if sc.input_transcription and sc.input_transcription.text:
+                    heard.append(sc.input_transcription.text)
                     await ws.send_text(
                         json.dumps(
                             {"type": "heard", "text": sc.input_transcription.text}
                         )
                     )
                 if sc.output_transcription and sc.output_transcription.text:
+                    said.append(sc.output_transcription.text)
                     await ws.send_text(
                         json.dumps(
                             {"type": "said", "text": sc.output_transcription.text}
@@ -259,6 +391,27 @@ async def _downlink(ws: WebSocket, session, user: User) -> None:
                     # step, and reporting that to the browser stops playback
                     # before a word has been said.
                     spoke = False
+                    # WRITTEN BEFORE THE CLIENT IS TOLD, and shielded.
+                    #
+                    # Telling the browser first lost the last turn of every
+                    # conversation: the client often closes the socket the
+                    # instant it sees `turn_end`, which cancels this task --
+                    # sometimes mid-write. Measured, three turns spoken and two
+                    # stored, every time.
+                    #
+                    # `shield` covers the other half: a disconnect arriving
+                    # while the INSERT is in flight must not abandon it
+                    # half-done.
+                    await asyncio.shield(
+                        live.save_turn(
+                            chat_id,
+                            "".join(heard).strip(),
+                            "".join(said).strip(),
+                            sources,
+                            tools,
+                        )
+                    )
+                    heard, said, sources, tools = [], [], [], []
                     await ws.send_text(json.dumps({"type": "turn_end"}))
 
             # THE HANDLE THAT MAKES A RECONNECT INVISIBLE.
@@ -269,9 +422,11 @@ async def _downlink(ws: WebSocket, session, user: User) -> None:
             # exactly when reconnects happen in bulk.
             update = message.session_resumption_update
             if update and update.resumable and update.new_handle:
-                await ws.send_text(
-                    json.dumps({"type": "resume", "handle": update.new_handle})
-                )
+                # Stored on the CONVERSATION, not handed to the browser to keep.
+                # A handle in sessionStorage dies with the tab, which is
+                # precisely when someone wants to pick a conversation up again.
+                await live.store_handle(chat_id, update.new_handle)
+                await ws.send_text(json.dumps({"type": "resume"}))
 
             # The server announcing its own disconnection, with time to spare.
             # Live sessions have a hard lifetime; this is the warning, and
@@ -297,6 +452,10 @@ async def _downlink(ws: WebSocket, session, user: User) -> None:
                     # second or two and the model is silent through it; without
                     # this the app looks frozen at exactly the moment it is
                     # doing the most interesting thing.
+                    tools.append(report["tool"])
+                    for source in report["sources"]:
+                        if source not in sources:
+                            sources.append(source)
                     await ws.send_text(json.dumps({"type": "tool", **report}))
                 await session.send_tool_response(function_responses=responses)
 
