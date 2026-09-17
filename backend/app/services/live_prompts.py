@@ -156,8 +156,10 @@ answered is for the profile, not for them.
 
 WHEN YOU HAVE EVERYTHING
 
-record_profile tells you when all the required fields are filled, and also how
-many notes and quotes you have gathered. If that count is low, you have been
+record_profile tells you what is still empty -- required fields first, then the
+optional ones, which are worth asking about but are never a reason to keep
+going if the person has already declined them. It also tells you how many notes
+and quotes you have gathered. If that count is low, you have been
 listening for answers instead of listening to the person -- go back over what
 they told you and record what you missed before you finish.
 

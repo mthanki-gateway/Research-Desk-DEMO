@@ -1055,13 +1055,22 @@ function ProfileCard({
   missing: string[];
   complete: boolean;
 }) {
-  const shown = fields.filter(
-    (f) =>
-      f.name !== "notes" &&
-      f.name !== "quotes" &&
-      (f.required || profile[f.name] !== undefined),
-  );
-  const filled = fields.filter((f) => f.required && !missing.includes(f.name));
+  // EVERY declared field, filled or not.
+  //
+  // Optional ones used to appear only once they had a value, on the reasoning
+  // that a row of blanks reads as an abandoned form. That was wrong in a way
+  // the card could not show: it hid what this interview is CAPABLE of
+  // capturing, so an empty "Location" looked like a field that did not exist
+  // rather than one nobody had asked about.
+  const shown = fields.filter((f) => f.name !== "notes" && f.name !== "quotes");
+  const required = fields.filter((f) => f.required);
+
+  // COUNTED FROM THE PROFILE, not from `missing`.
+  //
+  // `missing` starts as an empty array -- nothing has been recorded, so no
+  // tool call has reported anything -- and "not in missing" then read as
+  // "filled". An untouched profile displayed "6 of 6" above six empty rows.
+  const filled = required.filter((f) => !isEmpty(profile[f.name]));
   // What was notable about HOW each answer was given. Keyed by field, with
   // `general` for anything about the person rather than one answer.
   const notes = (profile.notes ?? {}) as ProfileNotes;
@@ -1091,7 +1100,7 @@ function ProfileCard({
         >
           {complete
             ? "Complete"
-            : `${filled.length} of ${fields.filter((f) => f.required).length}`}
+            : `${filled.length} of ${required.length}`}
         </span>
       </div>
 
@@ -1107,7 +1116,7 @@ function ProfileCard({
       <dl className="space-y-2">
         {shown.map((f) => {
           const value = profile[f.name] as string | number | string[] | undefined;
-          const empty = value === undefined || value === "";
+          const empty = isEmpty(value);
           return (
             <div key={f.name} className="flex gap-3">
               <dt
@@ -1115,6 +1124,11 @@ function ProfileCard({
                 style={{ color: "var(--md-on-surface-variant)" }}
               >
                 {label(f.name)}
+                {/* Marked, so an empty optional row reads as "not asked"
+                    rather than "missing". */}
+                {!f.required && (
+                  <span className="ml-1 opacity-60">optional</span>
+                )}
               </dt>
               <dd className="md-body-medium min-w-0 flex-1">
                 {empty ? (
@@ -1269,4 +1283,18 @@ function Recorded({ entry }: { entry: Record<string, unknown> }) {
       {lines.join(" · ")}
     </p>
   );
+}
+
+
+/**
+ * Nothing was recorded for this field.
+ *
+ * `0` is a value: a graduate with no professional experience has answered the
+ * question, and a plain falsy check would render that as a dash and count it
+ * as missing.
+ */
+function isEmpty(value: unknown): boolean {
+  if (value === 0) return false;
+  if (Array.isArray(value)) return value.length === 0;
+  return value === undefined || value === null || value === "";
 }

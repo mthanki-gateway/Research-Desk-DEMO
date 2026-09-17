@@ -345,10 +345,39 @@ class TestRender:
         Reporting "missing: none" leaves it to infer that it should stop, and a
         model that is unsure keeps asking questions.
         """
-        out = profile.render({name: "x" for name in profile.REQUIRED})
-        assert "ALL REQUIRED FIELDS ARE NOW FILLED" in out
+        every = {f["name"]: "x" for f in profile.FIELDS}
+        out = profile.render(every)
+        assert "ALL FIELDS ARE NOW FILLED" in out
         assert "thank them" in out
         assert "STILL MISSING" not in out
+
+    def test_empty_optionals_are_named_once_the_required_ones_are_done(self):
+        """Otherwise they are never asked for at all.
+
+        They existed only in one line of the prompt, and nothing in the tool
+        result mentioned them -- so `location` went unfilled in every
+        interview. Naming them here puts them in front of the model at the
+        moment it is choosing what to ask next.
+        """
+        out = profile.render({name: "x" for name in profile.REQUIRED})
+        assert "still empty" in out
+        assert "location" in out
+
+    def test_a_declined_optional_is_not_a_reason_to_continue(self):
+        """The nudge must not become a loop.
+
+        Somebody who will not say where they live is not going to say it the
+        fourth time either, and an interview that cannot end is worse than one
+        missing a field.
+        """
+        out = profile.render({name: "x" for name in profile.REQUIRED})
+        assert "leave it and finish" in out
+
+    def test_optionals_are_also_named_while_required_ones_remain(self):
+        """As a secondary list, so they can be picked up in passing."""
+        out = profile.render({"full_name": "Sam"})
+        assert "STILL MISSING" in out
+        assert "worth asking if it fits" in out
 
     def test_lists_are_rendered_as_prose_not_json(self):
         """A model reads lines back as facts and JSON back as a structure to echo."""

@@ -412,6 +412,11 @@ def _fold(merged: dict, incoming: list, bucket_key: str, text_keys: tuple) -> di
     return merged
 
 
+def _blank(value: Any) -> bool:
+    """Nothing recorded. `0` is a value -- see `missing`."""
+    return value is None or value == "" or value == []
+
+
 def missing(profile: dict) -> list[str]:
     """Required fields with nothing in them yet.
 
@@ -461,16 +466,46 @@ def render(profile: dict) -> str:
             lines.append(f'- {label} quote: "{quote}"')
 
     gaps = missing(profile)
+    # Optional fields the model has not asked about.
+    #
+    # They were invisible before: nothing in the tool result mentioned them, so
+    # the only place they existed was one line of the prompt, and they were
+    # never asked for -- "location" went unfilled in every interview. Naming
+    # them here puts them in front of the model at the moment it is deciding
+    # what to ask next, which is the only moment it matters.
+    spare = [
+        f["name"]
+        for f in FIELDS
+        if not f["required"] and _blank((profile or {}).get(f["name"]))
+    ]
+
     if gaps:
         lines.append("")
         lines.append("STILL MISSING, ask about these next: " + ", ".join(gaps))
+        if spare:
+            lines.append(
+                "Also still empty, and worth asking if it fits the "
+                "conversation: " + ", ".join(spare)
+            )
     else:
         lines.append("")
-        lines.append(
-            "ALL REQUIRED FIELDS ARE NOW FILLED. Tell the person you have "
-            "everything you need, thank them, and offer them a chance to add "
-            "anything you did not ask about."
-        )
+        if spare:
+            # Asked BEFORE the closing question, not after -- once the model
+            # has said it has everything it needs, going back to ask more is
+            # confusing and reads as having misled them.
+            lines.append(
+                "All required fields are filled. These are still empty: "
+                + ", ".join(spare)
+                + ". Ask about any you have not already raised, one at a "
+                "time. If you have asked and they did not want to say, that "
+                "is an answer -- leave it and finish."
+            )
+        else:
+            lines.append(
+                "ALL FIELDS ARE NOW FILLED. Tell the person you have "
+                "everything you need, thank them, and offer them a chance to "
+                "add anything you did not ask about."
+            )
 
     # COUNTED, not merely listed. The fields fill up early and then stop
     # moving, so without this the model gets no signal that the rich half of
