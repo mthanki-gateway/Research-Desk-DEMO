@@ -7,6 +7,7 @@ import {
   type Mode,
   type Profile,
   type ProfileField,
+  type ProfileNotes,
   getLiveStatus,
   getParleyConversation,
   getProfileFields,
@@ -963,9 +964,13 @@ function ProfileCard({
   complete: boolean;
 }) {
   const shown = fields.filter(
-    (f) => f.required || profile[f.name] !== undefined,
+    (f) => f.name !== "notes" && (f.required || profile[f.name] !== undefined),
   );
   const filled = fields.filter((f) => f.required && !missing.includes(f.name));
+  // What was notable about HOW each answer was given. Keyed by field, with
+  // `general` for anything about the person rather than one answer.
+  const notes = (profile.notes ?? {}) as ProfileNotes;
+  const general = notes.general ?? [];
 
   return (
     <section className="md-card md-card-outlined p-5">
@@ -990,8 +995,8 @@ function ProfileCard({
 
       <dl className="space-y-2">
         {shown.map((f) => {
-          const value = profile[f.name];
-          const empty = value === undefined || value === "" ;
+          const value = profile[f.name] as string | number | string[] | undefined;
+          const empty = value === undefined || value === "";
           return (
             <div key={f.name} className="flex gap-3">
               <dt
@@ -1016,11 +1021,47 @@ function ProfileCard({
                 ) : (
                   String(value)
                 )}
+                {/* The note sits UNDER its answer, not in a separate block.
+                    "hybrid" and "firm about it, mentioned a long commute" are
+                    one fact; separating them leaves a table of values and a
+                    pile of orphaned observations. */}
+                {(notes[f.name] ?? []).map((note) => (
+                  <span
+                    key={note}
+                    className="md-body-small mt-1 block italic"
+                    style={{ color: "var(--md-on-surface-variant)" }}
+                  >
+                    {note}
+                  </span>
+                ))}
               </dd>
             </div>
           );
         })}
       </dl>
+
+      {general.length > 0 && (
+        <div
+          className="mt-4 border-t pt-3"
+          style={{ borderColor: "var(--md-outline-variant)" }}
+        >
+          <p
+            className="md-label-medium mb-1"
+            style={{ color: "var(--md-on-surface-variant)" }}
+          >
+            Impressions
+          </p>
+          {general.map((note) => (
+            <p
+              key={note}
+              className="md-body-small italic"
+              style={{ color: "var(--md-on-surface-variant)" }}
+            >
+              {note}
+            </p>
+          ))}
+        </div>
+      )}
     </section>
   );
 }

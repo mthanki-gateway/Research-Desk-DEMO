@@ -1131,8 +1131,20 @@ export type ProfileField = {
   kind: string;
 };
 
-/** What has been gathered. Values are strings, numbers or string lists. */
-export type Profile = Record<string, string | number | string[]>;
+/**
+ * What has been gathered.
+ *
+ * Most values are a string, a number or a list. `notes` is the exception: a
+ * map of field name to observations about HOW that answer was given, plus
+ * `general` for anything about the person rather than one answer. It is what
+ * makes the profile more than a spreadsheet, and it is shaped differently
+ * because it hangs off the other fields rather than sitting beside them.
+ */
+export type ProfileNotes = Record<string, string[]>;
+export type Profile = Record<
+  string,
+  string | number | string[] | ProfileNotes | undefined
+>;
 
 export async function getProfileFields(): Promise<ProfileField[]> {
   const res = await authedFetch("/live/profile-fields", { cache: "no-store" });

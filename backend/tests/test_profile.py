@@ -64,6 +64,90 @@ class TestMerge:
         assert original == {"skills": ["Python"]}
 
 
+class TestNotes:
+    """The difference between a profile and a spreadsheet.
+
+    "work_setup: hybrid" is true and nearly useless. "hybrid -- firm about it,
+    mentioned a long commute, sounded like he had negotiated it before" is the
+    same answer with the part that matters still attached. All of that is
+    present when the model hears it and gone by the time anyone reads a table.
+
+    WHY THE PARSING IS TOLERANT. The tool declares notes as {field, note}
+    objects, and the API does not enforce an array's item schema -- so whatever
+    the model produces is what arrives. Observed in one afternoon: the declared
+    shape, `observation` instead of `note`, and bare strings with no object at
+    all. Reading only the declared key cost every note in a full interview:
+    they were recorded, the tool reported success, and the stored profile came
+    back empty.
+    """
+
+    def test_the_declared_shape(self):
+        p = profile.merge({}, {"notes": [{"field": "skills", "note": "lit up about Terraform"}]})
+        assert p["notes"] == {"skills": ["lit up about Terraform"]}
+
+    def test_observation_instead_of_note(self):
+        """Seen from the model despite the schema saying `note`."""
+        p = profile.merge(
+            {}, {"notes": [{"field": "work_setup", "observation": "firm; long commute"}]}
+        )
+        assert p["notes"] == {"work_setup": ["firm; long commute"]}
+
+    def test_a_bare_string_is_kept_as_a_general_note(self):
+        """Losing the field it belonged to is a small harm. Losing the
+        observation is the whole feature."""
+        p = profile.merge({}, {"notes": ["hesitated over the number"]})
+        assert p["notes"] == {"general": ["hesitated over the number"]}
+
+    def test_a_field_keyed_object_is_read_as_field_and_note(self):
+        p = profile.merge({}, {"notes": [{"years_experience": "seemed unsure"}]})
+        assert p["notes"] == {"years_experience": ["seemed unsure"]}
+
+    def test_notes_accumulate_across_calls(self):
+        p = profile.merge({}, {"notes": [{"field": "skills", "note": "enjoys Terraform"}]})
+        p = profile.merge(p, {"notes": [{"field": "skills", "note": "rusty on Kubernetes"}]})
+        assert p["notes"]["skills"] == ["enjoys Terraform", "rusty on Kubernetes"]
+
+    def test_a_repeated_note_is_not_stored_twice(self):
+        """The model re-sends what it already recorded when it calls again."""
+        note = [{"field": "skills", "note": "enjoys Terraform"}]
+        p = profile.merge({}, {"notes": note})
+        p = profile.merge(p, {"notes": note})
+        assert p["notes"]["skills"] == ["enjoys Terraform"]
+
+    def test_an_unknown_field_is_filed_under_general_not_dropped(self):
+        p = profile.merge({}, {"notes": [{"field": "vibe", "note": "relaxed"}]})
+        assert p["notes"] == {"general": ["relaxed"]}
+
+    def test_an_empty_note_is_ignored(self):
+        p = profile.merge({}, {"notes": [{"field": "skills", "note": "  "}, ""]})
+        assert p.get("notes") in ({}, None)
+
+    def test_notes_do_not_disturb_the_fields(self):
+        p = profile.merge(
+            {},
+            {"skills": ["Python"], "notes": [{"field": "skills", "note": "confident"}]},
+        )
+        assert p["skills"] == ["Python"]
+        assert p["notes"] == {"skills": ["confident"]}
+
+    def test_notes_are_never_required(self):
+        """An interview that will not finish until every answer has an
+        observation attached is one that invents observations."""
+        full = {name: "x" for name in profile.REQUIRED}
+        assert profile.complete(full)
+
+    def test_they_are_rendered_under_their_field(self):
+        """So the model can see what it already observed and not repeat it."""
+        p = profile.merge(
+            {},
+            {"work_setup": "hybrid", "notes": [{"field": "work_setup", "note": "long commute"}]},
+        )
+        out = profile.render(p)
+        assert "work_setup: hybrid" in out
+        assert "long commute" in out
+        assert out.index("work_setup: hybrid") < out.index("long commute")
+
+
 class TestCompleteness:
     def test_an_empty_profile_is_missing_everything_required(self):
         assert set(profile.missing({})) == set(profile.REQUIRED)
@@ -127,8 +211,22 @@ class TestDeclaration:
     """The tool spec is generated from FIELDS, so the two cannot drift."""
 
     def test_every_field_is_declared(self):
+        """Plus `notes`, which is a channel alongside the fields, not one of them."""
         properties = profile.declaration()["parameters"]["properties"]
-        assert set(properties) == {f["name"] for f in profile.FIELDS}
+        assert set(properties) == {f["name"] for f in profile.FIELDS} | {
+            profile.NOTES_KEY
+        }
+
+    def test_notes_are_declared_as_an_array_of_objects(self):
+        """The shape the model is ASKED for, even though it sends others.
+
+        Declaring it loosely would invite the loose shapes; declaring it
+        precisely and parsing tolerantly gets the structured form most of the
+        time and loses nothing the rest of the time.
+        """
+        notes = profile.declaration()["parameters"]["properties"][profile.NOTES_KEY]
+        assert notes["type"] == "ARRAY"
+        assert set(notes["items"]["properties"]) == {"field", "note"}
 
     def test_nothing_is_mandatory_in_the_schema(self):
         """Even the required fields.

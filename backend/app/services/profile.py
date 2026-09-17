@@ -101,16 +101,56 @@ FIELDS: list[dict[str, Any]] = [
         "required": False,
         "description": "What they want from their next role, if they say.",
     },
-    {
-        "name": "notes",
-        "required": False,
-        "description": (
-            "Anything else worth knowing that has no field of its own. Short."
-        ),
-    },
 ]
 
+# Notes are NOT a field. They are a second channel that runs alongside every
+# field, and the reason is the difference between a profile and a spreadsheet.
+#
+# "work_setup: hybrid" is true and nearly useless. "hybrid -- was firm about
+# it, mentioned a long commute and sounded like he had negotiated it before"
+# is the same answer with the thing that makes it actionable still attached.
+# Sentiment, hesitation, enthusiasm, the aside that explains the answer: all of
+# it is present when the model hears it and gone by the time anyone reads the
+# table.
+#
+# Keyed by field so an observation stays attached to what it is about, with
+# "general" for anything that belongs to the person rather than to one answer.
+NOTES_KEY = "notes"
+GENERAL = "general"
+
+NOTE_ITEM = {
+    "type": "OBJECT",
+    "properties": {
+        "field": {
+            "type": "STRING",
+            "description": (
+                "Which field this is about -- one of the field names above, "
+                f"or '{GENERAL}' for something about them overall."
+            ),
+        },
+        "note": {
+            "type": "STRING",
+            "description": (
+                "What was notable about HOW they answered: hesitation, "
+                "enthusiasm, a caveat, an aside, a reason. One sentence. Do "
+                "not restate the answer itself."
+            ),
+        },
+    },
+    "required": ["field", "note"],
+}
+
+# What the model calls the text, in practice.
+#
+# The schema says `note`. It has been observed sending `observation` as well,
+# and bare strings with no object at all -- the API does not enforce an array's
+# item schema, so whatever the model produces is what arrives. Reading only the
+# declared key cost every note in a full interview: they were recorded, the
+# tool reported success, and the stored profile came back empty.
+_NOTE_KEYS = ("note", "observation", "text", "value", "comment")
+
 REQUIRED = [f["name"] for f in FIELDS if f["required"]]
+FIELD_NAMES = [f["name"] for f in FIELDS]
 TOOL_NAME = "record_profile"
 
 
@@ -146,6 +186,20 @@ def declaration() -> dict[str, Any]:
                     }
                 )
                 for field in FIELDS
+            }
+            | {
+                NOTES_KEY: {
+                    "type": "ARRAY",
+                    "items": NOTE_ITEM,
+                    "description": (
+                        "What was notable about HOW they answered, attached to "
+                        "the field it is about. Sentiment, hesitation, "
+                        "enthusiasm, a caveat, the reason behind an answer. "
+                        "This is what makes the profile more than a "
+                        "spreadsheet, so record it whenever there is anything "
+                        "to record -- not only when asked."
+                    ),
+                }
             },
             "required": [],
         },
@@ -161,7 +215,63 @@ def merge(existing: dict, update: dict) -> dict:
     correction, and dropping the first set would silently lose half of them.
     """
     merged = dict(existing or {})
+
+    # Notes take their own path: they arrive as a list of {field, observation}
+    # and are stored keyed by field, because an observation is only worth
+    # keeping while it is still attached to what it is about.
+    incoming_notes = (update or {}).get(NOTES_KEY) or []
+    if incoming_notes:
+        notes = {k: list(v) for k, v in (merged.get(NOTES_KEY) or {}).items()}
+        for note in incoming_notes:
+            # BOTH SHAPES ARE ACCEPTED, and this is not defensiveness.
+            #
+            # The tool declares notes as {field, observation} objects. The model
+            # frequently sends bare strings instead -- measured, on the very
+            # first call -- and the API does not enforce the item schema. The
+            # original merge skipped anything that was not a dict, so every note
+            # was silently discarded: the model dutifully recorded them, the
+            # tool reported success, and the stored profile came back `{}`.
+            #
+            # A note that arrives unattached is filed under `general`. Losing
+            # the field it belonged to is a small harm; losing the observation
+            # is the whole feature.
+            if isinstance(note, str):
+                note = {"field": GENERAL, "note": note}
+            if not isinstance(note, dict):
+                continue
+            field = str(note.get("field") or GENERAL).strip() or GENERAL
+            # An unknown field name is filed under `general` rather than
+            # dropped. A misattributed observation is still an observation;
+            # a discarded one is gone.
+            if field not in FIELD_NAMES and field != GENERAL:
+                field = GENERAL
+            text = ""
+            for key in _NOTE_KEYS:
+                if note.get(key):
+                    text = str(note[key]).strip()
+                    break
+            if not text:
+                # A dict with neither `field` nor a known text key is most
+                # likely {field_name: observation}. Reading it that way
+                # recovers the note rather than discarding it.
+                extras = {
+                    k: v
+                    for k, v in note.items()
+                    if k != "field" and isinstance(v, str) and v.strip()
+                }
+                if len(extras) == 1:
+                    field, value = next(iter(extras.items()))
+                    text = value.strip()
+            if not text:
+                continue
+            bucket = notes.setdefault(field, [])
+            if text.lower() not in {n.lower() for n in bucket}:
+                bucket.append(text)
+        merged[NOTES_KEY] = notes
+
     for key, value in (update or {}).items():
+        if key == NOTES_KEY:
+            continue
         if value is None or value == "" or value == []:
             continue
         if isinstance(value, list):
@@ -179,7 +289,11 @@ def merge(existing: dict, update: dict) -> dict:
 
 
 def missing(profile: dict) -> list[str]:
-    """Required fields with nothing in them yet."""
+    """Required fields with nothing in them yet.
+
+    Notes are never required. An interview that will not finish until every
+    answer has an observation attached is one that invents observations.
+    """
     return [
         name
         for name in REQUIRED
@@ -198,6 +312,7 @@ def render(profile: dict) -> str:
     corpus tools are: a model reads lines back as facts and rewrites them,
     and reads JSON back as a structure to echo.
     """
+    notes = (profile or {}).get(NOTES_KEY) or {}
     lines = ["Profile so far:"]
     for field in FIELDS:
         value = (profile or {}).get(field["name"])
@@ -205,8 +320,15 @@ def render(profile: dict) -> str:
             continue
         shown = ", ".join(str(v) for v in value) if isinstance(value, list) else value
         lines.append(f"- {field['name']}: {shown}")
+        # Echoed back so the model can see what it has already observed and
+        # does not record the same thing three times in different words.
+        for note in notes.get(field["name"], []):
+            lines.append(f"    note: {note}")
     if len(lines) == 1:
         lines.append("- (nothing recorded yet)")
+
+    for note in notes.get(GENERAL, []):
+        lines.append(f"- general note: {note}")
 
     gaps = missing(profile)
     if gaps:
