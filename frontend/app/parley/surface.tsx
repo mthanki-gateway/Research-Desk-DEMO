@@ -78,11 +78,12 @@ type Phase =
  * deliberate click, which is exactly the friction a voice interface exists to
  * remove.
  *
- * Five seconds is long enough to read the answer on screen and decide, short
- * enough that a natural follow-up does not need a click at all. It is
+ * Three seconds. Five was long enough to feel like waiting for permission --
+ * the pause between an answer ending and being able to reply is dead air in a
+ * conversation, and a follow-up is usually already formed by then. Still
  * cancellable, and clicking through it starts listening immediately.
  */
-const RESTART_SECONDS = 5;
+const RESTART_SECONDS = 3;
 
 type Source = { label: string; kind: "document" | "web"; url: string | null };
 
