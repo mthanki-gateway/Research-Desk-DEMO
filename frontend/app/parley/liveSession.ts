@@ -87,6 +87,8 @@ export type LiveEvent =
   | { type: "level"; level: number };
 
 export type LiveSession = {
+  /** Ask the model to open the conversation. It speaks first. */
+  greet: () => void;
   /** Stop capturing and tell the server the turn is over. */
   endTurn: () => void;
   /** Start capturing again for the next question. */
@@ -136,8 +138,26 @@ export async function openLiveSession(
    */
   let generated = false;
   let drainTimer: number | null = null;
+  /**
+   * Every chunk scheduled for the current turn.
+   *
+   * Kept so they can actually be STOPPED. Suspending the context only defers
+   * them -- resuming plays the whole backlog -- so "stop speaking" left the
+   * model talking a moment later, with the chunks still arriving over the
+   * socket queued on top.
+   */
+  let scheduled: AudioBufferSourceNode[] = [];
+  /**
+   * The user cut this turn off.
+   *
+   * Audio still arriving is DISCARDED until the next turn begins. The model
+   * does not know it was interrupted and keeps sending, and enqueuing that is
+   * the other half of why the voice came back.
+   */
+  let muted = false;
 
   function enqueue(pcm: ArrayBuffer) {
+    if (muted) return;
     const samples = new Int16Array(pcm);
     if (!samples.length) return;
     const buffer = out.createBuffer(1, samples.length, OUTPUT_RATE);
@@ -157,6 +177,12 @@ export async function openLiveSession(
     // hesitation in the next frame arriving lands as a gap mid-word.
     if (playHead < now) playHead = now + 0.08;
     source.start(playHead);
+    scheduled.push(source);
+    // Dropped once played, or the array grows for the life of the session and
+    // holds every buffer in it.
+    source.onended = () => {
+      scheduled = scheduled.filter((node) => node !== source);
+    };
     playHead += buffer.duration;
     // More audio after the server called the turn complete simply pushes the
     // finish out; without this the tail of a long answer is cut off.
@@ -174,7 +200,10 @@ export async function openLiveSession(
    * model has stopped generating.
    */
   function scheduleFinish() {
-    if (!generated) return;
+    // A muted turn has already ended as far as the user is concerned. Letting
+    // its real ending through fired `playback_end` seconds later and RESTARTED
+    // the countdown the stop had just begun.
+    if (!generated || muted) return;
     if (drainTimer) window.clearTimeout(drainTimer);
     const remaining = Math.max(0, playHead - out.currentTime);
     drainTimer = window.setTimeout(
@@ -187,18 +216,25 @@ export async function openLiveSession(
   }
 
   function stopSpeaking() {
-    // Rebuilding the head is what actually stops queued audio: every scheduled
-    // source is already committed to the graph, so the context is suspended
-    // and resumed to flush them.
     if (drainTimer) {
       window.clearTimeout(drainTimer);
       drainTimer = null;
     }
     generated = false;
-    void out.suspend().then(() => {
-      playHead = 0;
-      void out.resume();
-    });
+    // MUTED, NOT PAUSED. Suspending the context only defers the backlog, and
+    // resuming played all of it -- so the model carried on talking a second
+    // after being told to stop. Every scheduled chunk is stopped outright, and
+    // anything still arriving for this turn is dropped.
+    muted = true;
+    for (const source of scheduled) {
+      try {
+        source.stop();
+      } catch {
+        // Already finished. Nothing to stop.
+      }
+    }
+    scheduled = [];
+    playHead = 0;
   }
 
   // ---- capture ----------------------------------------------------------
@@ -270,6 +306,8 @@ export async function openLiveSession(
       drainTimer = null;
     }
     generated = false;
+    // A new turn: audio is wanted again.
+    muted = false;
 
     await ensureGraph();
 
@@ -351,6 +389,11 @@ export async function openLiveSession(
   });
 
   return {
+    greet() {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "greet" }));
+      }
+    },
     beginTurn,
     endTurn,
     stopSpeaking,

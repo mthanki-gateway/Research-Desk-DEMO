@@ -18,6 +18,7 @@ THE PROTOCOL
 
 Browser to us:
     binary             raw 16kHz mono PCM, as captured
+    {"type":"greet"}   open the conversation; the model speaks first
     {"type":"start"}   the speaker pressed the button
     {"type":"end"}     the speaker pressed it again; answer now
 
@@ -414,6 +415,30 @@ async def _uplink(ws: WebSocket, session, turn_state: dict) -> None:
             continue
 
         kind = event.get("type")
+
+        # THE MODEL SPEAKS FIRST.
+        #
+        # Sent as a text turn rather than a system instruction, because the
+        # instruction is already in place and describes what an opening should
+        # be -- this is the cue to perform it now. It is `send_client_content`
+        # rather than audio because there is nothing to say yet; the reply
+        # comes back as speech like any other turn.
+        if kind == "greet":
+            await session.send_client_content(
+                turns=types.Content(
+                    role="user",
+                    parts=[
+                        types.Part(
+                            text=(
+                                "Begin. Introduce yourself in one sentence and "
+                                "ask your first question."
+                            )
+                        )
+                    ],
+                ),
+                turn_complete=True,
+            )
+            continue
 
         # MANUAL TURN BOUNDARIES. The button, and nothing else, decides.
         #

@@ -171,6 +171,16 @@ function Parley({ mode }: { mode: Mode }) {
   const [profileDone, setProfileDone] = useState(false);
   /** The model has called `end_interview`. The microphone stops reopening. */
   const [ended, setEnded] = useState(false);
+  /**
+   * Nothing has happened in this conversation yet.
+   *
+   * The entry point differs by mode. Speak is a tool: you arrive with a
+   * question and press the microphone. An interview is a conversation someone
+   * is being taken through, and being handed a live microphone with no idea
+   * what is wanted is the wrong way into one -- so it opens with the model
+   * introducing itself.
+   */
+  const [started, setStarted] = useState(false);
 
   /**
    * The turn in flight.
@@ -391,6 +401,39 @@ function Parley({ mode }: { mode: Mode }) {
     [clearInFlight, beginCountdown, stopCountdown, refreshParleyConversations],
   );
 
+  /**
+   * Open the conversation with the model speaking.
+   *
+   * It connects and asks the model to introduce itself; the microphone opens
+   * afterwards through the ordinary countdown, once it has stopped talking.
+   * Nothing special happens at the end of that first turn -- it is a turn like
+   * any other, which is why there is no separate state for "greeting".
+   */
+  const startSession = useCallback(async () => {
+    setError(null);
+    stopCountdown();
+    try {
+      setPhase("connecting");
+      if (!session.current) {
+        session.current = await openLiveSession(
+          voiceName,
+          conversationId,
+          mode,
+          onEvent,
+        );
+      }
+      setStarted(true);
+      session.current.greet();
+      setPhase("thinking");
+    } catch (e) {
+      setPhase("idle");
+      session.current = null;
+      setError(
+        e instanceof Error ? e.message : "The session could not be opened.",
+      );
+    }
+  }, [voiceName, conversationId, mode, onEvent, stopCountdown]);
+
   const start = useCallback(async () => {
     setError(null);
     // Clicking through the countdown starts listening NOW. The countdown is a
@@ -407,6 +450,7 @@ function Parley({ mode }: { mode: Mode }) {
         );
       }
       await session.current.beginTurn();
+      setStarted(true);
       setPhase("listening");
       setElapsed(0);
       // CLEAR BEFORE SETTING. Without this every start left its interval
@@ -469,6 +513,7 @@ function Parley({ mode }: { mode: Mode }) {
     setMissing([]);
     setProfileDone(false);
     setEnded(false);
+    setStarted(false);
     setResumed(false);
     setPhase("idle");
   }, [clearInFlight, stopCountdown, wanted, router, pathname]);
@@ -489,6 +534,10 @@ function Parley({ mode }: { mode: Mode }) {
         setMissing(detail.missing ?? []);
         setProfileDone(Boolean(detail.complete));
         setEnded(Boolean((detail.profile ?? {}).ended));
+        // Reopening a conversation that already has turns: it has plainly
+        // started, and greeting again would have it introduce itself to
+        // someone it has been talking to for ten minutes.
+        setStarted(detail.turns.length > 0);
         // Newest first, matching the live view -- the turn just spoken should
         // be the one under the button, not buried at the bottom.
         setExchanges(
@@ -571,6 +620,21 @@ function Parley({ mode }: { mode: Mode }) {
       {error && <Banner>{error}</Banner>}
 
       <section className="md-card md-card-outlined flex flex-col items-center gap-4 px-6 py-10">
+        {!started && phase !== "connecting" && phase !== "thinking" ? (
+          <button
+            type="button"
+            onClick={() => void startSession()}
+            disabled={!status?.enabled}
+            className="md-label-large rounded-[var(--md-shape-full)] px-8 py-4 disabled:opacity-60"
+            style={{
+              background: "var(--md-primary)",
+              color: "var(--md-on-primary)",
+              boxShadow: "var(--md-elev-2)",
+            }}
+          >
+            {mode === "interview" ? "Start interview" : "Start session"}
+          </button>
+        ) : (
         <MicButton
           phase={phase}
           level={level}
@@ -588,9 +652,14 @@ function Parley({ mode }: { mode: Mode }) {
             beginCountdown();
           }}
         />
+        )}
 
         <p className="md-title-small text-center">
-          {ended
+          {!started && phase === "idle"
+            ? mode === "interview"
+              ? "Ready when you are"
+              : "Start a conversation"
+            : ended
             ? "Interview complete"
             : phase === "connecting"
             ? "Opening the session"
@@ -609,7 +678,11 @@ function Parley({ mode }: { mode: Mode }) {
           className="md-body-small text-center"
           style={{ color: "var(--md-on-surface-variant)" }}
         >
-          {ended
+          {!started && phase === "idle"
+            ? mode === "interview"
+              ? "It will introduce itself and ask the first question."
+              : "It will listen, then answer from your documents and the web."
+            : ended
             ? "The interviewer has everything it needs. Start a new one to go again."
             : listening
               ? "It will not answer until you click. Pausing mid-sentence is fine."
