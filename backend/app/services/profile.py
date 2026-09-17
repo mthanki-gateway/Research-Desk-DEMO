@@ -116,7 +116,15 @@ FIELDS: list[dict[str, Any]] = [
 # Keyed by field so an observation stays attached to what it is about, with
 # "general" for anything that belongs to the person rather than to one answer.
 NOTES_KEY = "notes"
+QUOTES_KEY = "quotes"
 GENERAL = "general"
+# Anything they said that belongs to no field. NOT a dumping ground: it is
+# where the interesting half of an interview usually ends up, because the
+# fields were chosen in advance and the person was not.
+OTHER = "other"
+
+# Buckets a note may be filed under, beyond the fields themselves.
+EXTRA_BUCKETS = (GENERAL, OTHER)
 
 NOTE_ITEM = {
     "type": "OBJECT",
@@ -131,13 +139,35 @@ NOTE_ITEM = {
         "note": {
             "type": "STRING",
             "description": (
-                "What was notable about HOW they answered: hesitation, "
-                "enthusiasm, a caveat, an aside, a reason. One sentence. Do "
-                "not restate the answer itself."
+                "What was notable: tone, energy, hesitation, enthusiasm, "
+                "reluctance, pride, frustration, a caveat, a reason, an aside, "
+                "a correction, something volunteered unasked. Anything a person "
+                "reading this later would want to know."
             ),
         },
     },
     "required": ["field", "note"],
+}
+
+QUOTE_ITEM = {
+    "type": "OBJECT",
+    "properties": {
+        "field": {
+            "type": "STRING",
+            "description": (
+                "Which field this is about -- a field name, "
+                f"'{GENERAL}', or '{OTHER}'."
+            ),
+        },
+        "quote": {
+            "type": "STRING",
+            "description": (
+                "Their own words, as close to verbatim as you can manage. "
+                "Short -- a phrase or a sentence, not a paragraph."
+            ),
+        },
+    },
+    "required": ["field", "quote"],
 }
 
 # What the model calls the text, in practice.
@@ -148,6 +178,7 @@ NOTE_ITEM = {
 # declared key cost every note in a full interview: they were recorded, the
 # tool reported success, and the stored profile came back empty.
 _NOTE_KEYS = ("note", "observation", "text", "value", "comment")
+_QUOTE_KEYS = ("quote", "text", "said", "value")
 
 REQUIRED = [f["name"] for f in FIELDS if f["required"]]
 FIELD_NAMES = [f["name"] for f in FIELDS]
@@ -188,16 +219,30 @@ def declaration() -> dict[str, Any]:
                 for field in FIELDS
             }
             | {
+                QUOTES_KEY: {
+                    "type": "ARRAY",
+                    "items": QUOTE_ITEM,
+                    "description": (
+                        "Their actual words, attached to the field they are "
+                        "about. A quote survives every summary you might write "
+                        "later, and it is the one thing a reader trusts "
+                        "completely. Capture them generously."
+                    ),
+                },
                 NOTES_KEY: {
                     "type": "ARRAY",
                     "items": NOTE_ITEM,
                     "description": (
-                        "What was notable about HOW they answered, attached to "
-                        "the field it is about. Sentiment, hesitation, "
-                        "enthusiasm, a caveat, the reason behind an answer. "
-                        "This is what makes the profile more than a "
-                        "spreadsheet, so record it whenever there is anything "
-                        "to record -- not only when asked."
+                        "EVERYTHING worth knowing that is not a field value: "
+                        "tone, emotion, energy, hesitation, enthusiasm, "
+                        "reluctance, pride, frustration, humour, caveats, "
+                        "reasons, asides, corrections, context, anything they "
+                        "volunteered. Use the field it relates to, "
+                        f"'{GENERAL}' for how they came across overall, or "
+                        f"'{OTHER}' for anything that fits no field at all. "
+                        "Be generous -- this is the most valuable part of the "
+                        "profile and there is no penalty for recording too "
+                        "much."
                     ),
                 }
             },
@@ -219,10 +264,37 @@ def merge(existing: dict, update: dict) -> dict:
     # Notes take their own path: they arrive as a list of {field, observation}
     # and are stored keyed by field, because an observation is only worth
     # keeping while it is still attached to what it is about.
-    incoming_notes = (update or {}).get(NOTES_KEY) or []
-    if incoming_notes:
-        notes = {k: list(v) for k, v in (merged.get(NOTES_KEY) or {}).items()}
-        for note in incoming_notes:
+    for bucket_key, text_keys in (
+        (NOTES_KEY, _NOTE_KEYS),
+        (QUOTES_KEY, _QUOTE_KEYS),
+    ):
+        merged = _fold(merged, (update or {}).get(bucket_key) or [], bucket_key, text_keys)
+
+    for key, value in (update or {}).items():
+        if key in (NOTES_KEY, QUOTES_KEY):
+            continue
+        if value is None or value == "" or value == []:
+            continue
+        if isinstance(value, list):
+            seen = list(merged.get(key) or [])
+            for item in value:
+                text = str(item).strip()
+                if text and text.lower() not in {s.lower() for s in seen}:
+                    seen.append(text)
+            merged[key] = seen
+        else:
+            merged[key] = value
+    return merged
+
+
+def _fold(merged: dict, incoming: list, bucket_key: str, text_keys: tuple) -> dict:
+    """Fold notes or quotes into their field-keyed bucket.
+
+    One function for both because they differ only in which key holds the text.
+    """
+    if incoming:
+        notes = {k: list(v) for k, v in (merged.get(bucket_key) or {}).items()}
+        for note in incoming:
             # BOTH SHAPES ARE ACCEPTED, and this is not defensiveness.
             #
             # The tool declares notes as {field, observation} objects. The model
@@ -236,17 +308,17 @@ def merge(existing: dict, update: dict) -> dict:
             # the field it belonged to is a small harm; losing the observation
             # is the whole feature.
             if isinstance(note, str):
-                note = {"field": GENERAL, "note": note}
+                note = {"field": GENERAL, text_keys[0]: note}
             if not isinstance(note, dict):
                 continue
             field = str(note.get("field") or GENERAL).strip() or GENERAL
             # An unknown field name is filed under `general` rather than
             # dropped. A misattributed observation is still an observation;
             # a discarded one is gone.
-            if field not in FIELD_NAMES and field != GENERAL:
-                field = GENERAL
+            if field not in FIELD_NAMES and field not in EXTRA_BUCKETS:
+                field = OTHER
             text = ""
-            for key in _NOTE_KEYS:
+            for key in text_keys:
                 if note.get(key):
                     text = str(note[key]).strip()
                     break
@@ -267,24 +339,8 @@ def merge(existing: dict, update: dict) -> dict:
             bucket = notes.setdefault(field, [])
             if text.lower() not in {n.lower() for n in bucket}:
                 bucket.append(text)
-        merged[NOTES_KEY] = notes
-
-    for key, value in (update or {}).items():
-        if key == NOTES_KEY:
-            continue
-        if value is None or value == "" or value == []:
-            continue
-        if isinstance(value, list):
-            seen = list(merged.get(key) or [])
-            for item in value:
-                text = str(item).strip()
-                # Case-insensitive, because "Python" and "python" from two
-                # different turns are one skill.
-                if text and text.lower() not in {s.lower() for s in seen}:
-                    seen.append(text)
-            merged[key] = seen
-        else:
-            merged[key] = value
+        merged = dict(merged)
+        merged[bucket_key] = notes
     return merged
 
 
@@ -313,6 +369,7 @@ def render(profile: dict) -> str:
     and reads JSON back as a structure to echo.
     """
     notes = (profile or {}).get(NOTES_KEY) or {}
+    quotes = (profile or {}).get(QUOTES_KEY) or {}
     lines = ["Profile so far:"]
     for field in FIELDS:
         value = (profile or {}).get(field["name"])
@@ -324,11 +381,16 @@ def render(profile: dict) -> str:
         # does not record the same thing three times in different words.
         for note in notes.get(field["name"], []):
             lines.append(f"    note: {note}")
+        for quote in quotes.get(field["name"], []):
+            lines.append(f'    quote: "{quote}"')
     if len(lines) == 1:
         lines.append("- (nothing recorded yet)")
 
-    for note in notes.get(GENERAL, []):
-        lines.append(f"- general note: {note}")
+    for bucket, label in ((GENERAL, "general"), (OTHER, "other")):
+        for note in notes.get(bucket, []):
+            lines.append(f"- {label} note: {note}")
+        for quote in quotes.get(bucket, []):
+            lines.append(f'- {label} quote: "{quote}"')
 
     gaps = missing(profile)
     if gaps:
@@ -340,5 +402,20 @@ def render(profile: dict) -> str:
             "ALL REQUIRED FIELDS ARE NOW FILLED. Tell the person you have "
             "everything you need, thank them, and offer them a chance to add "
             "anything you did not ask about."
+        )
+
+    # COUNTED, not merely listed. The fields fill up early and then stop
+    # moving, so without this the model gets no signal that the rich half of
+    # the profile is thin -- and a thin profile is the real failure mode
+    # here, not a missing field.
+    n_notes = sum(len(v) for v in notes.values())
+    n_quotes = sum(len(v) for v in quotes.values())
+    lines.append("")
+    lines.append(f"Recorded so far: {n_notes} note(s), {n_quotes} quote(s).")
+    if n_notes < 6:
+        lines.append(
+            "That is THIN. You are almost certainly letting detail go "
+            "unrecorded -- tone, reasons, asides, things they volunteered, "
+            "their own words. Record more."
         )
     return "\n".join(lines)

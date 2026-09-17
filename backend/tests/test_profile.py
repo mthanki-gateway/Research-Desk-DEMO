@@ -114,9 +114,10 @@ class TestNotes:
         p = profile.merge(p, {"notes": note})
         assert p["notes"]["skills"] == ["enjoys Terraform"]
 
-    def test_an_unknown_field_is_filed_under_general_not_dropped(self):
+    def test_an_unknown_field_is_filed_not_dropped(self):
+        """It goes to `other` -- see TestQuotes for why that is the right bucket."""
         p = profile.merge({}, {"notes": [{"field": "vibe", "note": "relaxed"}]})
-        assert p["notes"] == {"general": ["relaxed"]}
+        assert p["notes"] == {"other": ["relaxed"]}
 
     def test_an_empty_note_is_ignored(self):
         p = profile.merge({}, {"notes": [{"field": "skills", "note": "  "}, ""]})
@@ -146,6 +147,76 @@ class TestNotes:
         assert "work_setup: hybrid" in out
         assert "long commute" in out
         assert out.index("work_setup: hybrid") < out.index("long commute")
+
+
+class TestQuotes:
+    """Their own words, kept alongside our reading of them.
+
+    A quote survives every summary anyone writes later, and a reader trusts it
+    in a way they never quite trust a paraphrase. It also happens to be the
+    most reliable record of what was said: Gemini's `input_transcription` is a
+    separate, lossier pass than the model's own understanding -- observed
+    rendering a whole answer as "When the maintenance yesterday", and omitting
+    a name the model then used correctly in its reply.
+    """
+
+    def test_quotes_are_stored_separately_from_notes(self):
+        p = profile.merge(
+            {},
+            {
+                "notes": [{"field": "work_setup", "note": "firm about it"}],
+                "quotes": [{"field": "work_setup", "quote": "Not going back to an office."}],
+            },
+        )
+        assert p["notes"] == {"work_setup": ["firm about it"]}
+        assert p["quotes"] == {"work_setup": ["Not going back to an office."]}
+
+    def test_quotes_accept_the_loose_shapes_too(self):
+        """Same reasoning as notes: the API does not enforce item schemas."""
+        p = profile.merge({}, {"quotes": ["I left over it."]})
+        assert p["quotes"] == {"general": ["I left over it."]}
+
+    def test_quotes_accumulate_and_dedupe(self):
+        q = [{"field": "skills", "quote": "Terraform is the fun part."}]
+        p = profile.merge({}, {"quotes": q})
+        p = profile.merge(p, {"quotes": q})
+        assert p["quotes"]["skills"] == ["Terraform is the fun part."]
+
+    def test_an_unattachable_note_goes_to_other_not_general(self):
+        """`other` is where the interesting half of an interview ends up.
+
+        The fields were chosen in advance and the person was not, so a note
+        that fits no field is not a stray -- it is usually the point.
+        """
+        p = profile.merge({}, {"notes": [{"field": "hobbies", "note": "restores motorbikes"}]})
+        assert p["notes"] == {"other": ["restores motorbikes"]}
+
+
+class TestDensity:
+    """A thin profile is the failure mode, not a missing field.
+
+    The required fields fill up early and then stop moving, so nothing about
+    them tells the model that it is recording answers and discarding the
+    person. The tool result counts what has been gathered and says so.
+    """
+
+    def test_the_counts_are_reported(self):
+        p = profile.merge(
+            {},
+            {
+                "notes": [{"field": "skills", "note": "a"}],
+                "quotes": [{"field": "skills", "quote": "b"}],
+            },
+        )
+        assert "1 note(s), 1 quote(s)" in profile.render(p)
+
+    def test_a_thin_profile_is_called_thin(self):
+        assert "THIN" in profile.render({"full_name": "Sam"})
+
+    def test_a_rich_profile_is_not_nagged(self):
+        notes = [{"field": "general", "note": f"observation {i}"} for i in range(8)]
+        p = profile.merge({}, {"notes": notes})
+        assert "THIN" not in profile.render(p)
 
 
 class TestCompleteness:
@@ -214,7 +285,8 @@ class TestDeclaration:
         """Plus `notes`, which is a channel alongside the fields, not one of them."""
         properties = profile.declaration()["parameters"]["properties"]
         assert set(properties) == {f["name"] for f in profile.FIELDS} | {
-            profile.NOTES_KEY
+            profile.NOTES_KEY,
+            profile.QUOTES_KEY,
         }
 
     def test_notes_are_declared_as_an_array_of_objects(self):
