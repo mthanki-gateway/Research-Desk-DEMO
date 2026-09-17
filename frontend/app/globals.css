@@ -1085,6 +1085,75 @@ textarea:focus-visible {
   /* Dense variant for the session list, which can be long. */
   .md-nav-item-dense { height: 40px; font-size: 0.8125rem; }
 
+  /* ---------------------------------------------------------------------
+     Overflow menu — M3 "menu", small surface + elevation.
+
+     POSITIONED `fixed` BY THE CALLER, not absolute. An absolutely positioned
+     menu is clipped by the nearest scrolling ancestor, and the drawer's
+     conversation list is exactly that: the menu appeared half-cut, behind the
+     row below it. `fixed` escapes every overflow context without needing a
+     portal.
+     --------------------------------------------------------------------- */
+  .md-menu {
+    position: fixed;
+    z-index: 70;
+    min-width: 10rem;
+    padding: 0.25rem;
+    border-radius: var(--md-shape-sm);
+    background: var(--md-surface-container-high);
+    color: var(--md-on-surface);
+    box-shadow: var(--md-elev-2);
+    border: 1px solid var(--md-outline-variant);
+  }
+  .md-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    border-radius: var(--md-shape-xs);
+    text-align: left;
+    transition: background 120ms ease;
+  }
+  .md-menu-item:hover,
+  .md-menu-item:focus-visible {
+    background: color-mix(in srgb, var(--md-on-surface) 8%, transparent);
+  }
+  /* The destructive one reads as destructive BEFORE it is clicked, not after.
+     Tinting only on hover would be a warning that arrives with the cursor
+     already on the target. */
+  .md-menu-item-danger { color: var(--md-error); }
+  .md-menu-item-danger:hover,
+  .md-menu-item-danger:focus-visible {
+    background: color-mix(in srgb, var(--md-error) 12%, transparent);
+  }
+
+  /* A round target for an icon-only control. 32px, which is smaller than the
+     48px M3 asks for -- acceptable inside a dense list row, where a full-size
+     target would be taller than the row it sits in. */
+  .md-icon-affordance {
+    display: grid;
+    place-items: center;
+    width: 2rem;
+    height: 2rem;
+    border-radius: var(--md-shape-full);
+    opacity: 0;
+    transition: background 120ms ease, opacity 120ms ease;
+  }
+  .md-icon-affordance:hover,
+  .md-icon-affordance:focus-visible,
+  .md-icon-affordance[data-open="true"] {
+    background: color-mix(in srgb, var(--md-on-surface) 10%, transparent);
+    opacity: 1;
+  }
+  /* Revealed on row hover, and ALWAYS on touch -- there is no hover on a
+     phone, so a control that only appears on hover does not exist there. */
+  .md-nav-item:hover .md-icon-affordance,
+  .md-nav-item:focus-within .md-icon-affordance { opacity: 0.7; }
+  @media (hover: none) {
+    .md-icon-affordance { opacity: 0.7; }
+  }
+
   /* -------------------------------------------------------------------------
      Icon container — the M3 Expressive nav treatment.
 

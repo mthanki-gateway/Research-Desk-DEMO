@@ -9,7 +9,7 @@ import {
 } from "@/lib/api";
 import { useApp } from "./providers";
 import { Ripplable } from "./md";
-import { IconChevron } from "./icons";
+import { IconChevron, IconEdit, IconMore, IconTrash } from "./icons";
 
 /**
  * Parley's conversations, in the drawer beneath "Speak".
@@ -59,8 +59,17 @@ export default function ParleyNav({
   const items = parleyConversations[mode];
   const section = SECTION[mode];
   const [open, setOpen] = useState(true);
-  /** Which row's menu is showing. One at a time. */
-  const [menu, setMenu] = useState<string | null>(null);
+  /**
+   * Which row's menu is showing, and WHERE.
+   *
+   * The coordinates are carried because the menu is positioned `fixed`: an
+   * absolutely positioned one is clipped by the nearest scrolling ancestor,
+   * and this list is exactly that -- the menu appeared cut in half, behind the
+   * row beneath it.
+   */
+  const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(
+    null,
+  );
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const renameBox = useRef<HTMLInputElement | null>(null);
@@ -88,13 +97,25 @@ export default function ParleyNav({
     });
   }
 
-  // Any click elsewhere closes the menu. Without this it stays open behind the
-  // next thing the user does, which reads as the app having lost track.
+  // Any click elsewhere closes it, and so does scrolling or resizing --
+  // a `fixed` menu does not follow the row it belongs to, so it would sit over
+  // an unrelated one. Escape closes it because every menu should.
   useEffect(() => {
     if (!menu) return;
     const close = () => setMenu(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenu(null);
+    };
     window.addEventListener("click", close);
-    return () => window.removeEventListener("click", close);
+    window.addEventListener("resize", close);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("keydown", onKey);
+    };
   }, [menu]);
 
   useEffect(() => {
@@ -178,11 +199,15 @@ export default function ParleyNav({
                         if (e.key === "Enter") void commitRename(c.id);
                         if (e.key === "Escape") setRenaming(null);
                       }}
-                      className="md-body-small mx-2 my-0.5 w-[calc(100%-1rem)] rounded-[var(--md-shape-sm)] px-2 py-1.5"
+                      aria-label="Conversation name"
+                      className="md-body-small mx-2 my-0.5 w-[calc(100%-1rem)] rounded-[var(--md-shape-sm)] px-2 py-1.5 outline-none"
                       style={{
-                        background: "var(--md-surface)",
+                        background: "var(--md-surface-container-high)",
                         color: "var(--md-on-surface)",
-                        border: "1px solid var(--md-outline)",
+                        // A focus ring rather than a border: a border changes
+                        // the row's height when it appears, which makes the
+                        // list jump as you start renaming.
+                        boxShadow: "inset 0 0 0 2px var(--md-primary)",
                       }}
                     />
                   ) : (
@@ -200,57 +225,71 @@ export default function ParleyNav({
                         role="button"
                         tabIndex={0}
                         aria-label={`Options for ${c.title}`}
+                        aria-haspopup="menu"
+                        aria-expanded={menu?.id === c.id}
+                        data-open={menu?.id === c.id}
                         onClick={(e) => {
                           // Or the row navigates out from under the menu.
                           e.stopPropagation();
-                          setMenu(menu === c.id ? null : c.id);
+                          if (menu?.id === c.id) return setMenu(null);
+                          // Anchored to the BUTTON's position on screen, taken
+                          // at open time, because `fixed` coordinates are
+                          // viewport coordinates.
+                          const r = (
+                            e.currentTarget as HTMLElement
+                          ).getBoundingClientRect();
+                          setMenu({ id: c.id, x: r.right, y: r.bottom + 4 });
                         }}
-                        className="shrink-0 px-1 opacity-60 hover:opacity-100"
+                        className="md-icon-affordance shrink-0"
                       >
-                        ⋯
+                        <IconMore className="h-4 w-4" />
                       </span>
                     </Ripplable>
                   )}
 
-                  {menu === c.id && (
-                    <div
-                      onClick={(e) => e.stopPropagation()}
-                      role="menu"
-                      className="absolute right-2 top-8 z-20 min-w-[9rem] overflow-hidden rounded-[var(--md-shape-md)] py-1"
-                      style={{
-                        background: "var(--md-surface-container-high)",
-                        color: "var(--md-on-surface)",
-                        boxShadow: "var(--md-elev-2)",
-                      }}
-                    >
-                      <button
-                        type="button"
-                        role="menuitem"
-                        className="md-body-small w-full px-3 py-2 text-left"
-                        onClick={() => {
-                          setDraft(c.title);
-                          setRenaming(c.id);
-                          setMenu(null);
-                        }}
-                      >
-                        Rename
-                      </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        className="md-body-small w-full px-3 py-2 text-left"
-                        style={{ color: "var(--md-error)" }}
-                        onClick={() => void remove(c.id)}
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  )}
                 </li>
               );
             })}
           </ul>
         ))}
+
+      {/* ONE menu for the whole list, rendered outside the scrolling <ul>.
+          Rendered per-row it was clipped by the list's own overflow; rendered
+          once here and positioned `fixed`, it sits above everything. */}
+      {menu && (
+        <div
+          role="menu"
+          className="md-menu"
+          style={{ left: menu.x, top: menu.y, transform: "translateX(-100%)" }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            type="button"
+            role="menuitem"
+            className="md-body-small md-menu-item"
+            onClick={() => {
+              const target = parleyConversations[mode].find(
+                (c) => c.id === menu.id,
+              );
+              setDraft(target?.title ?? "");
+              setRenaming(menu.id);
+              setMenu(null);
+            }}
+          >
+            <IconEdit className="h-3.5 w-3.5" />
+            Rename
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="md-body-small md-menu-item md-menu-item-danger"
+            onClick={() => void remove(menu.id)}
+          >
+            <IconTrash className="h-3.5 w-3.5" />
+            Delete
+          </button>
+        </div>
+      )}
     </div>
   );
 }

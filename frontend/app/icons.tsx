@@ -81,6 +81,24 @@ export const IconWave = (p: Props) => (
   </Svg>
 );
 
+/** Rename. */
+export const IconEdit = (p: Props) => (
+  <Svg {...p}>
+    <path d="M4 20h4l10-10-4-4L4 16Z" />
+    <path d="M14.5 5.5 18.5 9.5" />
+  </Svg>
+);
+
+/** Overflow menu. Three dots, drawn rather than typed as "⋯" — the character
+ *  renders at a different size and baseline in every font. */
+export const IconMore = (p: Props) => (
+  <Svg {...p}>
+    <circle cx="12" cy="5" r="1.4" fill="currentColor" />
+    <circle cx="12" cy="12" r="1.4" fill="currentColor" />
+    <circle cx="12" cy="19" r="1.4" fill="currentColor" />
+  </Svg>
+);
+
 /** Playback. */
 export const IconPlay = (p: Props) => (
   <Svg {...p}>
