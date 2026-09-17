@@ -277,7 +277,7 @@ def client() -> genai.Client:
 
 
 async def record_profile(
-    session_id: uuid.UUID, args: dict
+    session_id: uuid.UUID, args: dict, turns: int = 0
 ) -> tuple[str, dict, bool]:
     """Fold what the model just learned into the stored profile.
 
@@ -305,6 +305,8 @@ async def record_profile(
     await name_conversation(session_id, merged)
 
     done = profile.complete(merged)
+    if done:
+        await _mark_completed(session_id, turns)
     log.info(
         "profile_recorded",
         fields=sorted(args),
@@ -315,7 +317,12 @@ async def record_profile(
 
 
 async def run_tool_call(
-    call: Any, *, owner_id: str | None, top_k: int, session_id: uuid.UUID | None = None
+    call: Any,
+    *,
+    owner_id: str | None,
+    top_k: int,
+    session_id: uuid.UUID | None = None,
+    turns: int = 0,
 ) -> tuple[types.FunctionResponse, dict]:
     """Execute one tool the live model asked for, on the real corpus.
 
@@ -333,6 +340,35 @@ async def run_tool_call(
     # The model declaring the conversation over. Nothing is retrieved and
     # nothing is asked; the browser stops reopening the microphone.
     if name == profile.END_TOOL:
+        # REFUSED WHEN THE CLOSING QUESTION HAS NOT BEEN ANSWERED.
+        #
+        # The prompt says to ask whether there is anything to add and wait for
+        # the reply. Observed doing neither: it asked "is there anything else
+        # you would like to share about your career goals or background?" and
+        # ended in the same breath, so the participant was shown a closed
+        # session instead of a chance to answer.
+        #
+        # The instruction was not enough, so this is structural. `turns` counts
+        # what the participant has said; an end arriving on the same turn the
+        # profile completed is refused, with a tool result telling the model
+        # plainly to wait. It may end on the next turn.
+        if session_id is not None and not await _may_end(session_id, turns):
+            log.info("end_interview_too_early", turns=turns)
+            return (
+                types.FunctionResponse(
+                    id=call.id,
+                    name=name,
+                    response={
+                        "result": (
+                            "NOT YET. You have just asked whether they want to "
+                            "add anything, and they have not answered. Wait for "
+                            "their reply, record it, and only then end."
+                        )
+                    },
+                ),
+                {"tool": name, "args": args, "n": 0, "sources": [], "ended": False},
+            )
+
         summary = str(args.get("summary") or "").strip()
         if session_id is not None and summary:
             await store_summary(session_id, summary)
@@ -360,7 +396,7 @@ async def run_tool_call(
                 ),
                 {"tool": name, "args": args, "n": 0, "sources": []},
             )
-        observation, merged, done = await record_profile(session_id, args)
+        observation, merged, done = await record_profile(session_id, args, turns)
         return (
             types.FunctionResponse(id=call.id, name=name, response={"result": observation}),
             {
@@ -557,6 +593,48 @@ async def name_conversation(session_id: uuid.UUID, profile_data: dict) -> None:
                 log.info("interview_named", name=name[:60])
     except Exception as exc:  # noqa: BLE001 - a title is never worth a failure
         log.warning("live_name_failed", error=str(exc)[:200])
+
+
+async def _may_end(session_id: uuid.UUID, turns: int) -> bool:
+    """Has the participant spoken since the profile was completed?
+
+    The turn on which the last required field lands is the same turn the model
+    announces it has everything and asks whether there is anything to add. The
+    answer to THAT is frequently the most useful thing in the profile, because
+    it is the only part the participant chose -- so ending on that turn throws
+    away the one thing they volunteered.
+    """
+    from app.db.models import ChatSession
+    from app.db.session import SessionLocal
+
+    try:
+        async with SessionLocal() as db:
+            chat = await db.get(ChatSession, session_id)
+            completed_on = (chat.profile or {}).get("completed_on") if chat else None
+        # No record of completion means there is nothing to wait for. Never
+        # block an ending on missing bookkeeping.
+        return completed_on is None or turns > int(completed_on)
+    except Exception as exc:  # noqa: BLE001 - a read must not trap the model
+        log.warning("may_end_check_failed", error=str(exc)[:200])
+        return True
+
+
+async def _mark_completed(session_id: uuid.UUID, turns: int) -> None:
+    """Remember the turn on which the profile first became complete."""
+    from app.db.models import ChatSession
+    from app.db.session import SessionLocal
+
+    try:
+        async with SessionLocal() as db:
+            chat = await db.get(ChatSession, session_id)
+            if chat is None or (chat.profile or {}).get("completed_on") is not None:
+                return
+            merged = dict(chat.profile or {})
+            merged["completed_on"] = turns
+            chat.profile = merged
+            await db.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("mark_completed_failed", error=str(exc)[:200])
 
 
 async def store_summary(session_id: uuid.UUID, summary: str) -> None:

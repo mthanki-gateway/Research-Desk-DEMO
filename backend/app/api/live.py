@@ -342,8 +342,18 @@ async def live_socket(
             # the user can be speaking while it is still answering. Running
             # these sequentially would reintroduce the turn-taking the cascade
             # was stuck with.
-            uplink = asyncio.create_task(_uplink(ws, session))
-            downlink = asyncio.create_task(_downlink(ws, session, user, chat.id))
+            # Shared between the two directions.
+            #
+            # `turns` counts what the PARTICIPANT has said, and is the guard
+            # against ending an interview before the closing question has been
+            # answered -- see `run_tool_call`. The uplink knows when a turn is
+            # sent; the tool layer decides whether the model may end.
+            turn_state: dict[str, int] = {"turns": 0}
+
+            uplink = asyncio.create_task(_uplink(ws, session, turn_state))
+            downlink = asyncio.create_task(
+                _downlink(ws, session, user, chat.id, turn_state)
+            )
 
             done, pending = await asyncio.wait(
                 {uplink, downlink}, return_when=asyncio.FIRST_COMPLETED
@@ -378,7 +388,7 @@ async def live_socket(
         log.info("live_session_closed")
 
 
-async def _uplink(ws: WebSocket, session) -> None:
+async def _uplink(ws: WebSocket, session, turn_state: dict) -> None:
     """Browser audio into the model."""
     while True:
         message = await ws.receive()
@@ -414,10 +424,13 @@ async def _uplink(ws: WebSocket, session) -> None:
         if kind == "start":
             await session.send_realtime_input(activity_start=types.ActivityStart())
         elif kind == "end":
+            turn_state["turns"] += 1
             await session.send_realtime_input(activity_end=types.ActivityEnd())
 
 
-async def _downlink(ws: WebSocket, session, user: User, chat_id) -> None:
+async def _downlink(
+    ws: WebSocket, session, user: User, chat_id, turn_state: dict
+) -> None:
     """Model audio, transcripts and tool calls out to the browser."""
     settings = get_settings()
     spoke = False
@@ -547,6 +560,7 @@ async def _downlink(ws: WebSocket, session, user: User, chat_id) -> None:
                         owner_id=user.owner_id,
                         top_k=settings.retrieval_top_k,
                         session_id=chat_id,
+                        turns=turn_state["turns"],
                     )
                     responses.append(response)
                     # Reported as it happens, not at the end. A search takes a

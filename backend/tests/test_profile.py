@@ -268,6 +268,36 @@ class TestDensity:
         assert "THIN" not in profile.render(p)
 
 
+class TestInventedFields:
+    """The model can pass any key it likes. None of them become a column.
+
+    `salary_expectation` and `favourite_language` used to be stored verbatim as
+    profile keys -- and the card renders only the DECLARED fields, so they were
+    written to the database and then invisible to everyone. The worst of both:
+    the information was captured and could not be read.
+    """
+
+    def test_an_unknown_key_becomes_an_other_note(self):
+        p = profile.merge({}, {"salary_expectation": "120k"})
+        assert "salary_expectation" not in p
+        assert p["notes"]["other"] == ["salary expectation: 120k"]
+
+    def test_an_unknown_list_is_flattened_into_the_note(self):
+        p = profile.merge({}, {"favourite_languages": ["Rust", "Go"]})
+        assert p["notes"]["other"] == ["favourite languages: Rust, Go"]
+
+    def test_declared_fields_are_untouched(self):
+        p = profile.merge({}, {"full_name": "John", "location": "Ahmedabad"})
+        assert p["full_name"] == "John"
+        assert p["location"] == "Ahmedabad"
+        assert "notes" not in p
+
+    def test_a_real_field_and_an_invented_one_in_one_call(self):
+        p = profile.merge({}, {"full_name": "John", "salary_expectation": "120k"})
+        assert p["full_name"] == "John"
+        assert p["notes"]["other"] == ["salary expectation: 120k"]
+
+
 class TestCompleteness:
     def test_an_empty_profile_is_missing_everything_required(self):
         assert set(profile.missing({})) == set(profile.REQUIRED)

@@ -312,6 +312,24 @@ def merge(existing: dict, update: dict) -> dict:
             continue
         if value is None or value == "" or value == []:
             continue
+
+        # AN INVENTED FIELD BECOMES A NOTE, rather than a column nobody sees.
+        #
+        # The model passes whatever it likes: `salary_expectation`,
+        # `favourite_language`. Those used to be stored verbatim as profile
+        # keys -- and the card renders only the declared fields, so they were
+        # written to the database and then invisible to everyone, which is the
+        # worst of both. Filed under `other`, the information survives and
+        # shows up where the reader is already looking.
+        if key not in FIELD_NAMES:
+            merged = _fold(
+                merged,
+                [{"field": OTHER, "note": f"{key.replace('_', ' ')}: {_flat(value)}"}],
+                NOTES_KEY,
+                _NOTE_KEYS,
+            )
+            continue
+
         if isinstance(value, list):
             seen = list(merged.get(key) or [])
             for item in value:
@@ -322,6 +340,13 @@ def merge(existing: dict, update: dict) -> dict:
         else:
             merged[key] = value
     return merged
+
+
+def _flat(value: Any) -> str:
+    """A tool argument as one readable phrase."""
+    if isinstance(value, list):
+        return ", ".join(str(v) for v in value)
+    return str(value)
 
 
 def _fold(merged: dict, incoming: list, bucket_key: str, text_keys: tuple) -> dict:

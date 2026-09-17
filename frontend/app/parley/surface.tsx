@@ -664,12 +664,20 @@ function Parley({ mode }: { mode: Mode }) {
               </p>
             ))}
             {inFlight.answer && (
-              <p
-                className="md-body-medium text-center"
-                style={{ color: "var(--md-on-surface-variant)" }}
-              >
-                {inFlight.answer}
-              </p>
+              <div className="text-center">
+                <p
+                  className="md-label-medium"
+                  style={{ color: "var(--md-on-surface-variant)" }}
+                >
+                  AI Assistant
+                </p>
+                <p
+                  className="md-body-medium"
+                  style={{ color: "var(--md-on-surface-variant)" }}
+                >
+                  {inFlight.answer}
+                </p>
+              </div>
             )}
           </div>
         )}
@@ -943,7 +951,7 @@ function MicButton({
 
 function Turn({ exchange }: { exchange: Exchange }) {
   return (
-    <li className="md-card md-card-elevated space-y-3 p-5">
+    <li className="md-card md-card-elevated space-y-1.5 p-5">
       {/* THE ANSWER ONLY. What the participant said used to sit above it, taken
           from `input_transcription` -- a separate, lossier pass that rendered
           someone saying their name was John as "madre es un", directly above
@@ -954,13 +962,23 @@ function Turn({ exchange }: { exchange: Exchange }) {
           The reply carries the question anyway. "Thanks, John, how many years
           of experience do you have?" tells you what was asked and confirms what
           was heard, in the words of the thing that actually heard it. */}
+      {/* LABELLED, because the card now holds only one side of the exchange.
+          With the participant's line removed there is nothing to contrast
+          against, and an unattributed paragraph reads as the app talking
+          rather than the assistant. */}
+      <p
+        className="md-label-medium"
+        style={{ color: "var(--md-on-surface-variant)" }}
+      >
+        AI Assistant
+      </p>
       <p className="md-body-medium whitespace-pre-wrap">
         {exchange.answer || <em>no answer</em>}
       </p>
 
       {exchange.recorded.length > 0 && (
         <div
-          className="border-t pt-3"
+          className="mt-3 border-t pt-3"
           style={{ borderColor: "var(--md-outline-variant)" }}
         >
           <p
@@ -975,7 +993,7 @@ function Turn({ exchange }: { exchange: Exchange }) {
         </div>
       )}
 
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="mt-3 flex flex-wrap items-center gap-2">
         {exchange.tools.map((t, i) => (
           <span key={`${t.tool}-${i}`} className="md-badge">
             {toolLabel(t.tool)}
