@@ -1,6 +1,6 @@
 """Does a native audio-to-audio model actually do the job? Measured, not assumed.
 
-Three things have to be true before rebuilding Earshot on the Live API:
+Three things have to be true before rebuilding Parley on the Live API:
 
   1. audio in, audio out, with no transcript in the middle
   2. it calls OUR tools while doing it

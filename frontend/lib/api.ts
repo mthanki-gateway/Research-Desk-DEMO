@@ -969,7 +969,7 @@ export async function getQueryRay(messageId: string): Promise<QueryRay> {
 
 
 // ---------------------------------------------------------------------------
-// Earshot — the audio-only app
+// Parley — the audio-only app
 // ---------------------------------------------------------------------------
 
 export type VoiceOption = {
@@ -1049,7 +1049,7 @@ export function audioUrl(turn: VoiceTurn): string {
 
 
 // ---------------------------------------------------------------------------
-// Earshot — the live, native-audio session
+// Parley — the live, native-audio session
 //
 // The cascade endpoints above (`/voice/ask`) are kept: they are a working
 // reference implementation of the other architecture, and the difference

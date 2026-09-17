@@ -6,7 +6,7 @@ import { getAccessToken } from "@/lib/supabase";
  *
  * THE SHAPE OF THIS IS DIFFERENT FROM THE CASCADE IT REPLACES.
  *
- * The first Earshot recorded a whole question, POSTed a WAV, waited, and
+ * The first Parley recorded a whole question, POSTed a WAV, waited, and
  * played a WAV back. Request and response. This streams: audio leaves as it is
  * captured and arrives as it is generated, so the first sound comes back about
  * three seconds after the button rather than twelve to fifty.
@@ -27,8 +27,51 @@ import { getAccessToken } from "@/lib/supabase";
 const INPUT_RATE = 16_000;
 const OUTPUT_RATE = 24_000;
 
+/**
+ * The handle that survives a dropped socket.
+ *
+ * A live session's history lives SERVER-SIDE, inside the connection: we send
+ * no transcript and no prior turns. Measured — within one socket the model
+ * recalls turn 1 at turn 3; on a fresh socket it correctly says it has no
+ * access to anything said before.
+ *
+ * The socket closes on its own (idle timeout, a `go_away`, a voice change), so
+ * without this a conversation with a pause in the middle silently forgets
+ * everything before it, and the user is given no sign at all.
+ *
+ * `sessionStorage`, not `localStorage`: a handle belongs to one tab's
+ * conversation, and a second tab resuming the first one's session would put
+ * two microphones into a single context. It is also wrapped, because storage
+ * throws in a private window.
+ */
+const HANDLE_KEY = "parley.resume";
+
+function rememberHandle(handle: string) {
+  try {
+    sessionStorage.setItem(HANDLE_KEY, handle);
+  } catch {
+    // A conversation that cannot survive a reconnect is still a conversation.
+  }
+}
+
+export function forgetHandle() {
+  try {
+    sessionStorage.removeItem(HANDLE_KEY);
+  } catch {
+    /* nothing to do */
+  }
+}
+
+function storedHandle(): string {
+  try {
+    return sessionStorage.getItem(HANDLE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
 export type LiveEvent =
-  | { type: "ready"; voice: string }
+  | { type: "ready"; voice: string; resumed: boolean }
   | { type: "heard"; text: string }
   | { type: "said"; text: string }
   | {
@@ -39,6 +82,10 @@ export type LiveEvent =
       sources: { label: string; kind: "document" | "web"; url: string | null }[];
     }
   | { type: "turn_end" }
+  /** Held by the session; surfaced so the UI can say the history is safe. */
+  | { type: "resume"; handle: string }
+  /** The server is about to drop us. Reconnecting now keeps the context. */
+  | { type: "going_away"; in: string }
   | { type: "error"; detail: string }
   | { type: "closed" }
   /** Not from the server: emitted locally when the queue drains. */
@@ -68,6 +115,8 @@ export async function openLiveSession(
   const url = new URL(browserBase.replace(/^http/, "ws") + "/live/ws");
   if (token) url.searchParams.set("token", token);
   url.searchParams.set("voice_name", voiceName);
+  const resume = storedHandle();
+  if (resume) url.searchParams.set("resume", resume);
 
   const ws = new WebSocket(url.toString());
   ws.binaryType = "arraybuffer";
@@ -203,7 +252,12 @@ export async function openLiveSession(
       return;
     }
     try {
-      onEvent(JSON.parse(event.data) as LiveEvent);
+      const parsed = JSON.parse(event.data) as LiveEvent;
+      // Stored here rather than passed up: every caller would have to
+      // remember to persist it, and the one that forgot would lose the
+      // conversation silently.
+      if (parsed.type === "resume") rememberHandle(parsed.handle);
+      onEvent(parsed);
     } catch {
       // A frame we cannot parse is not worth killing the session over.
     }

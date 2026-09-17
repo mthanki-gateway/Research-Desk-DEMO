@@ -94,6 +94,48 @@ class TestTheButtonOwnsTheTurn:
         assert detection.silence_duration_ms is None
 
 
+class TestSessionResumption:
+    """The conversation has to survive a socket that dies on its own.
+
+    A live session's history lives SERVER-SIDE, inside the connection: we send
+    no transcript and no prior turns. Measured -- within one socket the model
+    recalls turn 1 at turn 3; on a fresh socket it says, correctly, that it has
+    no access to anything said before.
+
+    The socket closes by itself. Gemini drops an idle one and announces a hard
+    lifetime cap through `go_away`. Without resumption a conversation with a
+    pause in the middle forgets everything before the pause AND SAYS NOTHING --
+    the assistant simply goes on answering confidently from an empty context.
+
+    Verified end to end with a control: state a fact, reconnect with the
+    handle -> recalled; reconnect without it -> not recalled.
+    """
+
+    def test_a_fresh_session_asks_for_handles(self):
+        """An empty config REQUESTS resumption without resuming anything.
+
+        Omitting it entirely means no handle is ever issued, and the first
+        disconnection is unrecoverable.
+        """
+        cfg = live.config("Kore")
+        assert cfg.session_resumption is not None
+        assert cfg.session_resumption.handle is None
+
+    def test_a_handle_is_passed_through(self):
+        cfg = live.config("Kore", "handle-abc")
+        assert cfg.session_resumption.handle == "handle-abc"
+
+    def test_an_empty_handle_is_not_treated_as_one(self):
+        """The route passes `resume or None`; this pins the other half.
+
+        A blank string sent as a handle is rejected by the API, so a client
+        that omits the parameter would fail to connect at all rather than
+        starting fresh.
+        """
+        cfg = live.config("Kore", None)
+        assert cfg.session_resumption.handle is None
+
+
 class TestTrailingSilence:
     """The single least obvious thing in the app.
 

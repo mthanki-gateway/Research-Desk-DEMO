@@ -1,4 +1,4 @@
-"""Earshot's two silent failure modes.
+"""Parley's two silent failure modes.
 
 Neither of these raises. Both produce a turn that completes, returns a
 plausible-looking payload, and is wrong in a way nobody can see from the

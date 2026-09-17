@@ -49,9 +49,9 @@ entry there plus its pages; the drawer, the app switcher and active-item
 highlighting all read from it. Do not hardcode nav items anywhere else.
 
 Three today — **Research Desk** (chat, library, lab, atlas), **Model Lab**
-(playground, transcribe) and **Earshot** (voice).
+(playground, transcribe) and **Parley** (voice).
 
-Earshot is a different DOOR onto the same corpus, not a second assistant. A
+Parley is a different DOOR onto the same corpus, not a second assistant. A
 document uploaded in the Library is answerable out loud the moment it finishes
 indexing. If you find yourself adding a second index for it, that is the
 mistake.

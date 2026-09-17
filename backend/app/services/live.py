@@ -1,8 +1,8 @@
-"""Audio to audio, natively. Earshot's engine.
+"""Audio to audio, natively. Parley's engine.
 
 WHAT CHANGED, AND WHY IT MATTERS
 
-Earshot began as a CASCADE: speech recognised to text, text answered by the
+Parley began as a CASCADE: speech recognised to text, text answered by the
 LangGraph agent, text synthesised back to speech. Three models with text in the
 middle. It worked, and it was measured at 12 to 53 seconds a turn.
 
@@ -87,7 +87,7 @@ TRAILING_SILENCE = bytes(INPUT_RATE * 2)
 # adjacent chunks in their head to compare them.
 SPOKEN_TOOLS = ("search_documents", "search_web", "list_documents", "corpus_stats")
 
-SYSTEM = """You are Earshot, a research assistant that is LISTENED TO rather \
+SYSTEM = """You are Parley, a research assistant that is LISTENED TO rather \
 than read. Everything you say is spoken aloud and heard once.
 
 YOUR TOOLS ARE THE POINT. You have the user's own uploaded documents and the \
@@ -168,7 +168,7 @@ def _declarations() -> list[types.FunctionDeclaration]:
     return out
 
 
-def config(voice: str) -> types.LiveConnectConfig:
+def config(voice: str, resume: str | None = None) -> types.LiveConnectConfig:
     reach = (
         ""
         if websearch.enabled()
@@ -212,13 +212,32 @@ def config(voice: str) -> types.LiveConnectConfig:
                 disabled=True
             )
         ),
+        # SESSION RESUMPTION. The conversation survives a dropped socket.
+        #
+        # A live session's history lives SERVER-SIDE, inside the connection --
+        # we send no transcript and no prior turns. Measured: within one socket
+        # the model recalls turn 1 at turn 3; on a fresh socket it correctly
+        # says it has no access to anything said before.
+        #
+        # That matters because the socket closes on its own. Gemini drops an
+        # idle one, and it announces a hard lifetime cap through `go_away`. So
+        # without this, a conversation with a pause in the middle silently
+        # forgets everything before the pause, and the user is given no sign
+        # that it happened -- the worst kind of failure, because the assistant
+        # goes on answering confidently from nothing.
+        #
+        # Passing a handle back restores the server-side context. An empty
+        # config on a fresh session ASKS for handles without resuming anything.
+        session_resumption=types.SessionResumptionConfig(handle=resume)
+        if resume
+        else types.SessionResumptionConfig(),
     )
 
 
 def client() -> genai.Client:
     settings = get_settings()
     if not settings.google_api_key:
-        raise RuntimeError("GOOGLE_API_KEY is required for Earshot.")
+        raise RuntimeError("GOOGLE_API_KEY is required for Parley.")
     return genai.Client(
         api_key=settings.google_api_key, http_options={"api_version": "v1beta"}
     )

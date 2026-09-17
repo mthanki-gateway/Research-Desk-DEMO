@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { type LiveStatus, getLiveStatus } from "@/lib/api";
 import { Switch } from "../md";
 import {
-  IconEarshot,
+  IconParley,
   IconExternal,
   IconMic,
   IconSearch,
@@ -12,10 +12,15 @@ import {
   IconStop,
   IconWave,
 } from "../icons";
-import { type LiveEvent, type LiveSession, openLiveSession } from "./liveSession";
+import {
+  type LiveEvent,
+  type LiveSession,
+  forgetHandle,
+  openLiveSession,
+} from "./liveSession";
 
 /**
- * Earshot — audio to audio, natively.
+ * Parley — audio to audio, natively.
  *
  * WHAT THIS IS NOT ANY MORE
  *
@@ -48,7 +53,29 @@ import { type LiveEvent, type LiveSession, openLiveSession } from "./liveSession
  * shown because a spoken citation cannot be clicked.
  */
 
-type Phase = "idle" | "connecting" | "listening" | "thinking" | "speaking";
+type Phase =
+  | "idle"
+  | "connecting"
+  | "listening"
+  | "thinking"
+  | "speaking"
+  /** The model has finished; the microphone reopens shortly unless stopped. */
+  | "counting";
+
+/**
+ * How long after the answer before listening resumes.
+ *
+ * A COUNTDOWN RATHER THAN EITHER EXTREME. Reopening the microphone instantly
+ * is how the model ends up hearing the room, a cough, or the tail of its own
+ * answer through the speakers. Never reopening it makes every follow-up cost a
+ * deliberate click, which is exactly the friction a voice interface exists to
+ * remove.
+ *
+ * Five seconds is long enough to read the answer on screen and decide, short
+ * enough that a natural follow-up does not need a click at all. It is
+ * cancellable, and clicking through it starts listening immediately.
+ */
+const RESTART_SECONDS = 5;
 
 type Source = { label: string; kind: "document" | "web"; url: string | null };
 
@@ -62,7 +89,7 @@ type Exchange = {
 
 const EMPTY = { question: "", answer: "", tools: [], sources: [] };
 
-export default function Earshot() {
+export default function Parley() {
   const [status, setStatus] = useState<LiveStatus | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -85,6 +112,11 @@ export default function Earshot() {
 
   const session = useRef<LiveSession | null>(null);
   const timer = useRef<number | null>(null);
+  /** The auto-restart countdown, separate from the listening clock. */
+  const countdown = useRef<number | null>(null);
+  const [remaining, setRemaining] = useState(0);
+  /** The conversation survived a reconnect — worth saying once. */
+  const [resumed, setResumed] = useState(false);
 
   useEffect(() => {
     getLiveStatus()
@@ -101,6 +133,7 @@ export default function Earshot() {
     () => () => {
       session.current?.close();
       if (timer.current) window.clearInterval(timer.current);
+      if (countdown.current) window.clearInterval(countdown.current);
     },
     [],
   );
@@ -112,6 +145,39 @@ export default function Earshot() {
     live.current = { ...EMPTY, tools: [], sources: [] };
     setTick((n) => n + 1);
   }, []);
+
+  const stopCountdown = useCallback(() => {
+    if (countdown.current) {
+      window.clearInterval(countdown.current);
+      countdown.current = null;
+    }
+    setRemaining(0);
+  }, []);
+
+  /**
+   * Hand the microphone back after the answer, with a visible delay.
+   *
+   * Declared as a ref the countdown calls, because `start` is defined below
+   * and both refer to each other — the countdown starts listening, and
+   * listening cancels any countdown.
+   */
+  const startRef = useRef<() => void>(() => {});
+
+  const beginCountdown = useCallback(() => {
+    stopCountdown();
+    setPhase("counting");
+    setRemaining(RESTART_SECONDS);
+    countdown.current = window.setInterval(() => {
+      setRemaining((n) => {
+        if (n <= 1) {
+          stopCountdown();
+          startRef.current();
+          return 0;
+        }
+        return n - 1;
+      });
+    }, 1000) as unknown as number;
+  }, [stopCountdown]);
 
   const onEvent = useCallback(
     (event: LiveEvent) => {
@@ -143,31 +209,51 @@ export default function Earshot() {
           break;
         }
         case "playback_end":
-          setPhase("idle");
           commit();
+          // Not straight back to idle: the microphone reopens on a countdown
+          // the user can see and stop.
+          beginCountdown();
           break;
         case "turn_end":
           // The model has finished GENERATING. Playback is still draining, so
           // the phase is left alone — `playback_end` ends the turn for the
           // user, and ending it here cuts off the last words.
           break;
+        case "ready":
+          setResumed(event.resumed);
+          break;
+        case "going_away":
+          // The server has announced its own disconnection. Dropping the
+          // socket NOW, while a resume handle is held, turns a dying session
+          // into an invisible reconnect — the alternative is losing the
+          // conversation mid-sentence with no warning to the user.
+          session.current?.close();
+          session.current = null;
+          break;
         case "error":
           setError(event.detail);
+          stopCountdown();
           setPhase("idle");
           break;
         case "closed":
           session.current = null;
-          setPhase("idle");
+          // Only fall back to idle if nothing is in flight. A close that
+          // arrives while the countdown is running is the idle timeout doing
+          // its job, and interrupting the countdown for it would be wrong.
+          setPhase((p) => (p === "counting" ? p : "idle"));
           break;
         default:
           break;
       }
     },
-    [commit],
+    [commit, beginCountdown, stopCountdown],
   );
 
   const start = useCallback(async () => {
     setError(null);
+    // Clicking through the countdown starts listening NOW. The countdown is a
+    // convenience, never a thing to wait out.
+    stopCountdown();
     try {
       if (!session.current) {
         setPhase("connecting");
@@ -193,7 +279,13 @@ export default function Earshot() {
           : "The microphone was refused, or the session could not open.",
       );
     }
-  }, [voiceName, onEvent]);
+  }, [voiceName, onEvent, stopCountdown]);
+
+  // The countdown calls whatever `start` currently is, without either of them
+  // having to be declared before the other.
+  useEffect(() => {
+    startRef.current = () => void start();
+  }, [start]);
 
   const stop = useCallback(() => {
     if (timer.current) {
@@ -206,23 +298,30 @@ export default function Earshot() {
   }, []);
 
   const hangUp = useCallback(() => {
+    stopCountdown();
     session.current?.close();
     session.current = null;
     setPhase("idle");
     commit();
-  }, [commit]);
+    // A deliberate hang-up ENDS the conversation. Keeping the handle would
+    // silently resume it days later, which is not what closing a session
+    // means to anyone.
+    forgetHandle();
+    setResumed(false);
+  }, [commit, stopCountdown]);
 
   const busy = phase === "thinking" || phase === "connecting";
   const listening = phase === "listening";
   const speaking = phase === "speaking";
+  const counting = phase === "counting";
   const inFlight = live.current;
 
   return (
     <div className="mx-auto max-w-3xl space-y-6 px-6 py-9">
       <header>
         <h1 className="md-headline-small flex items-center gap-2">
-          <IconEarshot className="h-6 w-6" />
-          Earshot
+          <IconParley className="h-6 w-6" />
+          Parley
         </h1>
         <p
           className="md-body-medium mt-1"
@@ -244,13 +343,14 @@ export default function Earshot() {
         <MicButton
           phase={phase}
           level={level}
+          remaining={remaining}
           disabled={!status?.enabled}
           onStart={() => void start()}
           onStop={stop}
           onStopSpeaking={() => {
             session.current?.stopSpeaking();
-            setPhase("idle");
             commit();
+            beginCountdown();
           }}
         />
 
@@ -263,7 +363,9 @@ export default function Earshot() {
                 ? "Thinking"
                 : speaking
                   ? "Speaking — click to stop"
-                  : "Click to speak"}
+                  : counting
+                    ? `Listening again in ${remaining}…`
+                    : "Click to speak"}
         </p>
 
         <p
@@ -272,10 +374,38 @@ export default function Earshot() {
         >
           {listening
             ? "It will not answer until you click. Pausing mid-sentence is fine."
-            : status?.web_search
-              ? "Your documents and the web."
-              : "Your documents. Web search is not configured."}
+            : counting
+              ? "Click to start now, or stay quiet to cancel."
+              : status?.web_search
+                ? "Your documents and the web."
+                : "Your documents. Web search is not configured."}
         </p>
+
+        {counting && (
+          <button
+            type="button"
+            onClick={() => {
+              stopCountdown();
+              setPhase("idle");
+            }}
+            className="md-label-large rounded-[var(--md-shape-full)] px-4 py-2"
+            style={{
+              background: "var(--md-surface-container-high)",
+              color: "var(--md-on-surface)",
+            }}
+          >
+            Stay quiet
+          </button>
+        )}
+
+        {resumed && (
+          <p
+            className="md-body-small text-center"
+            style={{ color: "var(--md-on-surface-variant)" }}
+          >
+            Reconnected — the earlier conversation was restored.
+          </p>
+        )}
 
         {(inFlight.question || inFlight.tools.length > 0 || inFlight.answer) && (
           <div className="w-full space-y-2 pt-2" key={tick}>
@@ -306,6 +436,37 @@ export default function Earshot() {
           </div>
         )}
       </section>
+
+      {/* The settings pane only exists once /live/status has answered, so the
+          page previously grew by a whole card a moment after it painted —
+          pushing the transcript down and making the layout jump under the
+          reader. A skeleton of the same height holds the space. */}
+      {!status && !error && (
+        <section
+          className="md-card md-card-outlined divide-y"
+          style={{ borderColor: "var(--md-outline-variant)" }}
+          aria-hidden
+        >
+          <div className="flex items-center justify-between gap-4 p-4">
+            <span className="w-full space-y-2">
+              <span className="md-skeleton block h-4 w-24" />
+              <span className="md-skeleton block h-3 w-52" />
+            </span>
+            <span className="md-skeleton block h-9 w-24 shrink-0" />
+          </div>
+          <div className="flex items-center justify-between gap-4 p-4">
+            <span className="w-full space-y-2">
+              <span className="md-skeleton block h-4 w-56" />
+              <span className="md-skeleton block h-3 w-72" />
+            </span>
+            <span className="md-skeleton block h-7 w-12 shrink-0" />
+          </div>
+          <div className="flex items-center justify-between gap-4 px-4 py-3">
+            <span className="md-skeleton block h-3 w-16" />
+            <span className="md-skeleton block h-3 w-48" />
+          </div>
+        </section>
+      )}
 
       {status?.enabled && (
         <section
@@ -372,7 +533,11 @@ export default function Earshot() {
         </section>
       )}
 
-      {exchanges.length === 0 && !inFlight.question ? (
+      {!status && !error ? (
+        <div className="space-y-2" aria-hidden>
+          <span className="md-skeleton block h-4 w-80" />
+        </div>
+      ) : exchanges.length === 0 && !inFlight.question ? (
         <p
           className="md-body-medium"
           style={{ color: "var(--md-on-surface-variant)" }}
@@ -442,6 +607,7 @@ function Row({
 function MicButton({
   phase,
   level,
+  remaining,
   disabled,
   onStart,
   onStop,
@@ -449,6 +615,7 @@ function MicButton({
 }: {
   phase: Phase;
   level: number;
+  remaining: number;
   disabled?: boolean;
   onStart: () => void;
   onStop: () => void;
@@ -456,9 +623,13 @@ function MicButton({
 }) {
   const listening = phase === "listening";
   const speaking = phase === "speaking";
+  const counting = phase === "counting";
   const busy = phase === "thinking" || phase === "connecting";
 
   const ring = listening ? Math.min(26, Math.round(level * 90)) : 0;
+  // During the countdown the button is the SAME button and does the same
+  // thing it does from idle — start listening. Clicking through is the fast
+  // path, not a special case.
   const onClick = listening ? onStop : speaking ? onStopSpeaking : onStart;
 
   return (
@@ -471,7 +642,9 @@ function MicButton({
           ? "Stop and send"
           : speaking
             ? "Stop speaking"
-            : "Start speaking"
+            : counting
+              ? `Start listening now (otherwise in ${remaining} seconds)`
+              : "Start speaking"
       }
       className="relative grid h-32 w-32 place-items-center rounded-[var(--md-shape-full)] transition-transform active:scale-95 disabled:opacity-60"
       style={{
@@ -479,12 +652,16 @@ function MicButton({
           ? "var(--md-error)"
           : speaking
             ? "var(--md-tertiary)"
-            : "var(--md-primary)",
+            : counting
+              ? "var(--md-secondary-container)"
+              : "var(--md-primary)",
         color: listening
           ? "var(--md-on-error)"
           : speaking
             ? "var(--md-on-tertiary)"
-            : "var(--md-on-primary)",
+            : counting
+              ? "var(--md-on-secondary-container)"
+              : "var(--md-on-primary)",
         // A box-shadow rather than a scaled element, so the ring cannot reflow
         // anything around it as the level moves.
         boxShadow: ring
@@ -498,6 +675,8 @@ function MicButton({
         <IconStop className="h-12 w-12" />
       ) : speaking ? (
         <IconWave className="h-12 w-12" />
+      ) : counting ? (
+        <span className="md-headline-small tabular-nums">{remaining}</span>
       ) : (
         <IconMic className="h-12 w-12" />
       )}

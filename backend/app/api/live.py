@@ -27,6 +27,8 @@ Us to browser:
     {"type":"said","text"}      what it is saying, for the screen
     {"type":"tool", ...}        which tool ran, and what it found
     {"type":"turn_end"}         the model has finished speaking
+    {"type":"resume","handle"}  hold this; it restores the conversation
+    {"type":"going_away","in"}  the server is about to drop us; reconnect
     {"type":"error","detail"}   something failed, in words
 
 Text frames are JSON; audio frames are raw bytes. The split is deliberate:
@@ -99,6 +101,7 @@ async def live_socket(
     ws: WebSocket,
     token: str = Query(default=""),
     voice_name: str = Query(default=""),
+    resume: str = Query(default=""),
 ) -> None:
     await ws.accept()
 
@@ -128,10 +131,19 @@ async def live_socket(
     try:
         client = live.client()
         async with client.aio.live.connect(
-            model=settings.live_model, config=live.config(chosen)
+            model=settings.live_model, config=live.config(chosen, resume or None)
         ) as session:
-            await ws.send_text(json.dumps({"type": "ready", "voice": chosen}))
-            log.info("live_session_open", owner=bool(user.owner_id), voice=chosen)
+            await ws.send_text(
+                json.dumps(
+                    {"type": "ready", "voice": chosen, "resumed": bool(resume)}
+                )
+            )
+            log.info(
+                "live_session_open",
+                owner=bool(user.owner_id),
+                voice=chosen,
+                resumed=bool(resume),
+            )
 
             # Two directions at once, which is the whole point of a live model:
             # the user can be speaking while it is still answering. Running
@@ -248,6 +260,29 @@ async def _downlink(ws: WebSocket, session, user: User) -> None:
                     # before a word has been said.
                     spoke = False
                     await ws.send_text(json.dumps({"type": "turn_end"}))
+
+            # THE HANDLE THAT MAKES A RECONNECT INVISIBLE.
+            #
+            # Sent to the browser rather than stored here, deliberately: the
+            # server holds no per-user state for this app, and a handle kept in
+            # process memory would be lost on the next deploy -- which is
+            # exactly when reconnects happen in bulk.
+            update = message.session_resumption_update
+            if update and update.resumable and update.new_handle:
+                await ws.send_text(
+                    json.dumps({"type": "resume", "handle": update.new_handle})
+                )
+
+            # The server announcing its own disconnection, with time to spare.
+            # Live sessions have a hard lifetime; this is the warning, and
+            # acting on it is the difference between a seamless reconnect and
+            # a conversation that dies mid-sentence.
+            if message.go_away:
+                left = message.go_away.time_left
+                log.info("live_going_away", time_left=str(left))
+                await ws.send_text(
+                    json.dumps({"type": "going_away", "in": str(left)})
+                )
 
             if message.tool_call:
                 responses = []

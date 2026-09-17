@@ -1,4 +1,4 @@
-"""Earshot: one spoken turn, end to end.
+"""Parley: one spoken turn, end to end.
 
 WHAT THIS IS
 
@@ -194,7 +194,7 @@ async def ask(
     #
     # Per turn rather than per session, matching the chat path: the state
     # accumulators use append reducers, so a reused thread grows without bound
-    # and leaks an earlier question's evidence into a later answer. Earshot
+    # and leaks an earlier question's evidence into a later answer. Parley
     # keeps no conversation in graph state at all, so a fresh uuid is exactly
     # right -- the checkpointer's job here is durability within one run.
     result = await run_agent(
@@ -203,7 +203,7 @@ async def ask(
         top_k=top_k or None,
         preferences=SPOKEN_STYLE,
         clarify=False,
-        thread_id=f"earshot:{uuid.uuid4()}",
+        thread_id=f"parley:{uuid.uuid4()}",
     )
 
     answer = (result.answer or "").strip()

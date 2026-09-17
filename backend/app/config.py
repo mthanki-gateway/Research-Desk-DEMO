@@ -313,7 +313,7 @@ class Settings(BaseSettings):
     answer_tokens_per_minute: int = 250_000
     answer_requests_per_minute: int = 5
 
-    # ---- Earshot: the audio-only app -------------------------------------
+    # ---- Parley: the audio-only app -------------------------------------
     #
     # STT is an ORDINARY generateContent call with an audio part, not a
     # dedicated speech endpoint -- which is why it names a normal model. The
@@ -344,7 +344,7 @@ class Settings(BaseSettings):
     ]
     voice_default: str = "Kore"
 
-    # THE NATIVE AUDIO MODEL. Earshot's engine.
+    # THE NATIVE AUDIO MODEL. Parley's engine.
     #
     # Not a TTS model and not an STT model -- audio in and audio out, with no
     # transcript in the middle. Measured on this deployment, same question and
