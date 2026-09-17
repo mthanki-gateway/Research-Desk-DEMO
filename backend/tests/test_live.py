@@ -4,6 +4,7 @@ Neither raises. Both produce a session that connects, accepts audio, and then
 sits there — which in an audio-only app is indistinguishable from a crash.
 """
 
+import asyncio
 import uuid
 
 import pytest
@@ -283,7 +284,12 @@ class TestModes:
         would drift the moment either was improved.
         """
         howler = live.MODES["howler"]["system"]
-        for craft in ("ONE question at a time", "DO NOT LEAD", "QUOTE THEM"):
+        for craft in (
+            "ASK ONE QUESTION THAT EARNS ITS PLACE",
+            "MINE THE ANSWER BEFORE YOU ASK AGAIN",
+            "DO NOT LEAD",
+            "QUOTE THEM",
+        ):
             assert craft in " ".join(howler.split()), craft
 
     def test_howler_does_not_inherit_the_fixed_field_list(self):
@@ -379,9 +385,26 @@ the talking". Matching the
 class TestInterviewPrompt:
     """The behaviours that make an interview an interview rather than a chat."""
 
-    def test_one_question_at_a_time(self):
-        """Two questions in one breath gets an answer to the second only."""
-        assert "ONE question at a time" in _flat("interview")
+    def test_it_asks_compound_questions_but_not_scattered_ones(self):
+        """One question may cover several related things. Not unrelated ones.
+
+        The rule used to be a flat "one question at a time", which produced an
+        interrogation: twenty small questions in a row is what makes somebody
+        start answering in single words. A question covering one subject from
+        several sides gets a paragraph instead. What still does not work is two
+        UNRELATED questions in a breath -- that reliably loses the first.
+        """
+        text = _flat("interview")
+        assert "ASK ONE QUESTION THAT EARNS ITS PLACE" in text
+        assert "UNRELATED questions in a breath" in text
+
+    def test_it_mines_the_answer_before_asking_again(self):
+        """A compound question is answered with more than it asked for.
+
+        Taking one fact out of an answer and moving on is how an interviewer
+        ends up asking about something it was just told.
+        """
+        assert "MINE THE ANSWER BEFORE YOU ASK AGAIN" in _flat("interview")
 
     def test_it_is_told_to_follow_up_on_vague_answers(self):
         """"It's going well" is a deflection, not an answer."""
@@ -528,3 +551,75 @@ def _capture(monkeypatch, *, start: str) -> list[str]:
         "app.db.session.SessionLocal", lambda: Session(), raising=False
     )
     return titles
+
+
+class TestParticipantEnding:
+    """Ending it yourself, and why that is not the same as the model ending it.
+
+    The model ends when it has what it came for. A person ends when they have
+    had enough -- and a half-filled profile somebody walked out of is a
+    different finding from one the interviewer could not get answers to.
+    Without `ended_by` both read as "complete", which is the thing this records
+    to prevent.
+    """
+
+    def test_it_records_who_ended_it(self, monkeypatch):
+        stored: dict = {}
+
+        class _Chat:
+            profile: dict = {}
+            title = live.UNNAMED_INTERVIEW
+
+        chat = _Chat()
+        _patch_session(monkeypatch, chat, stored)
+
+        asyncio.run(live.finish_interview(uuid.uuid4()))
+
+        assert chat.profile["ended"] is True
+        assert chat.profile["ended_by"] == "participant"
+        assert stored["committed"]
+
+    def test_the_model_ending_it_first_wins(self, monkeypatch):
+        """Pressing the button afterwards is tidying up, not a new ending.
+
+        `end_interview` has already written the interviewer's summary and its
+        own account of why it stopped. Overwriting that with "the participant
+        ended it" would misreport a completed interview as an abandoned one.
+        """
+        stored: dict = {}
+
+        class _Chat:
+            profile = {"ended": True, "summary": "A senior engineer."}
+            title = "Priya Raman"
+
+        chat = _Chat()
+        _patch_session(monkeypatch, chat, stored)
+
+        asyncio.run(live.finish_interview(uuid.uuid4()))
+
+        assert "ended_by" not in chat.profile
+        assert chat.profile["summary"] == "A senior engineer."
+
+    def test_a_missing_conversation_is_not_an_error(self, monkeypatch):
+        """Bookkeeping must never take down a call that is already over."""
+        _patch_session(monkeypatch, None, {})
+        asyncio.run(live.finish_interview(uuid.uuid4()))  # does not raise
+
+
+def _patch_session(monkeypatch, chat, stored):
+    """Stand in for the database, so these assert on behaviour not on SQL."""
+
+    class _DB:
+        async def get(self, _model, _id):
+            return chat
+
+        async def commit(self):
+            stored["committed"] = True
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+    monkeypatch.setattr("app.db.session.SessionLocal", lambda: _DB())

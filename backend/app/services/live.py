@@ -122,6 +122,13 @@ MODES: dict[str, dict[str, str]] = {
 }
 DEFAULT_MODE = "speak"
 
+# Every kind a CONVERSATION can be, as opposed to a project.
+#
+# Listed once because three separate endpoints check it, and when Howler was
+# added they were all still checking for two -- so every Howler session loaded
+# as "Conversation not found" while the socket that created it worked perfectly.
+CONVERSATION_KINDS = ("parley", "interview", "howler")
+
 
 def mode_of(name: str) -> str:
     """The requested mode, or the default. Never raises on a bad value."""
@@ -731,6 +738,45 @@ async def store_summary(session_id: uuid.UUID, summary: str) -> None:
                 await db.commit()
     except Exception as exc:  # noqa: BLE001
         log.warning("live_store_summary_failed", error=str(exc)[:200])
+
+
+async def finish_interview(session_id: uuid.UUID) -> None:
+    """The PARTICIPANT closed the interview. Never raises.
+
+    Recorded separately from the model closing it, because the two mean
+    opposite things about the result. The model ends when it has what it came
+    for; a person ends when they have had enough -- and a half-filled profile
+    that somebody walked out of is a different finding from one the interviewer
+    could not get answers to. `ended_by` is what tells them apart afterwards,
+    and without it both look like "complete".
+
+    No summary is written. The summary is the model's account of the person,
+    and it has not finished forming one.
+    """
+    from app.db.models import ChatSession
+    from app.db.session import SessionLocal
+
+    try:
+        async with SessionLocal() as db:
+            chat = await db.get(ChatSession, session_id)
+            if chat is None:
+                return
+            merged = dict(chat.profile or {})
+            # An interview the model already closed stays closed BY THE MODEL.
+            # Pressing the button on a finished interview is a person tidying
+            # up after it, not a different ending.
+            if merged.get("ended"):
+                return
+            merged["ended"] = True
+            merged["ended_by"] = "participant"
+            chat.profile = merged
+            name = str(merged.get("full_name") or "").strip()
+            if name and chat.title == UNNAMED_INTERVIEW:
+                chat.title = name[:120]
+            await db.commit()
+        log.info("interview_ended_by_participant", session=str(session_id))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("live_finish_failed", error=str(exc)[:200])
 
 
 async def store_handle(session_id: uuid.UUID, handle: str) -> None:

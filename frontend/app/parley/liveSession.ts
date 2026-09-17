@@ -75,6 +75,8 @@ export type LiveEvent =
       recorded?: Record<string, unknown>[];
     }
   | { type: "turn_end" }
+  /** The interview is closed because the PARTICIPANT ended it. */
+  | { type: "finished" }
   /** The server has stored a resumption handle; the conversation is safe. */
   | { type: "resume" }
   /** The server is about to drop us. Reconnecting now keeps the context. */
@@ -97,6 +99,9 @@ export type LiveSession = {
   close: () => void;
   /** Cut off whatever is being spoken right now. */
   stopSpeaking: () => void;
+  /** The PARTICIPANT ending the interview, not the interviewer. Closes the
+   *  conversation server-side and stops the link working again. */
+  finish: () => void;
 };
 
 export async function openLiveSession(
@@ -104,12 +109,24 @@ export async function openLiveSession(
   conversationId: string | null,
   mode: Mode,
   onEvent: (event: LiveEvent) => void,
+  /**
+   * A Howler magic link, for somebody with no account.
+   *
+   * MUTUALLY EXCLUSIVE with signing in, and deliberately so. An invite grants
+   * exactly one conversation -- not a session, not an identity -- and the
+   * server resolves it down its own path rather than through the bearer
+   * token, so that it can never widen into one. Given an invite, the mode,
+   * the conversation and the schema all come from the project behind it, and
+   * everything passed here is ignored.
+   */
+  invite?: string,
 ): Promise<LiveSession> {
   // The token travels in the query string because a browser CANNOT set headers
   // on a WebSocket -- there is no equivalent of fetch's `headers`. The server
   // note explains the trade.
-  const token = await getAccessToken();
+  const token = invite ? null : await getAccessToken();
   const url = new URL(browserBase.replace(/^http/, "ws") + "/live/ws");
+  if (invite) url.searchParams.set("invite", invite);
   if (token) url.searchParams.set("token", token);
   url.searchParams.set("voice_name", voiceName);
   if (conversationId) url.searchParams.set("session_id", conversationId);
@@ -397,6 +414,16 @@ export async function openLiveSession(
     beginTurn,
     endTurn,
     stopSpeaking,
+    finish() {
+      // Microphone first. Whatever is captured after this decision is not
+      // wanted, and leaving it live records somebody's reaction to having
+      // pressed the button.
+      releaseMicrophone();
+      stopSpeaking();
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "finish" }));
+      }
+    },
     close() {
       releaseMicrophone();
       void out.close().catch(() => {});

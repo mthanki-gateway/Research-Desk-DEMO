@@ -21,6 +21,7 @@ Browser to us:
     {"type":"greet"}   open the conversation; the model speaks first
     {"type":"start"}   the speaker pressed the button
     {"type":"end"}     the speaker pressed it again; answer now
+    {"type":"finish"}  the PARTICIPANT ended the interview; close it
 
 Us to browser:
     binary                      raw 24kHz mono PCM, to play
@@ -31,6 +32,8 @@ Us to browser:
                                 RECORDED from it -- which is accurate, where
                                 the transcript is not
     {"type":"turn_end"}         the model has finished speaking
+    {"type":"finished"}         the interview is closed, at the participant's
+                                request rather than the interviewer's
     {"type":"resume","handle"}  hold this; it restores the conversation
     {"type":"going_away","in"}  the server is about to drop us; reconnect
     {"type":"error","detail"}   something failed, in words
@@ -156,7 +159,7 @@ async def conversation(
     """One spoken conversation, as alternating turns."""
     async with SessionLocal() as db:
         chat = await db.get(ChatSession, conversation_id)
-        if chat is None or chat.kind not in ("parley", "interview"):
+        if chat is None or chat.kind not in live.CONVERSATION_KINDS:
             raise HTTPException(status_code=404, detail="Conversation not found.")
         forbid_if_not_owner(chat.owner_id, user)
 
@@ -196,6 +199,10 @@ async def conversation(
         "fields": chat.fields or [],
         "brief": chat.brief or "",
         "participant": chat.participant or "",
+        # Which project this came from, so reading a result has a way BACK to
+        # it. Without it the only route out of a conversation was the project
+        # list, which loses the one thing you were looking at.
+        "project_id": str(chat.project_id) if chat.project_id else None,
     }
 
 
@@ -217,7 +224,7 @@ async def rename_conversation(
 
     async with SessionLocal() as db:
         chat = await db.get(ChatSession, conversation_id)
-        if chat is None or chat.kind not in ("parley", "interview"):
+        if chat is None or chat.kind not in live.CONVERSATION_KINDS:
             raise HTTPException(status_code=404, detail="Conversation not found.")
         forbid_if_not_owner(chat.owner_id, user)
         chat.title = title
@@ -231,7 +238,7 @@ async def remove_conversation(
 ) -> None:
     async with SessionLocal() as db:
         chat = await db.get(ChatSession, conversation_id)
-        if chat is None or chat.kind not in ("parley", "interview"):
+        if chat is None or chat.kind not in live.CONVERSATION_KINDS:
             raise HTTPException(status_code=404, detail="Conversation not found.")
         forbid_if_not_owner(chat.owner_id, user)
         await db.delete(chat)
@@ -508,7 +515,7 @@ async def live_socket(
             # sent; the tool layer decides whether the model may end.
             turn_state: dict[str, int] = {"turns": 0}
 
-            uplink = asyncio.create_task(_uplink(ws, session, turn_state))
+            uplink = asyncio.create_task(_uplink(ws, session, turn_state, chat.id))
             downlink = asyncio.create_task(
                 _downlink(ws, session, user, chat.id, turn_state, fields)
             )
@@ -546,7 +553,7 @@ async def live_socket(
         log.info("live_session_closed")
 
 
-async def _uplink(ws: WebSocket, session, turn_state: dict) -> None:
+async def _uplink(ws: WebSocket, session, turn_state: dict, chat_id=None) -> None:
     """Browser audio into the model."""
     while True:
         message = await ws.receive()
@@ -608,6 +615,20 @@ async def _uplink(ws: WebSocket, session, turn_state: dict) -> None:
         elif kind == "end":
             turn_state["turns"] += 1
             await session.send_realtime_input(activity_end=types.ActivityEnd())
+
+        # THE PARTICIPANT CLOSING IT, which the model is not consulted about.
+        #
+        # Not a hint to the model to wrap up: it is over. Somebody who has
+        # decided they are done does not want to be asked one more question,
+        # and an interviewer that can talk them out of leaving is not a
+        # feature. The conversation is marked ended, the browser is told, and
+        # the socket closes -- and because the link checks that flag, it stops
+        # working too, which is the point of pressing it.
+        elif kind == "finish":
+            if chat_id is not None:
+                await live.finish_interview(chat_id)
+            await ws.send_text(json.dumps({"type": "finished"}))
+            return
 
 
 async def _downlink(
