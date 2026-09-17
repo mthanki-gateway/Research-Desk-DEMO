@@ -51,13 +51,22 @@ highlighting all read from it. Do not hardcode nav items anywhere else.
 Three today — **Research Desk** (chat, library, lab, atlas), **Model Lab**
 (playground, transcribe) and **Parley** (speak, interview).
 
-Parley has TWO MODES and they are one pipeline. Speak answers questions from
-the corpus; Interview profiles the participant. The socket, audio handling,
+Parley has THREE MODES and they are one pipeline. Speak answers questions from
+the corpus; Interview profiles the participant against a fixed field list;
+Howler profiles them against a list GENERATED from a brief. The socket, audio handling,
 manual turn boundaries, tools, persistence and resumption are shared — the
 only difference is the system prompt (`live_prompts.py`) and the `kind` the
-conversation is stored under. Adding a third mode should be an entry in
+conversation is stored under. Adding a mode should be an entry in
 `live.MODES` plus a route, and nothing else. If it needs more than that,
 something that ought to be shared has been duplicated.
+
+Howler's schema is generated ONCE from the brief and frozen on the session
+(`blueprint.py`). Never regenerate it at connect time or per turn: completeness
+needs a fixed denominator, the tool declaration is fixed in the setup message,
+a resumed session must find the same shape, and a column that comes and goes
+between renders is not a profile. Anything the schema did not anticipate is
+still captured, as an `other` note -- that escape hatch is what makes freezing
+it safe.
 
 Parley is a different DOOR onto the same corpus, not a second assistant. A
 document uploaded in the Library is answerable out loud the moment it finishes

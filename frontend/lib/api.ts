@@ -1082,7 +1082,7 @@ export async function getLiveStatus(): Promise<LiveStatus> {
  * prompt, and this is the whole of the difference on the client: it picks the
  * prompt server-side, and separates the two lists of conversations.
  */
-export type Mode = "speak" | "interview";
+export type Mode = "speak" | "interview" | "howler";
 
 /** A spoken conversation, as a row in the "continue" list. */
 export type ParleyConversation = {
@@ -1146,6 +1146,33 @@ export type Profile = Record<
   string | number | string[] | ProfileNotes | undefined
 >;
 
+/** A field Howler generated from a brief, rather than one written in code. */
+export type BlueprintField = {
+  name: string;
+  label: string;
+  description: string;
+  type: "STRING" | "NUMBER" | "ARRAY";
+  required: boolean;
+};
+
+/** What a brief WOULD produce, without creating anything.
+ *  Separate from creating, so a brief can be adjusted and re-read — otherwise
+ *  every attempt leaves an abandoned conversation in the drawer. */
+export async function previewHowl(brief: string): Promise<BlueprintField[]> {
+  const res = await authedJson("/live/howler/preview", "POST", { brief });
+  if (!res.ok) throw new Error(await detail(res));
+  return (await res.json()).fields;
+}
+
+export async function createHowl(
+  brief: string,
+  participant: string,
+): Promise<{ id: string; fields: BlueprintField[] }> {
+  const res = await authedJson("/live/howler", "POST", { brief, participant });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
 export async function getProfileFields(): Promise<ProfileField[]> {
   const res = await authedFetch("/live/profile-fields", { cache: "no-store" });
   if (!res.ok) throw new Error(await detail(res));
@@ -1162,6 +1189,10 @@ export async function getParleyConversation(
   profile: Profile;
   missing: string[];
   complete: boolean;
+  /** Howler only: the schema this conversation was given. Empty elsewhere. */
+  fields: BlueprintField[];
+  brief: string;
+  participant: string;
 }> {
   const res = await authedFetch(`/live/conversations/${id}`, {
     cache: "no-store",

@@ -182,6 +182,28 @@ _QUOTE_KEYS = ("quote", "text", "said", "value")
 
 REQUIRED = [f["name"] for f in FIELDS if f["required"]]
 FIELD_NAMES = [f["name"] for f in FIELDS]
+
+
+# ---------------------------------------------------------------------------
+# The field list is a PARAMETER, not a constant.
+#
+# Interview has a fixed set written above. Howler generates its own from a
+# brief and stores it on the session, so every function here takes the fields
+# it should work against and defaults to the built-in ones. That default is
+# what keeps Interview unchanged: one code path, two sources of schema.
+# ---------------------------------------------------------------------------
+
+
+def _fields(fields: list[dict] | None) -> list[dict]:
+    return fields if fields else FIELDS
+
+
+def names_of(fields: list[dict] | None = None) -> list[str]:
+    return [f["name"] for f in _fields(fields)]
+
+
+def required_of(fields: list[dict] | None = None) -> list[str]:
+    return [f["name"] for f in _fields(fields) if f.get("required")]
 TOOL_NAME = "record_profile"
 END_TOOL = "end_interview"
 
@@ -222,7 +244,7 @@ def end_declaration() -> dict[str, Any]:
     }
 
 
-def declaration() -> dict[str, Any]:
+def declaration(fields: list[dict] | None = None) -> dict[str, Any]:
     """The tool spec, generated from FIELDS so the two cannot drift.
 
     EVERY FIELD IS OPTIONAL in the schema, deliberately, even the required
@@ -253,7 +275,7 @@ def declaration() -> dict[str, Any]:
                         ),
                     }
                 )
-                for field in FIELDS
+                for field in _fields(fields)
             }
             | {
                 QUOTES_KEY: {
@@ -288,7 +310,7 @@ def declaration() -> dict[str, Any]:
     }
 
 
-def merge(existing: dict, update: dict) -> dict:
+def merge(existing: dict, update: dict, fields: list[dict] | None = None) -> dict:
     """Fold a tool call's arguments into the profile so far.
 
     LAST ANSWER WINS for scalars, because people correct themselves -- "five
@@ -305,7 +327,13 @@ def merge(existing: dict, update: dict) -> dict:
         (NOTES_KEY, _NOTE_KEYS),
         (QUOTES_KEY, _QUOTE_KEYS),
     ):
-        merged = _fold(merged, (update or {}).get(bucket_key) or [], bucket_key, text_keys)
+        merged = _fold(
+            merged,
+            (update or {}).get(bucket_key) or [],
+            bucket_key,
+            text_keys,
+            names_of(fields),
+        )
 
     for key, value in (update or {}).items():
         if key in (NOTES_KEY, QUOTES_KEY):
@@ -321,12 +349,13 @@ def merge(existing: dict, update: dict) -> dict:
         # written to the database and then invisible to everyone, which is the
         # worst of both. Filed under `other`, the information survives and
         # shows up where the reader is already looking.
-        if key not in FIELD_NAMES:
+        if key not in names_of(fields):
             merged = _fold(
                 merged,
                 [{"field": OTHER, "note": f"{key.replace('_', ' ')}: {_flat(value)}"}],
                 NOTES_KEY,
                 _NOTE_KEYS,
+                names_of(fields),
             )
             continue
 
@@ -349,11 +378,18 @@ def _flat(value: Any) -> str:
     return str(value)
 
 
-def _fold(merged: dict, incoming: list, bucket_key: str, text_keys: tuple) -> dict:
+def _fold(
+    merged: dict,
+    incoming: list,
+    bucket_key: str,
+    text_keys: tuple,
+    known: list[str] | None = None,
+) -> dict:
     """Fold notes or quotes into their field-keyed bucket.
 
     One function for both because they differ only in which key holds the text.
     """
+    known = known if known is not None else FIELD_NAMES
     if incoming:
         notes = {k: list(v) for k, v in (merged.get(bucket_key) or {}).items()}
         for note in incoming:
@@ -401,7 +437,7 @@ def _fold(merged: dict, incoming: list, bucket_key: str, text_keys: tuple) -> di
             #
             # An unknown field is filed rather than dropped. A misattributed
             # observation is still an observation; a discarded one is gone.
-            if field not in FIELD_NAMES and field not in EXTRA_BUCKETS:
+            if field not in known and field not in EXTRA_BUCKETS:
                 field = OTHER
 
             bucket = notes.setdefault(field, [])
@@ -417,7 +453,7 @@ def _blank(value: Any) -> bool:
     return value is None or value == "" or value == []
 
 
-def missing(profile: dict) -> list[str]:
+def missing(profile: dict, fields: list[dict] | None = None) -> list[str]:
     """Required fields with nothing in them yet.
 
     Notes are never required. An interview that will not finish until every
@@ -425,16 +461,16 @@ def missing(profile: dict) -> list[str]:
     """
     return [
         name
-        for name in REQUIRED
+        for name in required_of(fields)
         if not (profile or {}).get(name) and (profile or {}).get(name) != 0
     ]
 
 
-def complete(profile: dict) -> bool:
-    return not missing(profile)
+def complete(profile: dict, fields: list[dict] | None = None) -> bool:
+    return not missing(profile, fields)
 
 
-def render(profile: dict) -> str:
+def render(profile: dict, fields: list[dict] | None = None) -> str:
     """The tool's reply to the model: what is known, and what is not.
 
     Written as lines rather than returned as JSON for the same reason the
@@ -444,7 +480,7 @@ def render(profile: dict) -> str:
     notes = (profile or {}).get(NOTES_KEY) or {}
     quotes = (profile or {}).get(QUOTES_KEY) or {}
     lines = ["Profile so far:"]
-    for field in FIELDS:
+    for field in _fields(fields):
         value = (profile or {}).get(field["name"])
         if value in (None, "", []):
             continue
@@ -465,7 +501,7 @@ def render(profile: dict) -> str:
         for quote in quotes.get(bucket, []):
             lines.append(f'- {label} quote: "{quote}"')
 
-    gaps = missing(profile)
+    gaps = missing(profile, fields)
     # Optional fields the model has not asked about.
     #
     # They were invisible before: nothing in the tool result mentioned them, so
@@ -475,7 +511,7 @@ def render(profile: dict) -> str:
     # what to ask next, which is the only moment it matters.
     spare = [
         f["name"]
-        for f in FIELDS
+        for f in _fields(fields)
         if not f["required"] and _blank((profile or {}).get(f["name"]))
     ]
 

@@ -33,6 +33,11 @@ const SECTION: Record<Mode, { label: string; empty: string; href: string }> = {
     empty: "Nothing spoken yet",
     href: "/parley",
   },
+  howler: {
+    label: "Sessions",
+    empty: "No sessions yet",
+    href: "/parley/howler",
+  },
   interview: {
     // "Profiles", because that is what an interview PRODUCES. Calling them
     // conversations would describe the mechanism rather than the point.

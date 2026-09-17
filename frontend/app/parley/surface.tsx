@@ -134,6 +134,12 @@ const COPY: Record<Mode, { title: string; blurb: string; hint: string }> = {
       "Speak to a native audio model. Your documents and the web, answered out loud — with no transcript in the middle.",
     hint: "Nothing asked yet. Try “what does the engineering handbook say about on-call paging?”",
   },
+  howler: {
+    title: "Howler",
+    blurb:
+      "An interview against the data points you asked for. It stops when it has them.",
+    hint: "Ready when you are. It will introduce itself and ask the first question.",
+  },
   interview: {
     title: "Interview",
     blurb:
@@ -205,6 +211,10 @@ function Parley({ mode }: { mode: Mode }) {
     // The field list comes from the server, where the tool schema and the
     // completeness check already live. A fourth copy in TypeScript is the one
     // that would drift.
+    // Interview's fields are fixed and served from the backend. HOWLER'S ARE
+    // NOT: they were generated from a brief and stored on the conversation, so
+    // they arrive with it in `openConversation` below. Fetching a global list
+    // for Howler would render the wrong schema entirely.
     if (mode === "interview") getProfileFields().then(setFields).catch(() => {});
   }, [mode]);
 
@@ -494,6 +504,12 @@ function Parley({ mode }: { mode: Mode }) {
 
   /** Leave this conversation intact and begin a new one. */
   const startFresh = useCallback(() => {
+    // Howler cannot start blank -- a session without a schema has nothing to
+    // fill -- so "new" means going back to the brief.
+    if (mode === "howler") {
+      router.push("/parley/howler");
+      return;
+    }
     // CLEAR THE URL FIRST, and this is the whole bug it fixes.
     //
     // Which conversation is open lives in `?c=<id>`, and an effect below
@@ -516,7 +532,7 @@ function Parley({ mode }: { mode: Mode }) {
     setStarted(false);
     setResumed(false);
     setPhase("idle");
-  }, [clearInFlight, stopCountdown, wanted, router, pathname]);
+  }, [clearInFlight, stopCountdown, wanted, router, pathname, mode]);
 
   /** Open a stored conversation and continue it. */
   const openConversation = useCallback(
@@ -530,6 +546,15 @@ function Parley({ mode }: { mode: Mode }) {
       try {
         const detail = await getParleyConversation(id);
         setConversationId(id);
+        if (mode === "howler") {
+          setFields(
+            (detail.fields ?? []).map((f) => ({
+              name: f.name,
+              required: f.required,
+              kind: f.type,
+            })),
+          );
+        }
         setProfileData(detail.profile ?? {});
         setMissing(detail.missing ?? []);
         setProfileDone(Boolean(detail.complete));
@@ -787,7 +812,7 @@ function Parley({ mode }: { mode: Mode }) {
         </section>
       )}
 
-      {mode === "interview" && fields.length > 0 && (
+      {mode !== "speak" && fields.length > 0 && (
         <ProfileCard
           fields={fields}
           profile={profileData}

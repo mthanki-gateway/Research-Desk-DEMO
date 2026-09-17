@@ -100,7 +100,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [parleyConversations, setParleyConversations] = useState<
     Record<Mode, ParleyConversation[]>
-  >({ speak: [], interview: [] });
+  >({ speak: [], interview: [], howler: [] });
   const [documents, setDocuments] = useState<Document[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -200,7 +200,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
   }, []);
 
   const refreshParleyConversations = useCallback(async (mode?: Mode) => {
-    const modes: Mode[] = mode ? [mode] : ["speak", "interview"];
+    const modes: Mode[] = mode ? [mode] : ["speak", "interview", "howler"];
     try {
       const lists = await Promise.all(modes.map(getParleyConversations));
       setParleyConversations((prev) => {

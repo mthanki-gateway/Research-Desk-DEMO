@@ -156,6 +156,16 @@ class ChatSession(Base):
     # same call that records an answer also steers the next question.
     profile: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
 
+    # Howler only: what the operator asked for, and who they are talking to.
+    #
+    # `brief` is the request in plain English. `fields` is the schema it was
+    # turned into, generated ONCE and then frozen -- see `blueprint.py` for
+    # why. `participant` is free text about the person, injected into the
+    # prompt as context rather than parsed into anything.
+    brief: Mapped[str | None] = mapped_column(Text, nullable=True)
+    participant: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fields: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

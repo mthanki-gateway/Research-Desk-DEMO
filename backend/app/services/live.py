@@ -102,6 +102,8 @@ TRAILING_SILENCE = bytes(INPUT_RATE * 2)
 SPOKEN_TOOLS: dict[str, tuple[str, ...]] = {
     "speak": ("search_documents", "search_web", "list_documents", "corpus_stats"),
     "interview": ("search_web",),
+    # Same as Interview. Howler differs in WHAT it gathers, never in how.
+    "howler": ("search_web",),
 }
 
 # Which prompt, and which kind of stored conversation, each mode uses.
@@ -114,6 +116,9 @@ SPOKEN_TOOLS: dict[str, tuple[str, ...]] = {
 MODES: dict[str, dict[str, str]] = {
     "speak": {"system": live_prompts.SPEAK, "kind": "parley"},
     "interview": {"system": live_prompts.INTERVIEW, "kind": "interview"},
+    # Howler's prompt carries {brief} and {participant} slots, filled per
+    # session in `config`. The others have no slots and are used as they are.
+    "howler": {"system": live_prompts.HOWLER, "kind": "howler"},
 }
 DEFAULT_MODE = "speak"
 
@@ -131,7 +136,9 @@ def enabled() -> bool:
     return bool(get_settings().google_api_key)
 
 
-def _declarations(mode: str = DEFAULT_MODE) -> list[types.FunctionDeclaration]:
+def _declarations(
+    mode: str = DEFAULT_MODE, fields: list[dict] | None = None
+) -> list[types.FunctionDeclaration]:
     """Our tool specs, translated into the Live SDK's types.
 
     Built from `agent_tools.tool_specs()` rather than written out again, so a
@@ -145,8 +152,10 @@ def _declarations(mode: str = DEFAULT_MODE) -> list[types.FunctionDeclaration]:
     # than retrieves, and its result is what tells the interviewer what to ask
     # next. Declared here rather than in `agent_tools` because the typed agent
     # has no use for it.
-    if mode_of(mode) == "interview":
-        declared.append(profile.declaration())
+    if mode_of(mode) in ("interview", "howler"):
+        # Howler passes the schema generated from its brief; Interview passes
+        # nothing and gets the built-in one.
+        declared.append(profile.declaration(fields))
         declared.append(profile.end_declaration())
 
     out = []
@@ -197,8 +206,29 @@ def _declarations(mode: str = DEFAULT_MODE) -> list[types.FunctionDeclaration]:
     return out
 
 
+def _system(mode: str, brief: str, participant: str) -> str:
+    """The system prompt for this mode, with Howler's slots filled.
+
+    `str.format` is not used: the prompts contain braces of their own in
+    examples, and one stray pair turns the whole instruction into a KeyError at
+    connect time -- which fails the session rather than the formatting.
+    """
+    text = MODES[mode_of(mode)]["system"]
+    if mode_of(mode) != "howler":
+        return text
+    return text.replace("{brief}", brief.strip() or "(no brief given)").replace(
+        "{participant}",
+        participant.strip() or "(nothing known about them yet)",
+    )
+
+
 def config(
-    voice: str, resume: str | None = None, mode: str = DEFAULT_MODE
+    voice: str,
+    resume: str | None = None,
+    mode: str = DEFAULT_MODE,
+    fields: list[dict] | None = None,
+    brief: str = "",
+    participant: str = "",
 ) -> types.LiveConnectConfig:
     reach = (
         ""
@@ -217,9 +247,9 @@ def config(
                 prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice)
             )
         ),
-        tools=[types.Tool(function_declarations=_declarations(mode))],
+        tools=[types.Tool(function_declarations=_declarations(mode, fields))],
         system_instruction=types.Content(
-            parts=[types.Part(text=MODES[mode_of(mode)]["system"] + reach)]
+            parts=[types.Part(text=_system(mode, brief, participant) + reach)]
         ),
         # Both transcripts are requested purely so the SCREEN can show what was
         # heard and said. They are a side output, not the mechanism -- the model
@@ -277,7 +307,10 @@ def client() -> genai.Client:
 
 
 async def record_profile(
-    session_id: uuid.UUID, args: dict, turns: int = 0
+    session_id: uuid.UUID,
+    args: dict,
+    turns: int = 0,
+    fields: list[dict] | None = None,
 ) -> tuple[str, dict, bool]:
     """Fold what the model just learned into the stored profile.
 
@@ -298,22 +331,22 @@ async def record_profile(
         chat = await db.get(ChatSession, session_id)
         if chat is None:
             return "The profile could not be saved.", {}, False
-        merged = profile.merge(chat.profile or {}, args)
+        merged = profile.merge(chat.profile or {}, args, fields)
         chat.profile = merged
         await db.commit()
 
     await name_conversation(session_id, merged)
 
-    done = profile.complete(merged)
+    done = profile.complete(merged, fields)
     if done:
         await _mark_completed(session_id, turns)
     log.info(
         "profile_recorded",
         fields=sorted(args),
-        missing=profile.missing(merged),
+        missing=profile.missing(merged, fields),
         complete=done,
     )
-    return profile.render(merged), merged, done
+    return profile.render(merged, fields), merged, done
 
 
 async def run_tool_call(
@@ -323,6 +356,7 @@ async def run_tool_call(
     top_k: int,
     session_id: uuid.UUID | None = None,
     turns: int = 0,
+    fields: list[dict] | None = None,
 ) -> tuple[types.FunctionResponse, dict]:
     """Execute one tool the live model asked for, on the real corpus.
 
@@ -352,7 +386,7 @@ async def run_tool_call(
         # what the participant has said; an end arriving on the same turn the
         # profile completed is refused, with a tool result telling the model
         # plainly to wait. It may end on the next turn.
-        if session_id is not None and not await _may_end(session_id, turns):
+        if session_id is not None and not await _may_end(session_id, turns, fields):
             log.info("end_interview_too_early", turns=turns)
             return (
                 types.FunctionResponse(
@@ -396,7 +430,9 @@ async def run_tool_call(
                 ),
                 {"tool": name, "args": args, "n": 0, "sources": []},
             )
-        observation, merged, done = await record_profile(session_id, args, turns)
+        observation, merged, done = await record_profile(
+            session_id, args, turns, fields
+        )
         return (
             types.FunctionResponse(id=call.id, name=name, response={"result": observation}),
             {
@@ -407,7 +443,7 @@ async def run_tool_call(
                 # Sent on to the browser so the profile can fill in on screen as
                 # it is gathered, rather than appearing only once it is done.
                 "profile": merged,
-                "missing": profile.missing(merged),
+                "missing": profile.missing(merged, fields),
                 "complete": done,
             },
         )
@@ -595,7 +631,9 @@ async def name_conversation(session_id: uuid.UUID, profile_data: dict) -> None:
         log.warning("live_name_failed", error=str(exc)[:200])
 
 
-async def _may_end(session_id: uuid.UUID, turns: int) -> bool:
+async def _may_end(
+    session_id: uuid.UUID, turns: int, fields: list[dict] | None = None
+) -> bool:
     """Has the participant spoken since the profile was completed?
 
     The turn on which the last required field lands is the same turn the model

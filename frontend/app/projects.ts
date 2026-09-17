@@ -2,6 +2,7 @@ import {
   IconChat,
   IconAtlas,
   IconChip,
+  IconHowler,
   IconInterview,
   IconParley,
   IconMic,
@@ -75,6 +76,7 @@ export const PROJECTS: Project[] = [
     nav: [
       { href: "/parley", label: "Speak", Icon: IconParley },
       { href: "/parley/interview", label: "Interview", Icon: IconInterview },
+      { href: "/parley/howler", label: "Howler", Icon: IconHowler },
     ],
   },
 ];

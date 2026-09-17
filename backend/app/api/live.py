@@ -69,7 +69,7 @@ from app.auth import (
 from app.config import get_settings
 from app.db.models import ChatSession, Message, Role
 from app.db.session import SessionLocal
-from app.services import live, voice, websearch
+from app.services import blueprint, live, voice, websearch
 
 log = structlog.get_logger()
 
@@ -140,7 +140,9 @@ async def conversations(
             # can be reread but not continued, and those are different things.
             "resumable": bool(chat.live_handle),
             # So the list can mark a finished interview without opening it.
-            "complete": live.profile.complete(chat.profile or {}),
+            "complete": live.profile.complete(
+                chat.profile or {}, chat.fields or None
+            ),
         }
         for chat, n in rows
         if n
@@ -187,8 +189,13 @@ async def conversation(
         "turns": turns,
         # Interview only; an empty object everywhere else.
         "profile": chat.profile or {},
-        "missing": live.profile.missing(chat.profile or {}),
-        "complete": live.profile.complete(chat.profile or {}),
+        "missing": live.profile.missing(chat.profile or {}, chat.fields or None),
+        "complete": live.profile.complete(chat.profile or {}, chat.fields or None),
+        # Howler's schema travels with the conversation; the card cannot render
+        # fields it does not know about.
+        "fields": chat.fields or [],
+        "brief": chat.brief or "",
+        "participant": chat.participant or "",
     }
 
 
@@ -229,6 +236,78 @@ async def remove_conversation(
         forbid_if_not_owner(chat.owner_id, user)
         await db.delete(chat)
         await db.commit()
+
+
+@router.post("/live/howler")
+async def create_howl(body: dict, user: User = Depends(current_user)) -> dict:
+    """Turn a brief into a conversation with its own schema.
+
+    The schema is generated HERE, once, and stored -- not at connect time and
+    not per turn. See `blueprint.py` for the four things that depend on it
+    being stable; the short version is that an interview whose target moves can
+    never be finished.
+
+    Returns the fields so they can be read before anyone speaks. A brief is a
+    loose instruction and this is the point at which it becomes a specific
+    list, which is exactly the moment worth checking.
+    """
+    brief = str(body.get("brief") or "").strip()
+    participant = str(body.get("participant") or "").strip()
+    if not brief:
+        raise HTTPException(
+            status_code=400,
+            detail="Describe what you want to find out.",
+        )
+
+    try:
+        fields = await blueprint.from_brief(brief)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - a model failure is not a 500 here
+        log.warning("blueprint_failed", error=str(exc)[:300])
+        raise HTTPException(
+            status_code=502,
+            detail="The brief could not be turned into fields. Try again.",
+        ) from exc
+
+    async with SessionLocal() as db:
+        chat = ChatSession(
+            title=live.UNNAMED_INTERVIEW,
+            owner_id=user.owner_id,
+            kind="howler",
+            brief=brief[: blueprint.MAX_BRIEF_CHARS],
+            participant=participant[: blueprint.MAX_PARTICIPANT_CHARS],
+            fields=fields,
+        )
+        db.add(chat)
+        await db.commit()
+        await db.refresh(chat)
+
+    return {
+        "id": str(chat.id),
+        "brief": chat.brief,
+        "participant": chat.participant,
+        "fields": chat.fields,
+    }
+
+
+@router.post("/live/howler/preview")
+async def preview_howl(body: dict, user: User = Depends(current_user)) -> dict:
+    """The fields a brief would produce, without creating anything.
+
+    So a brief can be adjusted and re-read before a conversation exists. Every
+    attempt creating a session would leave a drawer full of abandoned ones.
+    """
+    try:
+        return {"fields": await blueprint.from_brief(str(body.get("brief") or ""))}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        log.warning("blueprint_preview_failed", error=str(exc)[:300])
+        raise HTTPException(
+            status_code=502,
+            detail="The brief could not be turned into fields. Try again.",
+        ) from exc
 
 
 @router.get("/live/profile-fields")
@@ -313,11 +392,26 @@ async def live_socket(
     )
     resume = chat.live_handle
 
+    # HOWLER READS ITS SCHEMA FROM THE ROW, and only from there.
+    #
+    # It was generated once from the brief and frozen. Regenerating it here
+    # would produce a subtly different list on every reconnect, and a
+    # half-filled profile would stop lining up with the fields it was filling.
+    # The other modes pass None and get the built-in schema.
+    fields = list(chat.fields or []) if chosen_mode == "howler" else None
+
     try:
         client = live.client()
         async with client.aio.live.connect(
             model=settings.live_model,
-            config=live.config(chosen, resume, chosen_mode),
+            config=live.config(
+                chosen,
+                resume,
+                chosen_mode,
+                fields,
+                chat.brief or "",
+                chat.participant or "",
+            ),
         ) as session:
             await ws.send_text(
                 json.dumps(
@@ -353,7 +447,7 @@ async def live_socket(
 
             uplink = asyncio.create_task(_uplink(ws, session, turn_state))
             downlink = asyncio.create_task(
-                _downlink(ws, session, user, chat.id, turn_state)
+                _downlink(ws, session, user, chat.id, turn_state, fields)
             )
 
             done, pending = await asyncio.wait(
@@ -454,7 +548,12 @@ async def _uplink(ws: WebSocket, session, turn_state: dict) -> None:
 
 
 async def _downlink(
-    ws: WebSocket, session, user: User, chat_id, turn_state: dict
+    ws: WebSocket,
+    session,
+    user: User,
+    chat_id,
+    turn_state: dict,
+    fields: list[dict] | None = None,
 ) -> None:
     """Model audio, transcripts and tool calls out to the browser."""
     settings = get_settings()
@@ -586,6 +685,7 @@ async def _downlink(
                         top_k=settings.retrieval_top_k,
                         session_id=chat_id,
                         turns=turn_state["turns"],
+                        fields=fields,
                     )
                     responses.append(response)
                     # Reported as it happens, not at the end. A search takes a

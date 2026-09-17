@@ -81,6 +81,15 @@ export const IconWave = (p: Props) => (
   </Svg>
 );
 
+/** Howler: a brief going in, a conversation coming out. */
+export const IconHowler = (p: Props) => (
+  <Svg {...p}>
+    <path d="M4 5h9M4 9h7M4 13h9" />
+    <path d="M14 17.5a4.5 4.5 0 1 0 4.5-4.5" />
+    <path d="M18.5 13v4.5h4.5" />
+  </Svg>
+);
+
 /** Rename. */
 export const IconEdit = (p: Props) => (
   <Svg {...p}>

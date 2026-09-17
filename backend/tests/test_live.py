@@ -271,11 +271,65 @@ class TestModes:
     ever stop being the only difference, this file is where that shows up.
     """
 
-    def test_both_modes_exist_and_differ(self):
-        assert set(live.MODES) == {"speak", "interview"}
-        assert (
-            live.MODES["speak"]["system"] != live.MODES["interview"]["system"]
+    def test_every_mode_exists_and_differs(self):
+        assert set(live.MODES) == {"speak", "interview", "howler"}
+        prompts = {m: live.MODES[m]["system"] for m in live.MODES}
+        assert len(set(prompts.values())) == len(prompts)
+
+    def test_howler_inherits_the_interview_craft(self):
+        """It is ASSEMBLED from the interview prompt, not written again.
+
+        Everything that makes an interview good is identical; a second copy
+        would drift the moment either was improved.
+        """
+        howler = live.MODES["howler"]["system"]
+        for craft in ("ONE question at a time", "DO NOT LEAD", "QUOTE THEM"):
+            assert craft in " ".join(howler.split()), craft
+
+    def test_howler_does_not_inherit_the_fixed_field_list(self):
+        """Its fields come from a brief, so Interview's must not leak in.
+
+        The split is at "HOW TO GET THERE" -- the seam between WHAT is gathered
+        and HOW. One paragraph earlier and a conversation about procurement
+        budgets asks how many years of professional experience they have.
+        """
+        howler = " ".join(live.MODES["howler"]["system"].split())
+        assert "how many years of professional experience" not in howler
+
+    def test_howler_carries_slots_for_its_brief(self):
+        howler = live.MODES["howler"]["system"]
+        assert "{brief}" in howler and "{participant}" in howler
+
+    def test_the_slots_are_filled_at_connect(self):
+        text = live.config(
+            "Kore", None, "howler", None, "THE BRIEF", "THE PERSON"
+        ).system_instruction.parts[0].text
+        assert "THE BRIEF" in text and "THE PERSON" in text
+        assert "{brief}" not in text
+
+    def test_an_empty_brief_does_not_leave_a_slot_showing(self):
+        """A literal "{brief}" in a system prompt is a visible bug."""
+        text = live.config("Kore", None, "howler").system_instruction.parts[0].text
+        assert "{brief}" not in text and "{participant}" not in text
+
+    def test_howler_uses_the_schema_it_is_given(self):
+        """Not the built-in one. The whole point of the mode."""
+        fields = [
+            {"name": "budget", "label": "Budget", "description": "x",
+             "type": "STRING", "required": True},
+        ]
+        names = {
+            d.name
+            for d in live._declarations("howler", fields)
+        }
+        assert "record_profile" in names
+        record = next(
+            d for d in live._declarations("howler", fields) if d.name == "record_profile"
         )
+        properties = set(record.parameters.properties or {})
+        assert "budget" in properties
+        # Interview's fields must not appear in a Howler session.
+        assert "years_experience" not in properties
 
     def test_they_are_stored_separately(self):
         """Interviews must not appear in the Speak list, or the reverse.
@@ -285,6 +339,7 @@ class TestModes:
         """
         assert live.kind_of("speak") == "parley"
         assert live.kind_of("interview") == "interview"
+        assert live.kind_of("howler") == "howler"
 
     def test_an_unknown_mode_falls_back_rather_than_failing(self):
         """A bad query parameter must not take the socket down.

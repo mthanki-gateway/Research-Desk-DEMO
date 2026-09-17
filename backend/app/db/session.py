@@ -115,6 +115,11 @@ _MIGRATIONS: tuple[str, ...] = (
     # The interview's structured output, filled in by the model as it goes.
     "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS profile JSONB "
     "NOT NULL DEFAULT '{}'::jsonb",
+    # Howler: the brief, the schema it produced, and who is being interviewed.
+    "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS brief TEXT",
+    "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS participant TEXT",
+    "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS fields JSONB "
+    "NOT NULL DEFAULT '[]'::jsonb",
 )
 
 

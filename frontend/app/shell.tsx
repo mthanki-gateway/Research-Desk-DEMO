@@ -334,7 +334,13 @@ export default function Shell({ children }: { children: React.ReactNode }) {
                 <Suspense fallback={null}>
                   <ParleyNav
                     pathname={pathname}
-                    mode={href === "/parley/interview" ? "interview" : "speak"}
+                    mode={
+                      href === "/parley/interview"
+                        ? "interview"
+                        : href === "/parley/howler"
+                          ? "howler"
+                          : "speak"
+                    }
                   />
                 </Suspense>
               )}

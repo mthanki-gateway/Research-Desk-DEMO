@@ -38,6 +38,8 @@ REQUIRED = {
     ("GET", "/voice/status"),
     ("GET", "/live/status"),
     ("GET", "/live/profile-fields"),
+    ("POST", "/live/howler"),
+    ("POST", "/live/howler/preview"),
     ("GET", "/live/conversations"),
     ("GET", "/live/conversations/{conversation_id}"),
     ("PATCH", "/live/conversations/{conversation_id}"),
