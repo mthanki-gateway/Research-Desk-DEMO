@@ -125,6 +125,10 @@ _MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS project_id UUID",
     "CREATE INDEX IF NOT EXISTS chat_sessions_project_idx "
     "ON chat_sessions (project_id)",
+    # The designer transcript. The table itself is created by create_all; this
+    # is only needed for projects that predate the conversation.
+    "ALTER TABLE howler_projects ADD COLUMN IF NOT EXISTS design JSONB "
+    "NOT NULL DEFAULT '[]'::jsonb",
 )
 
 

@@ -209,8 +209,22 @@ class HowlerProject(Base):
     # invite can carry its own, because the whole point of several invites is
     # that they go to different people.
     participant: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Generated once from the brief and frozen. See `blueprint.py`.
+    # The current schema.
+    #
+    # A DRAFT while the project is being designed -- the designer chat revises
+    # it as the conversation goes. That does not contradict freezing: a
+    # conversation snapshots the schema when it STARTS, so an interview already
+    # under way is unaffected by later edits, while a link not yet used picks
+    # up whatever the project says now.
     fields: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+
+    # The designer conversation, as [{role, content}].
+    #
+    # On the project rather than in `messages`, because it is not a turn of
+    # anything -- it is the reasoning that produced the schema, and it belongs
+    # with the schema. Putting it in the conversation table would make every
+    # query about interviews have to exclude it.
+    design: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
