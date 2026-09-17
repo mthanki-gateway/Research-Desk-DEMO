@@ -16,6 +16,8 @@ import {
   getChunk,
   listDocuments,
   listSessions,
+  type ParleyConversation,
+  getParleyConversations,
 } from "@/lib/api";
 import { authEnabled, getSupabase } from "@/lib/supabase";
 import { ACCENTS, type Accent, DEFAULT_ACCENT } from "@/lib/accents";
@@ -29,10 +31,13 @@ import { ACCENTS, type Accent, DEFAULT_ACCENT } from "@/lib/accents";
  */
 type AppData = {
   sessions: ChatSession[];
+  /** Parley's spoken conversations, so the drawer and the page agree. */
+  parleyConversations: ParleyConversation[];
   documents: Document[];
   loading: boolean;
   error: string | null;
   refreshSessions: () => Promise<void>;
+  refreshParleyConversations: () => Promise<void>;
   refreshDocuments: () => Promise<void>;
   /** Documents finished ingesting and searchable. */
   readyDocuments: Document[];
@@ -90,6 +95,9 @@ export function useApp(): AppData {
 
 export function Providers({ children }: { children: React.ReactNode }) {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [parleyConversations, setParleyConversations] = useState<
+    ParleyConversation[]
+  >([]);
   const [documents, setDocuments] = useState<Document[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -188,6 +196,16 @@ export function Providers({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  const refreshParleyConversations = useCallback(async () => {
+    try {
+      setParleyConversations(await getParleyConversations());
+    } catch {
+      // Deliberately silent. An empty spoken-conversation list is not worth an
+      // error banner over the whole app, and it is the ONE list that is empty
+      // for most users most of the time.
+    }
+  }, []);
+
   const refreshDocuments = useCallback(async () => {
     try {
       setDocuments(await listDocuments());
@@ -205,10 +223,20 @@ export function Providers({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!canFetch) return;
     void (async () => {
-      await Promise.all([refreshSessions(), refreshDocuments()]);
+      await Promise.all([
+        refreshSessions(),
+        refreshDocuments(),
+        refreshParleyConversations(),
+      ]);
       setLoading(false);
     })();
-  }, [canFetch, account?.id, refreshSessions, refreshDocuments]);
+  }, [
+    canFetch,
+    account?.id,
+    refreshSessions,
+    refreshDocuments,
+    refreshParleyConversations,
+  ]);
 
   const ingesting = documents.some(
     (d) => d.status !== "ready" && d.status !== "failed",
@@ -266,6 +294,8 @@ export function Providers({ children }: { children: React.ReactNode }) {
       loading,
       error,
       refreshSessions,
+      parleyConversations,
+      refreshParleyConversations,
       refreshDocuments,
       readyDocuments: documents.filter((d) => d.status === "ready"),
       ingesting,
@@ -291,6 +321,8 @@ export function Providers({ children }: { children: React.ReactNode }) {
       loading,
       error,
       refreshSessions,
+      parleyConversations,
+      refreshParleyConversations,
       refreshDocuments,
       ingesting,
       openChunk,

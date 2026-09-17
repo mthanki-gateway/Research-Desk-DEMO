@@ -26,6 +26,7 @@ Us to browser:
     {"type":"heard","text"}     what it understood, for the screen
     {"type":"said","text"}      what it is saying, for the screen
     {"type":"tool", ...}        which tool ran, and what it found
+    {"type":"turn", ...}        the COMPLETED exchange; the client stores this
     {"type":"turn_end"}         the model has finished speaking
     {"type":"resume","handle"}  hold this; it restores the conversation
     {"type":"going_away","in"}  the server is about to drop us; reconnect
@@ -171,6 +172,32 @@ async def conversation(
         "resumable": bool(chat.live_handle),
         "turns": turns,
     }
+
+
+@router.patch("/live/conversations/{conversation_id}")
+async def rename_conversation(
+    conversation_id: uuid.UUID,
+    body: dict,
+    user: User = Depends(current_user),
+) -> dict:
+    """Rename a conversation.
+
+    The automatic title is the first thing said, which is a reasonable guess
+    and frequently a bad one -- a misheard opening line becomes the permanent
+    name of the conversation.
+    """
+    title = str(body.get("title") or "").strip()[:120]
+    if not title:
+        raise HTTPException(status_code=400, detail="A title is required.")
+
+    async with SessionLocal() as db:
+        chat = await db.get(ChatSession, conversation_id)
+        if chat is None or chat.kind != "parley":
+            raise HTTPException(status_code=404, detail="Conversation not found.")
+        forbid_if_not_owner(chat.owner_id, user)
+        chat.title = title
+        await db.commit()
+    return {"id": str(conversation_id), "title": title}
 
 
 @router.delete("/live/conversations/{conversation_id}", status_code=204)
@@ -409,6 +436,32 @@ async def _downlink(ws: WebSocket, session, user: User, chat_id) -> None:
                             "".join(said).strip(),
                             sources,
                             tools,
+                        )
+                    )
+                    # THE COMPLETED EXCHANGE, AS ONE EVENT.
+                    #
+                    # The browser used to assemble this itself from the
+                    # streaming `heard` and `said` fragments, deciding for
+                    # itself where one turn ended and the next began -- and it
+                    # got that wrong repeatedly, because the only clue it had
+                    # was the audio queue draining, which happens between
+                    # chunks. Questions were split across exchanges, and a
+                    # whole spoken sentence would land as a single stray word.
+                    #
+                    # The server already knows the boundary exactly: it is the
+                    # `turn_complete` above, the same point at which the rows
+                    # are written. Sending the assembled turn means the screen
+                    # and the database cannot disagree, and the client has
+                    # nothing left to infer.
+                    await ws.send_text(
+                        json.dumps(
+                            {
+                                "type": "turn",
+                                "question": "".join(heard).strip(),
+                                "answer": "".join(said).strip(),
+                                "sources": sources,
+                                "tools": tools,
+                            }
                         )
                     )
                     heard, said, sources, tools = [], [], [], []

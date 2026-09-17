@@ -1119,6 +1119,14 @@ export async function getParleyConversation(
   return res.json();
 }
 
+export async function renameParleyConversation(
+  id: string,
+  title: string,
+): Promise<void> {
+  const res = await authedJson(`/live/conversations/${id}`, "PATCH", { title });
+  if (!res.ok) throw new Error(await detail(res));
+}
+
 export async function deleteParleyConversation(id: string): Promise<void> {
   const res = await authedFetch(`/live/conversations/${id}`, {
     method: "DELETE",

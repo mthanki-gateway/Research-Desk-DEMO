@@ -2,12 +2,13 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { createSession } from "@/lib/api";
 import { useApp } from "./providers";
 import CommandPalette from "./command-palette";
 import ChunkPanel from "./chunk-panel";
 import { PROJECTS, SHARED_NAV, projectFor } from "./projects";
+import ParleyNav from "./parleyNav";
 // Rail widths live with the rail, so the margin reserved here and the rail
 // itself can never disagree about how wide it is.
 import { RAIL_WIDTH, RAIL_WIDTH_COLLAPSED } from "./chat/[id]/rail";
@@ -304,6 +305,20 @@ export default function Shell({ children }: { children: React.ReactNode }) {
             );
           })}
         </nav>
+
+        {/* Parley contributes its conversations to the drawer, directly under
+            its own nav item. Kept in its own component rather than branching
+            here again: the shell already carries one app-specific block, and a
+            second inline would turn the drawer into a switch over apps. */}
+        {project.id === "parley" && (
+          // Its own boundary: ParleyNav reads the query string, which opts its
+          // subtree into client rendering, and the drawer lives OUTSIDE the
+          // page's boundary -- so without one here, prerendering /parley fails
+          // for the whole route.
+          <Suspense fallback={null}>
+            <ParleyNav pathname={pathname} />
+          </Suspense>
+        )}
 
         {ingesting && (
           <div

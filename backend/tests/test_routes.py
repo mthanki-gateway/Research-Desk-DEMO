@@ -34,6 +34,7 @@ REQUIRED = {
     ("GET", "/live/status"),
     ("GET", "/live/conversations"),
     ("GET", "/live/conversations/{conversation_id}"),
+    ("PATCH", "/live/conversations/{conversation_id}"),
     ("POST", "/voice/ask"),
     ("GET", "/corpus/atlas/ray/{message_id}"),
 }

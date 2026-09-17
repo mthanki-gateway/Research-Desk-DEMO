@@ -47,6 +47,16 @@ export type LiveEvent =
       n: number;
       sources: { label: string; kind: "document" | "web"; url: string | null }[];
     }
+  /** A COMPLETED exchange, assembled server-side. The client stores this
+   *  rather than reconstructing boundaries from streaming fragments, which it
+   *  could only guess at and repeatedly got wrong. */
+  | {
+      type: "turn";
+      question: string;
+      answer: string;
+      sources: { label: string; kind: "document" | "web"; url: string | null }[];
+      tools: string[];
+    }
   | { type: "turn_end" }
   /** The server has stored a resumption handle; the conversation is safe. */
   | { type: "resume" }
@@ -177,8 +187,27 @@ export async function openLiveSession(
   let processor: ScriptProcessorNode | null = null;
   let capturing = false;
 
-  async function beginTurn() {
-    if (capturing) return;
+  /**
+   * Build the capture graph ONCE, and keep it for the whole conversation.
+   *
+   * THE BUG THIS FIXES. Every turn used to call `getUserMedia` and build a
+   * fresh AudioContext and ScriptProcessor. Opening a capture device takes
+   * anywhere from 100 to 500 milliseconds, and the countdown starts the next
+   * turn automatically -- so the speaker is very often already talking while
+   * the microphone is still opening, and those opening words are never
+   * captured at all.
+   *
+   * The first turn always looked fine because it is the one the user starts by
+   * clicking, and then speaks. Every turn after it lost its beginning, which
+   * reached the screen as a mangled transcript or a single stray word: a whole
+   * spoken sentence arriving as "7".
+   *
+   * So the graph is built on the first turn and reused. `capturing` gates
+   * whether frames are SENT, which is a boolean rather than a device.
+   */
+  async function ensureGraph(): Promise<void> {
+    if (input) return;
+
     stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
@@ -198,15 +227,6 @@ export async function openLiveSession(
     // and its callback simply never fires.
     processor.connect(input.destination);
 
-    // THE TURN OPENS HERE, not when audio starts arriving.
-    //
-    // Automatic activity detection is disabled server-side, so the model is
-    // not listening for speech to begin -- it is waiting to be told. Without
-    // this marker the audio is accepted and nothing is ever treated as a turn.
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "start" }));
-    }
-
     processor.onaudioprocess = (e) => {
       if (!capturing || ws.readyState !== WebSocket.OPEN) return;
       const floats = e.inputBuffer.getChannelData(0);
@@ -220,6 +240,30 @@ export async function openLiveSession(
       ws.send(pcm.buffer);
       onEvent({ type: "level", level: peak });
     };
+  }
+
+  async function beginTurn() {
+    if (capturing) return;
+    // Cancel any pending end-of-playback from the PREVIOUS turn.
+    if (drainTimer) {
+      window.clearTimeout(drainTimer);
+      drainTimer = null;
+    }
+    generated = false;
+
+    await ensureGraph();
+
+    // THE TURN OPENS HERE, not when audio starts arriving.
+    //
+    // Automatic activity detection is disabled server-side, so the model is
+    // not listening for speech to begin -- it is waiting to be told. Without
+    // this marker the audio is accepted and nothing is ever treated as a turn.
+    //
+    // Sent BEFORE `capturing` is set, so no frame can reach the model outside
+    // an open turn.
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "start" }));
+    }
     capturing = true;
   }
 
@@ -240,7 +284,9 @@ export async function openLiveSession(
   }
 
   function endTurn() {
-    releaseMicrophone();
+    // The graph STAYS UP. Tearing it down here is what made the next turn miss
+    // its opening words; `capturing` alone decides whether frames are sent.
+    capturing = false;
     if (ws.readyState === WebSocket.OPEN) {
       // THE ONLY THING THAT ENDS A TURN. The model does not decide; a pause
       // does not decide; this click decides.
@@ -261,11 +307,6 @@ export async function openLiveSession(
         // several seconds later.
         generated = true;
         scheduleFinish();
-      }
-      if (parsed.type === "heard" || parsed.type === "said") {
-        // A new turn has begun producing content, so any pending finish from
-        // the previous one is stale.
-        if (parsed.type === "heard") generated = false;
       }
       onEvent(parsed);
     } catch {

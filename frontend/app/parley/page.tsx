@@ -1,14 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  type LiveStatus,
-  type ParleyConversation,
-  deleteParleyConversation,
-  getLiveStatus,
-  getParleyConversation,
-  getParleyConversations,
-} from "@/lib/api";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { type LiveStatus, getLiveStatus, getParleyConversation } from "@/lib/api";
+import { useApp } from "../providers";
 import { Switch } from "../md";
 import {
   IconParley,
@@ -17,7 +12,6 @@ import {
   IconSearch,
   IconSpinner,
   IconStop,
-  IconTrash,
   IconWave,
 } from "../icons";
 import { type LiveEvent, type LiveSession, openLiveSession } from "./liveSession";
@@ -92,7 +86,34 @@ type Exchange = {
 
 const EMPTY = { question: "", answer: "", tools: [], sources: [] };
 
-export default function Parley() {
+/**
+ * `useSearchParams` opts the tree into client rendering, and Next requires a
+ * Suspense boundary around that so the rest of the page can still be
+ * prerendered. Without it the build fails outright.
+ */
+export default function ParleyPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="mx-auto max-w-3xl space-y-6 px-6 py-9" aria-hidden>
+          <div className="md-skeleton h-8 w-40" />
+          <div className="md-skeleton h-[22rem]" />
+        </div>
+      }
+    >
+      <Parley />
+    </Suspense>
+  );
+}
+
+function Parley() {
+  // The drawer owns the conversation LIST; this page owns the conversation.
+  // They meet at `?c=<id>`, which is a real URL -- so a conversation can be
+  // linked to, reloaded, and reached with the back button.
+  const params = useSearchParams();
+  const wanted = params.get("c");
+  const { refreshParleyConversations } = useApp();
+
   const [status, setStatus] = useState<LiveStatus | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -104,7 +125,6 @@ export default function Parley() {
   const [exchanges, setExchanges] = useState<Exchange[]>([]);
   /** Which stored conversation this socket appends to. */
   const [conversationId, setConversationId] = useState<string | null>(null);
-  const [conversations, setConversations] = useState<ParleyConversation[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
 
   /**
@@ -136,17 +156,12 @@ export default function Parley() {
       );
   }, []);
 
-  const refreshConversations = useCallback(async () => {
-    try {
-      setConversations(await getParleyConversations());
-    } catch {
-      // A missing list is not worth an error banner over the microphone.
-    }
-  }, []);
-
+  // Follow the URL. `openConversation` is defined below and captured through
+  // a ref, so the two do not have to be declared in a particular order.
+  const openRef = useRef<(id: string) => void>(() => {});
   useEffect(() => {
-    void refreshConversations();
-  }, [refreshConversations]);
+    if (wanted && wanted !== conversationId) openRef.current(wanted);
+  }, [wanted, conversationId]);
 
   useEffect(
     () => () => {
@@ -157,11 +172,18 @@ export default function Parley() {
     [],
   );
 
-  const commit = useCallback(() => {
-    const turn = live.current;
-    if (!turn.question && !turn.answer) return;
-    setExchanges((prev) => [{ id: `${Date.now()}`, ...turn }, ...prev]);
-    live.current = { ...EMPTY, tools: [], sources: [] };
+  /**
+   * Clear the in-flight display.
+   *
+   * It no longer COMMITS anything: the server sends the completed exchange as
+   * a single `turn` event, at the same moment it writes the rows. The browser
+   * used to assemble exchanges itself from streaming fragments, deciding where
+   * one turn ended by watching the audio queue drain -- which happens between
+   * chunks, so questions were split across cards and a whole spoken sentence
+   * could land as one stray word.
+   */
+  const clearInFlight = useCallback(() => {
+    live.current = { question: "", answer: "", tools: [], sources: [] };
     setTick((n) => n + 1);
   }, []);
 
@@ -227,13 +249,27 @@ export default function Parley() {
           setTick((n) => n + 1);
           break;
         }
+        case "turn":
+          // The record, from the one place that knows the boundary.
+          if (event.question || event.answer) {
+            setExchanges((prev) => [
+              {
+                id: `${Date.now()}`,
+                question: event.question,
+                answer: event.answer,
+                sources: event.sources,
+                tools: event.tools.map((tool) => ({ tool, n: 0 })),
+              },
+              ...prev,
+            ]);
+          }
+          clearInFlight();
+          // The rows are written, so the list's titles and counts are stale.
+          void refreshParleyConversations();
+          break;
         case "playback_end":
-          commit();
-          // The turn is now written server-side, so the list's titles and
-          // counts are stale.
-          void refreshConversations();
-          // Not straight back to idle: the microphone reopens on a countdown
-          // the user can see and stop.
+          // Only the countdown. The exchange was stored when `turn` arrived;
+          // this is purely "the speakers have gone quiet".
           beginCountdown();
           break;
         case "turn_end":
@@ -271,7 +307,7 @@ export default function Parley() {
           break;
       }
     },
-    [commit, beginCountdown, stopCountdown, refreshConversations],
+    [clearInFlight, beginCountdown, stopCountdown, refreshParleyConversations],
   );
 
   const start = useCallback(async () => {
@@ -316,6 +352,10 @@ export default function Parley() {
     startRef.current = () => void start();
   }, [start]);
 
+  useEffect(() => {
+    openRef.current = (id: string) => void openConversation(id);
+  });
+
   const stop = useCallback(() => {
     if (timer.current) {
       window.clearInterval(timer.current);
@@ -329,14 +369,14 @@ export default function Parley() {
   /** Leave this conversation intact and begin a new one. */
   const startFresh = useCallback(() => {
     stopCountdown();
-    commit();
+    clearInFlight();
     session.current?.close();
     session.current = null;
     setConversationId(null);
     setExchanges([]);
     setResumed(false);
     setPhase("idle");
-  }, [commit, stopCountdown]);
+  }, [clearInFlight, stopCountdown]);
 
   /** Open a stored conversation and continue it. */
   const openConversation = useCallback(
@@ -419,8 +459,9 @@ export default function Parley() {
           onStart={() => void start()}
           onStop={stop}
           onStopSpeaking={() => {
+            // The exchange is already stored; stopping playback only ends the
+            // sound, so nothing is lost by cutting it off.
             session.current?.stopSpeaking();
-            commit();
             beginCountdown();
           }}
         />
@@ -445,6 +486,8 @@ export default function Parley() {
         >
           {listening
             ? "It will not answer until you click. Pausing mid-sentence is fine."
+            : speaking
+              ? "Nothing is being sent while it speaks."
             : counting
               ? "Click to start now, or stay quiet to cancel."
               : status?.web_search
@@ -608,27 +651,6 @@ export default function Parley() {
       )}
 
       {/* ---- the conversation, and the ones before it -------------------- */}
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="md-title-medium">
-          {conversationId && exchanges.length > 0
-            ? "This conversation"
-            : "Conversation"}
-        </h2>
-        {(exchanges.length > 0 || conversationId) && (
-          <button
-            type="button"
-            onClick={startFresh}
-            className="md-label-large rounded-[var(--md-shape-full)] px-3 py-1.5"
-            style={{
-              background: "var(--md-surface-container-high)",
-              color: "var(--md-on-surface)",
-            }}
-          >
-            Start a new one
-          </button>
-        )}
-      </div>
-
       {loadingHistory ? (
         <div className="space-y-3" aria-hidden>
           {[0, 1].map((i) => (
@@ -655,59 +677,6 @@ export default function Parley() {
         </ol>
       )}
 
-      {/* ---- earlier conversations --------------------------------------
-          Shown like the chat app's session list, because that is what it is:
-          the same table, the same owner scoping, and the same expectation
-          that a conversation can be picked up again. */}
-      {conversations.filter((c) => c.id !== conversationId).length > 0 && (
-        <section className="space-y-3 pt-2">
-          <h2 className="md-title-medium">Earlier conversations</h2>
-          <ul className="space-y-2">
-            {conversations
-              .filter((c) => c.id !== conversationId)
-              .map((c) => (
-                <li
-                  key={c.id}
-                  className="md-card md-card-outlined flex items-center gap-3 p-3"
-                >
-                  <button
-                    type="button"
-                    onClick={() => void openConversation(c.id)}
-                    className="min-w-0 flex-1 text-left"
-                  >
-                    <span className="md-body-medium block truncate font-medium">
-                      {c.title}
-                    </span>
-                    <span
-                      className="md-body-small mt-0.5 block"
-                      style={{ color: "var(--md-on-surface-variant)" }}
-                    >
-                      {c.turns} turn{c.turns === 1 ? "" : "s"} ·{" "}
-                      {new Date(c.updated_at).toLocaleString()}
-                      {/* Readable and continuable are different things, and
-                          the difference is invisible until you try to speak. */}
-                      {c.resumable ? "" : " · context expired, read only"}
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    aria-label={`Delete ${c.title}`}
-                    onClick={() => {
-                      void deleteParleyConversation(c.id).then(() => {
-                        if (c.id === conversationId) startFresh();
-                        void refreshConversations();
-                      });
-                    }}
-                    className="shrink-0 rounded-[var(--md-shape-full)] p-2"
-                    style={{ color: "var(--md-on-surface-variant)" }}
-                  >
-                    <IconTrash className="h-4 w-4" />
-                  </button>
-                </li>
-              ))}
-          </ul>
-        </section>
-      )}
     </div>
   );
 }

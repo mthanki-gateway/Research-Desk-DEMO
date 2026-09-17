@@ -69,6 +69,9 @@ def turn(ws, pcm: bytes, label: str) -> None:
         at = time.time() - started
         if kind in ("heard", "said"):
             print(f"  {at:5.1f}s  {kind:10} {event['text']!r}", flush=True)
+        elif kind == "turn":
+            print(f"  {at:5.1f}s  TURN  Q={event['question']!r}", flush=True)
+            print(f"           A={event['answer'][:90]!r}", flush=True)
         elif kind == "tool":
             print(f"  {at:5.1f}s  tool       {event['tool']}", flush=True)
         else:
