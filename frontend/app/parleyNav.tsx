@@ -133,7 +133,11 @@ export default function ParleyNav({
        visible at all. The indent and the rule say "inside this" without
        needing a second label to explain it. */
     <div
-      className="ml-5 mt-0.5 border-l pl-1"
+      /* `mb-3` separates one mode's block from the next nav item. Without it
+         Speak's conversations sat flush against Interview, and the indent
+         alone was not enough to say where one group ended -- the last
+         conversation read as though it belonged to the item below it. */
+      className="ml-5 mb-3 mt-0.5 border-l pl-1"
       style={{ borderColor: "var(--md-nav-outline, rgba(0,0,0,0.10))" }}
     >
       <button

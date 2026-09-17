@@ -25,21 +25,43 @@ class TestToolsAreShared:
             spec["name"]: spec["description"]
             for spec in agent_tools.tool_specs()[0]["functionDeclarations"]
         }
-        for declaration in live._declarations():
+        for declaration in live._declarations("speak"):
             assert declaration.description == source[declaration.name]
 
     def test_only_the_spoken_subset_is_offered(self):
-        names = {d.name for d in live._declarations()}
-        assert names <= set(live.SPOKEN_TOOLS)
+        names = {d.name for d in live._declarations("speak")}
+        assert names <= set(live.SPOKEN_TOOLS["speak"])
         # The two that make no sense out loud.
         assert "remember_preference" not in names
         assert "read_around" not in names
 
-    def test_retrieval_and_the_web_are_both_there(self):
+    def test_speak_reaches_both_the_corpus_and_the_web(self):
         """A voice assistant that can only reach one of them is half the app."""
-        names = {d.name for d in live._declarations()}
+        names = {d.name for d in live._declarations("speak")}
         assert "search_documents" in names
         assert "search_web" in names
+
+    def test_the_interview_has_no_retrieval_at_all(self):
+        """It is asking about a PERSON, not answering about the corpus.
+
+        A tool that is offered will eventually be used: an interviewer with
+        document search reaches for it and starts explaining the user's own
+        files back at them instead of asking anything.
+        """
+        names = {d.name for d in live._declarations("interview")}
+        assert "search_documents" not in names
+        assert "list_documents" not in names
+        assert "corpus_stats" not in names
+
+    def test_the_interview_keeps_the_web(self):
+        """Worth being able to place a company or a technology they mention."""
+        assert "search_web" in {d.name for d in live._declarations("interview")}
+
+    def test_only_the_interview_can_record_a_profile(self):
+        assert "record_profile" in {
+            d.name for d in live._declarations("interview")
+        }
+        assert "record_profile" not in {d.name for d in live._declarations("speak")}
 
     def test_a_tool_with_no_arguments_declares_no_schema(self):
         """An empty OBJECT schema is REJECTED by the API.
@@ -48,12 +70,12 @@ class TestToolsAreShared:
         `{type: OBJECT, properties: {}}` fails the whole session at connect
         time, so the app never starts rather than the tool never working.
         """
-        for declaration in live._declarations():
+        for declaration in live._declarations("speak"):
             if declaration.name in ("list_documents", "corpus_stats"):
                 assert declaration.parameters is None, declaration.name
 
     def test_a_tool_with_arguments_declares_them(self):
-        by_name = {d.name: d for d in live._declarations()}
+        by_name = {d.name: d for d in live._declarations("speak")}
         search = by_name["search_documents"]
         assert search.parameters is not None
         assert "query" in (search.parameters.properties or {})
@@ -281,10 +303,9 @@ class TestModes:
         assert "above" in system and "below" in system
 
     @pytest.mark.parametrize("mode", ["speak", "interview"])
-    def test_every_mode_reaches_the_tools(self, mode):
-        """An interview that cannot look anything up asks worse questions."""
-        system = _flat(mode)
-        assert "search_documents" in system or "search the user" in system.lower()
+    def test_every_mode_reaches_the_web(self, mode):
+        """Both need to be able to look something up, for different reasons."""
+        assert "search_web" in _flat(mode)
 
 
 def _flat(mode: str) -> str:

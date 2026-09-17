@@ -1090,6 +1090,8 @@ export type ParleyConversation = {
   title: string;
   turns: number;
   updated_at: string;
+  /** Interview only: every required field is filled. */
+  complete: boolean;
   /** Whether the live CONTEXT can be restored, not merely the transcript read.
    *  Without a handle it can be reread but not continued. */
   resumable: boolean;
@@ -1122,9 +1124,33 @@ export async function getParleyConversations(
   return res.json();
 }
 
+/** One field the interview is trying to fill. */
+export type ProfileField = {
+  name: string;
+  required: boolean;
+  kind: string;
+};
+
+/** What has been gathered. Values are strings, numbers or string lists. */
+export type Profile = Record<string, string | number | string[]>;
+
+export async function getProfileFields(): Promise<ProfileField[]> {
+  const res = await authedFetch("/live/profile-fields", { cache: "no-store" });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
 export async function getParleyConversation(
   id: string,
-): Promise<{ id: string; title: string; resumable: boolean; turns: ParleyTurn[] }> {
+): Promise<{
+  id: string;
+  title: string;
+  resumable: boolean;
+  turns: ParleyTurn[];
+  profile: Profile;
+  missing: string[];
+  complete: boolean;
+}> {
   const res = await authedFetch(`/live/conversations/${id}`, {
     cache: "no-store",
   });

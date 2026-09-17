@@ -147,6 +147,15 @@ class ChatSession(Base):
     # rather than held in the browser's sessionStorage, which dies with the tab.
     live_handle: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Interview only: the structured profile built during the conversation.
+    #
+    # Accumulated by a TOOL the model calls as it learns things, rather than
+    # extracted from the transcript afterwards. Two reasons: the model knows
+    # what it just heard far better than a later parser can recover it, and the
+    # tool's RESULT is what tells it which fields are still missing -- so the
+    # same call that records an answer also steers the next question.
+    profile: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

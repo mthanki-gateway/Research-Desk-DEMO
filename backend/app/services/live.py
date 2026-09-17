@@ -58,7 +58,7 @@ from google.genai import types
 
 from app.agent import tools as agent_tools
 from app.config import get_settings
-from app.services import live_prompts, websearch
+from app.services import live_prompts, profile, websearch
 
 log = structlog.get_logger()
 
@@ -86,7 +86,23 @@ TRAILING_SILENCE = bytes(INPUT_RATE * 2)
 # conversation with stored memory, and `read_around` because following a
 # passage's neighbours is a reading behaviour -- a listener cannot hold three
 # adjacent chunks in their head to compare them.
-SPOKEN_TOOLS = ("search_documents", "search_web", "list_documents", "corpus_stats")
+# Which of the agent's tools each mode may call.
+#
+# INTERVIEW GETS NO RETRIEVAL. It is not answering questions about the corpus,
+# it is asking them about a person, and a tool that is offered will eventually
+# be used -- an interviewer with document search reaches for it and starts
+# explaining the user's own files back at them instead of asking anything. The
+# web stays, because a passing mention of a company or a technology is worth
+# being able to place.
+#
+# Neither mode gets `remember_preference` (a voice turn is not part of a
+# conversation with stored preferences) or `read_around` (following a passage's
+# neighbours is a reading behaviour; a listener cannot hold three adjacent
+# chunks in their head).
+SPOKEN_TOOLS: dict[str, tuple[str, ...]] = {
+    "speak": ("search_documents", "search_web", "list_documents", "corpus_stats"),
+    "interview": ("search_web",),
+}
 
 # Which prompt, and which kind of stored conversation, each mode uses.
 #
@@ -115,7 +131,7 @@ def enabled() -> bool:
     return bool(get_settings().google_api_key)
 
 
-def _declarations() -> list[types.FunctionDeclaration]:
+def _declarations(mode: str = DEFAULT_MODE) -> list[types.FunctionDeclaration]:
     """Our tool specs, translated into the Live SDK's types.
 
     Built from `agent_tools.tool_specs()` rather than written out again, so a
@@ -123,16 +139,37 @@ def _declarations() -> list[types.FunctionDeclaration]:
     tool description drift, and a drifted description is a model that calls the
     wrong tool for reasons nobody can see.
     """
-    declared = agent_tools.tool_specs()[0]["functionDeclarations"]
+    allowed = SPOKEN_TOOLS[mode_of(mode)]
+    declared = list(agent_tools.tool_specs()[0]["functionDeclarations"])
+    # The interview's own tool, which belongs to no agent: it records rather
+    # than retrieves, and its result is what tells the interviewer what to ask
+    # next. Declared here rather than in `agent_tools` because the typed agent
+    # has no use for it.
+    if mode_of(mode) == "interview":
+        declared.append(profile.declaration())
+
     out = []
     for spec in declared:
-        if spec["name"] not in SPOKEN_TOOLS:
+        if spec["name"] not in allowed and spec["name"] != profile.TOOL_NAME:
             continue
         params = spec.get("parameters") or {}
         properties = {
             name: types.Schema(
                 type=(field.get("type") or "STRING").upper(),
                 description=field.get("description"),
+                # ARRAY MUST DECLARE ITS ITEM TYPE. Omitting it is not a
+                # tolerated default -- the API rejects the entire setup
+                # message, so the session never opens and the whole mode is
+                # dead rather than one tool being broken:
+                #   function_declarations[1].parameters.properties[interests]
+                #   .items: missing field
+                items=(
+                    types.Schema(
+                        type=((field.get("items") or {}).get("type") or "STRING").upper()
+                    )
+                    if (field.get("type") or "").upper() == "ARRAY"
+                    else None
+                ),
             )
             for name, field in (params.get("properties") or {}).items()
         }
@@ -176,7 +213,7 @@ def config(
                 prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice)
             )
         ),
-        tools=[types.Tool(function_declarations=_declarations())],
+        tools=[types.Tool(function_declarations=_declarations(mode))],
         system_instruction=types.Content(
             parts=[types.Part(text=MODES[mode_of(mode)]["system"] + reach)]
         ),
@@ -235,8 +272,44 @@ def client() -> genai.Client:
     )
 
 
+async def record_profile(
+    session_id: uuid.UUID, args: dict
+) -> tuple[str, dict, bool]:
+    """Fold what the model just learned into the stored profile.
+
+    Returns (what to tell the model, the merged profile, whether it is
+    complete). The FIRST of those is the important one: it lists the fields
+    still missing, which is how the interviewer knows what to ask next without
+    re-deriving it from a growing transcript.
+
+    Read-modify-write on one row. Two calls racing would lose one update, which
+    cannot happen here -- a live session has one model producing one tool call
+    at a time -- and a lock across a network round trip would cost more than
+    the problem it prevents.
+    """
+    from app.db.models import ChatSession
+    from app.db.session import SessionLocal
+
+    async with SessionLocal() as db:
+        chat = await db.get(ChatSession, session_id)
+        if chat is None:
+            return "The profile could not be saved.", {}, False
+        merged = profile.merge(chat.profile or {}, args)
+        chat.profile = merged
+        await db.commit()
+
+    done = profile.complete(merged)
+    log.info(
+        "profile_recorded",
+        fields=sorted(args),
+        missing=profile.missing(merged),
+        complete=done,
+    )
+    return profile.render(merged), merged, done
+
+
 async def run_tool_call(
-    call: Any, *, owner_id: str | None, top_k: int
+    call: Any, *, owner_id: str | None, top_k: int, session_id: uuid.UUID | None = None
 ) -> tuple[types.FunctionResponse, dict]:
     """Execute one tool the live model asked for, on the real corpus.
 
@@ -250,6 +323,32 @@ async def run_tool_call(
     """
     name = call.name
     args = dict(call.args or {})
+
+    # Not a retrieval tool: it writes, and its result steers the next question.
+    if name == profile.TOOL_NAME:
+        if session_id is None:
+            return (
+                types.FunctionResponse(
+                    id=call.id, name=name, response={"result": "No conversation to save to."}
+                ),
+                {"tool": name, "args": args, "n": 0, "sources": []},
+            )
+        observation, merged, done = await record_profile(session_id, args)
+        return (
+            types.FunctionResponse(id=call.id, name=name, response={"result": observation}),
+            {
+                "tool": name,
+                "args": args,
+                "n": 0,
+                "sources": [],
+                # Sent on to the browser so the profile can fill in on screen as
+                # it is gathered, rather than appearing only once it is done.
+                "profile": merged,
+                "missing": profile.missing(merged),
+                "complete": done,
+            },
+        )
+
     try:
         hits, observation = await agent_tools.run_tool(
             name,

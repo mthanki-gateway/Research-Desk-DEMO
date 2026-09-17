@@ -112,6 +112,9 @@ _MIGRATIONS: tuple[str, ...] = (
     "NOT NULL DEFAULT 'chat'",
     "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS live_handle TEXT",
     "CREATE INDEX IF NOT EXISTS chat_sessions_kind_idx ON chat_sessions (kind)",
+    # The interview's structured output, filled in by the model as it goes.
+    "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS profile JSONB "
+    "NOT NULL DEFAULT '{}'::jsonb",
 )
 
 

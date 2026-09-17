@@ -52,6 +52,11 @@ export type LiveEvent =
       args: Record<string, unknown>;
       n: number;
       sources: { label: string; kind: "document" | "web"; url: string | null }[];
+      /** `record_profile` only: the merged profile and what is still missing,
+       *  so the card fills in as the interview happens rather than at the end. */
+      profile?: Record<string, string | number | string[]>;
+      missing?: string[];
+      complete?: boolean;
     }
   /** A COMPLETED exchange, assembled server-side. The client stores this
    *  rather than reconstructing boundaries from streaming fragments, which it

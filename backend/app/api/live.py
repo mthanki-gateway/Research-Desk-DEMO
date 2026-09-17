@@ -136,6 +136,8 @@ async def conversations(
             # the transcript being readable. Without a handle the conversation
             # can be reread but not continued, and those are different things.
             "resumable": bool(chat.live_handle),
+            # So the list can mark a finished interview without opening it.
+            "complete": live.profile.complete(chat.profile or {}),
         }
         for chat, n in rows
         if n
@@ -180,6 +182,10 @@ async def conversation(
         "title": chat.title,
         "resumable": bool(chat.live_handle),
         "turns": turns,
+        # Interview only; an empty object everywhere else.
+        "profile": chat.profile or {},
+        "missing": live.profile.missing(chat.profile or {}),
+        "complete": live.profile.complete(chat.profile or {}),
     }
 
 
@@ -220,6 +226,24 @@ async def remove_conversation(
         forbid_if_not_owner(chat.owner_id, user)
         await db.delete(chat)
         await db.commit()
+
+
+@router.get("/live/profile-fields")
+async def profile_fields() -> list[dict]:
+    """The fields an interview is trying to fill, for rendering the card.
+
+    Served rather than duplicated in the frontend: the schema, the tool
+    declaration and the completeness check all come from one list, and a
+    fourth copy in TypeScript is the one that would drift.
+    """
+    return [
+        {
+            "name": f["name"],
+            "required": f["required"],
+            "kind": f.get("type", "STRING"),
+        }
+        for f in live.profile.FIELDS
+    ]
 
 
 async def _authenticate(token: str) -> User | None:
@@ -515,6 +539,7 @@ async def _downlink(ws: WebSocket, session, user: User, chat_id) -> None:
                         call,
                         owner_id=user.owner_id,
                         top_k=settings.retrieval_top_k,
+                        session_id=chat_id,
                     )
                     responses.append(response)
                     # Reported as it happens, not at the end. A search takes a

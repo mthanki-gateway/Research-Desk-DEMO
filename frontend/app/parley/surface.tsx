@@ -5,8 +5,11 @@ import { useSearchParams } from "next/navigation";
 import {
   type LiveStatus,
   type Mode,
+  type Profile,
+  type ProfileField,
   getLiveStatus,
   getParleyConversation,
+  getProfileFields,
 } from "@/lib/api";
 import { useApp } from "../providers";
 import { Switch } from "../md";
@@ -155,6 +158,11 @@ function Parley({ mode }: { mode: Mode }) {
   /** Which stored conversation this socket appends to. */
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [loadingHistory, setLoadingHistory] = useState(false);
+  /** Interview only: what has been gathered, and what is still missing. */
+  const [fields, setFields] = useState<ProfileField[]>([]);
+  const [profileData, setProfileData] = useState<Profile>({});
+  const [missing, setMissing] = useState<string[]>([]);
+  const [profileDone, setProfileDone] = useState(false);
 
   /**
    * The turn in flight.
@@ -173,6 +181,13 @@ function Parley({ mode }: { mode: Mode }) {
   const [remaining, setRemaining] = useState(0);
   /** The conversation survived a reconnect — worth saying once. */
   const [resumed, setResumed] = useState(false);
+
+  useEffect(() => {
+    // The field list comes from the server, where the tool schema and the
+    // completeness check already live. A fourth copy in TypeScript is the one
+    // that would drift.
+    if (mode === "interview") getProfileFields().then(setFields).catch(() => {});
+  }, [mode]);
 
   useEffect(() => {
     getLiveStatus()
@@ -268,6 +283,11 @@ function Parley({ mode }: { mode: Mode }) {
           break;
         case "tool": {
           live.current.tools.push({ tool: event.tool, n: event.n });
+          if (event.profile) {
+            setProfileData(event.profile);
+            setMissing(event.missing ?? []);
+            setProfileDone(Boolean(event.complete));
+          }
           for (const s of event.sources) {
             const key = `${s.kind}:${s.url ?? s.label}`;
             const known = live.current.sources.some(
@@ -404,6 +424,9 @@ function Parley({ mode }: { mode: Mode }) {
     session.current = null;
     setConversationId(null);
     setExchanges([]);
+    setProfileData({});
+    setMissing([]);
+    setProfileDone(false);
     setResumed(false);
     setPhase("idle");
   }, [clearInFlight, stopCountdown]);
@@ -420,6 +443,9 @@ function Parley({ mode }: { mode: Mode }) {
       try {
         const detail = await getParleyConversation(id);
         setConversationId(id);
+        setProfileData(detail.profile ?? {});
+        setMissing(detail.missing ?? []);
+        setProfileDone(Boolean(detail.complete));
         // Newest first, matching the live view -- the turn just spoken should
         // be the one under the button, not buried at the bottom.
         setExchanges(
@@ -613,6 +639,15 @@ function Parley({ mode }: { mode: Mode }) {
             <span className="md-skeleton block h-3 w-48" />
           </div>
         </section>
+      )}
+
+      {mode === "interview" && fields.length > 0 && (
+        <ProfileCard
+          fields={fields}
+          profile={profileData}
+          missing={missing}
+          complete={profileDone}
+        />
       )}
 
       {status?.enabled && (
@@ -902,4 +937,96 @@ function toolLabel(tool: string): string {
   if (tool === "list_documents") return "checked your document list";
   if (tool === "corpus_stats") return "checked collection statistics";
   return tool;
+}
+
+
+/**
+ * What the interview has gathered, filling in as it goes.
+ *
+ * Shown because a conversation whose PRODUCT is a profile should show the
+ * profile. The alternative is a transcript and a promise, where the only way
+ * to know whether anything was captured is to finish and go looking.
+ *
+ * Required fields are listed even when empty, so the remaining work is
+ * visible; optional ones appear only once they have something in them, because
+ * a permanent row of blanks reads as a form that was abandoned.
+ */
+function ProfileCard({
+  fields,
+  profile,
+  missing,
+  complete,
+}: {
+  fields: ProfileField[];
+  profile: Profile;
+  missing: string[];
+  complete: boolean;
+}) {
+  const shown = fields.filter(
+    (f) => f.required || profile[f.name] !== undefined,
+  );
+  const filled = fields.filter((f) => f.required && !missing.includes(f.name));
+
+  return (
+    <section className="md-card md-card-outlined p-5">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <h2 className="md-title-medium">Profile</h2>
+        <span
+          className="md-label-medium rounded-[var(--md-shape-full)] px-2.5 py-1"
+          style={{
+            background: complete
+              ? "var(--md-secondary-container)"
+              : "var(--md-surface-container-high)",
+            color: complete
+              ? "var(--md-on-secondary-container)"
+              : "var(--md-on-surface-variant)",
+          }}
+        >
+          {complete
+            ? "Complete"
+            : `${filled.length} of ${fields.filter((f) => f.required).length}`}
+        </span>
+      </div>
+
+      <dl className="space-y-2">
+        {shown.map((f) => {
+          const value = profile[f.name];
+          const empty = value === undefined || value === "" ;
+          return (
+            <div key={f.name} className="flex gap-3">
+              <dt
+                className="md-body-small w-40 shrink-0"
+                style={{ color: "var(--md-on-surface-variant)" }}
+              >
+                {label(f.name)}
+              </dt>
+              <dd className="md-body-medium min-w-0 flex-1">
+                {empty ? (
+                  <span style={{ color: "var(--md-on-surface-variant)" }}>
+                    &mdash;
+                  </span>
+                ) : Array.isArray(value) ? (
+                  <span className="flex flex-wrap gap-1.5">
+                    {value.map((v) => (
+                      <span key={v} className="md-badge">
+                        {v}
+                      </span>
+                    ))}
+                  </span>
+                ) : (
+                  String(value)
+                )}
+              </dd>
+            </div>
+          );
+        })}
+      </dl>
+    </section>
+  );
+}
+
+/** `years_experience` -> "Years experience". The API names fields for code. */
+function label(name: string): string {
+  const words = name.replace(/_/g, " ");
+  return words.charAt(0).toUpperCase() + words.slice(1);
 }
