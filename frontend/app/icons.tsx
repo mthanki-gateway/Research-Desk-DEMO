@@ -269,3 +269,26 @@ export const IconSpinner = ({ className = "h-4 w-4" }: Props) => (
     <path d="M12 3a9 9 0 1 0 9 9" />
   </svg>
 );
+
+/** A magic link: the thing you send to whoever is being interviewed. */
+export const IconLink = (p: Props) => (
+  <Svg {...p}>
+    <path d="M10 13.5a4 4 0 0 0 5.7.3l2.8-2.8a4 4 0 0 0-5.7-5.7l-1.6 1.6" />
+    <path d="M14 10.5a4 4 0 0 0-5.7-.3l-2.8 2.8a4 4 0 0 0 5.7 5.7l1.6-1.6" />
+  </Svg>
+);
+
+export const IconCopy = (p: Props) => (
+  <Svg {...p}>
+    <rect x="9" y="9" width="11" height="11" rx="2" />
+    <path d="M6 15H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v1" />
+  </Svg>
+);
+
+/** Fetch again — for state that changes in somebody else's browser. */
+export const IconRefresh = (p: Props) => (
+  <Svg {...p}>
+    <path d="M20 11a8 8 0 1 0-.7 4.3" />
+    <path d="M20 5v6h-6" />
+  </Svg>
+);

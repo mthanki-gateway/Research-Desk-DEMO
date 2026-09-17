@@ -1193,6 +1193,9 @@ export async function getParleyConversation(
   fields: BlueprintField[];
   brief: string;
   participant: string;
+  /** Howler only: the project this conversation belongs to, so reading a
+   *  result has a way back to it. Null for a session with no project. */
+  project_id: string | null;
 }> {
   const res = await authedFetch(`/live/conversations/${id}`, {
     cache: "no-store",
@@ -1211,6 +1214,148 @@ export async function renameParleyConversation(
 
 export async function deleteParleyConversation(id: string): Promise<void> {
   const res = await authedFetch(`/live/conversations/${id}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(await detail(res));
+}
+
+/* ------------------------------------------------------------------ Howler
+ *
+ * A PROJECT, not a conversation. One brief is worth interviewing several
+ * people against, so the brief, the data points it produced, the links sent
+ * out and the results they returned all outlive any single session.
+ *
+ * The designer chat is a plain request/response — no streaming, no socket.
+ * Each turn returns the reply AND the revised project together, because the
+ * panel beside the chat has to update in the same round trip that answers
+ * you: watching the data points change as you talk is the entire reason this
+ * is a conversation rather than a form.
+ */
+
+export type DesignMessage = { role: "user" | "assistant"; content: string };
+
+export type HowlerProject = {
+  id: string;
+  title: string;
+  brief: string;
+  participant: string;
+  fields: BlueprintField[];
+  design: DesignMessage[];
+  created_at: string | null;
+  /** Only on the list endpoint. */
+  invites?: number;
+};
+
+/** What came back through one link. Null until somebody opens it. */
+export type InviteResult = {
+  session_id: string;
+  title: string;
+  turns: number;
+  summary: string;
+  complete: boolean;
+  missing: string[];
+  /** What was gathered. */
+  profile: Profile;
+  /** The schema THIS conversation was given, which is not necessarily the
+   *  project's current one — a link opened last week gathered last week's
+   *  data points, and rendering it against today's would invent empty rows
+   *  for fields nobody was asked about. */
+  fields: BlueprintField[];
+};
+
+export type HowlerInvite = {
+  id: string;
+  token: string;
+  label: string;
+  participant: string;
+  opens: number;
+  last_opened_at: string | null;
+  revoked: boolean;
+  /** Derived server-side from the conversation, never stored. */
+  status: "unopened" | "in_progress" | "complete" | "revoked";
+  result: InviteResult | null;
+};
+
+export type DesignTurn = {
+  reply: string;
+  ready: boolean;
+  project: HowlerProject;
+  /** Only from `synthesiseHowlerProject`. */
+  invite?: HowlerInvite;
+};
+
+export async function listHowlerProjects(): Promise<HowlerProject[]> {
+  const res = await authedFetch("/howler/projects", { cache: "no-store" });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function getHowlerProject(id: string): Promise<HowlerProject> {
+  const res = await authedFetch(`/howler/projects/${id}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+/** A brief is optional — the designer conversation is where one gets written. */
+export async function createHowlerProject(
+  brief = "",
+): Promise<HowlerProject> {
+  const res = await authedJson("/howler/projects", "POST", { brief });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function deleteHowlerProject(id: string): Promise<void> {
+  const res = await authedFetch(`/howler/projects/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await detail(res));
+}
+
+export async function designHowlerProject(
+  id: string,
+  message: string,
+): Promise<DesignTurn> {
+  const res = await authedJson(`/howler/projects/${id}/design`, "POST", {
+    message,
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+/** "That is enough talking." Commits to a schema and returns a link with it. */
+export async function synthesiseHowlerProject(
+  id: string,
+  message?: string,
+): Promise<DesignTurn> {
+  const res = await authedJson(`/howler/projects/${id}/synthesise`, "POST", {
+    message,
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function listHowlerInvites(id: string): Promise<HowlerInvite[]> {
+  const res = await authedFetch(`/howler/projects/${id}/invites`, {
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function createHowlerInvite(
+  id: string,
+  label: string,
+  participant = "",
+): Promise<HowlerInvite> {
+  const res = await authedJson(`/howler/projects/${id}/invites`, "POST", {
+    label,
+    participant,
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function revokeHowlerInvite(inviteId: string): Promise<void> {
+  const res = await authedFetch(`/howler/invites/${inviteId}`, {
     method: "DELETE",
   });
   if (!res.ok) throw new Error(await detail(res));

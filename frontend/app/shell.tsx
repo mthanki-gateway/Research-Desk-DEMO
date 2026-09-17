@@ -85,10 +85,16 @@ export default function Shell({ children }: { children: React.ReactNode }) {
   );
   const scroller = useAutoHideScroll<HTMLElement>();
 
-  // /login and /auth/* must render without the drawer, and must never be
-  // gated — gating them would loop.
+  // Routes that render WITHOUT the drawer and are never gated.
+  //
+  // /login and /auth/* because gating them would loop. /howl/* because it is
+  // the magic link: somebody with no account, who must not be bounced to a
+  // login they cannot complete, and who should see one interview rather than
+  // a drawer full of apps that are not theirs.
   const isAuthRoute =
-    pathname.startsWith("/login") || pathname.startsWith("/auth");
+    pathname.startsWith("/login") ||
+    pathname.startsWith("/auth") ||
+    pathname.startsWith("/howl/");
 
   // Client-side gate. Middleware would avoid the brief flash, but it would
   // also need its own cookie plumbing; this is one condition and behaves

@@ -13,8 +13,9 @@ import {
   getProfileFields,
 } from "@/lib/api";
 import { useApp } from "../providers";
-import { Switch } from "../md";
+import { ConfirmButton, Switch } from "../md";
 import {
+  IconHowler,
   IconInterview,
   IconParley,
   IconExternal,
@@ -60,7 +61,7 @@ import { type LiveEvent, type LiveSession, openLiveSession } from "./liveSession
  * shown because a spoken citation cannot be clicked.
  */
 
-type Phase =
+export type Phase =
   | "idle"
   | "connecting"
   | "listening"
@@ -126,25 +127,66 @@ export default function ParleySurface({ mode }: { mode: Mode }) {
   );
 }
 
-/** What each mode calls itself, and what it is for. */
-const COPY: Record<Mode, { title: string; blurb: string; hint: string }> = {
+/**
+ * What each mode calls itself, and what it is for.
+ *
+ * EVERY user-facing string that differs by mode lives here, and that is the
+ * point of the shape. The version before this branched inline on
+ * `mode === "interview"`, so Howler silently inherited Parley's half of every
+ * ternary -- it told people it would "answer from your documents and the web",
+ * which is neither what it does nor something it has the tools for.
+ */
+const COPY: Record<
+  Mode,
+  {
+    title: string;
+    blurb: string;
+    hint: string;
+    /** The button that opens a session, before anything has been said. */
+    start: string;
+    /** The button that abandons this one and begins another. */
+    fresh: string;
+    /** Under the button, at rest and once under way. */
+    idle: string;
+    idleHint: string;
+    running: string;
+  }
+> = {
   speak: {
     title: "Parley",
     blurb:
       "Speak to a native audio model. Your documents and the web, answered out loud — with no transcript in the middle.",
     hint: "Nothing asked yet. Try “what does the engineering handbook say about on-call paging?”",
+    start: "Start session",
+    fresh: "New conversation",
+    idle: "Start a conversation",
+    idleHint: "It will listen, then answer from your documents and the web.",
+    running: "Your documents and the web.",
   },
   howler: {
     title: "Howler",
     blurb:
       "An interview against the data points you asked for. It stops when it has them.",
     hint: "Ready when you are. It will introduce itself and ask the first question.",
+    start: "Start interview",
+    // Not "new interview": Howler cannot start blank, because a session with
+    // no schema has nothing to fill. `startFresh` sends you back to the
+    // project, and the label says so rather than implying a blank one.
+    fresh: "Back to project",
+    idle: "Ready when you are",
+    idleHint: "It will introduce itself and ask the first question.",
+    running: "It asks; you answer. It stops once it has the data points.",
   },
   interview: {
     title: "Interview",
     blurb:
       "A spoken interview that builds a profile of the participant. One question at a time, and it follows up on vague answers.",
     hint: "Nothing recorded yet. Press the microphone and it will introduce itself.",
+    start: "Start interview",
+    fresh: "New interview",
+    idle: "Ready when you are",
+    idleHint: "It will introduce itself and ask the first question.",
+    running: "It will ask; you answer. It stops when it has what it needs.",
   },
 };
 
@@ -177,6 +219,12 @@ function Parley({ mode }: { mode: Mode }) {
   const [profileDone, setProfileDone] = useState(false);
   /** The model has called `end_interview`. The microphone stops reopening. */
   const [ended, setEnded] = useState(false);
+  /** Howler only: the project this conversation came from, so reading a result
+   *  has a way back to the tabs it was opened from. */
+  const [projectId, setProjectId] = useState<string | null>(null);
+  /** Ended by the PARTICIPANT rather than the interviewer -- two different
+   *  things to say afterwards, and two different findings. */
+  const [endedByUser, setEndedByUser] = useState(false);
   /**
    * Nothing has happened in this conversation yet.
    *
@@ -373,6 +421,17 @@ function Parley({ mode }: { mode: Mode }) {
           // whatever it was at that moment -- always false.
           if (!endedRef.current) beginCountdown();
           break;
+        case "finished":
+          // The PARTICIPANT ended it. Same closed state the model's
+          // `end_interview` produces, reached by a different decision -- and
+          // the server records which, because a half-filled profile somebody
+          // walked out of is a different finding from one the interviewer
+          // could not get answers to.
+          setEnded(true);
+          setEndedByUser(true);
+          stopCountdown();
+          setPhase("idle");
+          break;
         case "turn_end":
           // The model has finished GENERATING. Playback is still draining, so
           // the phase is left alone — `playback_end` ends the turn for the
@@ -505,9 +564,17 @@ function Parley({ mode }: { mode: Mode }) {
   /** Leave this conversation intact and begin a new one. */
   const startFresh = useCallback(() => {
     // Howler cannot start blank -- a session without a schema has nothing to
-    // fill -- so "new" means going back to the brief.
+    // fill -- so "new" means going back to the project that defined one, and
+    // to its Results tab, because reading a result is why you are here.
+    //
+    // Falls back to the project LIST only when the conversation has no project
+    // -- which is a session created before projects existed.
     if (mode === "howler") {
-      router.push("/parley/howler");
+      router.push(
+        projectId
+          ? `/parley/howler?p=${projectId}&tab=results`
+          : "/parley/howler",
+      );
       return;
     }
     // CLEAR THE URL FIRST, and this is the whole bug it fixes.
@@ -529,10 +596,12 @@ function Parley({ mode }: { mode: Mode }) {
     setMissing([]);
     setProfileDone(false);
     setEnded(false);
+    setProjectId(null);
+    setEndedByUser(false);
     setStarted(false);
     setResumed(false);
     setPhase("idle");
-  }, [clearInFlight, stopCountdown, wanted, router, pathname, mode]);
+  }, [clearInFlight, stopCountdown, wanted, router, pathname, mode, projectId]);
 
   /** Open a stored conversation and continue it. */
   const openConversation = useCallback(
@@ -559,6 +628,10 @@ function Parley({ mode }: { mode: Mode }) {
         setMissing(detail.missing ?? []);
         setProfileDone(Boolean(detail.complete));
         setEnded(Boolean((detail.profile ?? {}).ended));
+        setProjectId(detail.project_id ?? null);
+        setEndedByUser(
+          (detail.profile ?? {}).ended_by === "participant",
+        );
         // Reopening a conversation that already has turns: it has plainly
         // started, and greeting again would have it introduce itself to
         // someone it has been talking to for ten minutes.
@@ -609,6 +682,8 @@ function Parley({ mode }: { mode: Mode }) {
         <h1 className="md-headline-small flex items-center gap-2">
           {mode === "interview" ? (
             <IconInterview className="h-6 w-6" />
+          ) : mode === "howler" ? (
+            <IconHowler className="h-6 w-6" />
           ) : (
             <IconParley className="h-6 w-6" />
           )}
@@ -633,7 +708,7 @@ function Parley({ mode }: { mode: Mode }) {
             color: "var(--md-on-secondary-container)",
           }}
         >
-          {mode === "interview" ? "New interview" : "New conversation"}
+          {COPY[mode].fresh}
         </button>
       </header>
 
@@ -657,7 +732,7 @@ function Parley({ mode }: { mode: Mode }) {
               boxShadow: "var(--md-elev-2)",
             }}
           >
-            {mode === "interview" ? "Start interview" : "Start session"}
+            {COPY[mode].start}
           </button>
         ) : (
         <MicButton
@@ -681,9 +756,7 @@ function Parley({ mode }: { mode: Mode }) {
 
         <p className="md-title-small text-center">
           {!started && phase === "idle"
-            ? mode === "interview"
-              ? "Ready when you are"
-              : "Start a conversation"
+            ? COPY[mode].idle
             : ended
             ? "Interview complete"
             : phase === "connecting"
@@ -704,22 +777,20 @@ function Parley({ mode }: { mode: Mode }) {
           style={{ color: "var(--md-on-surface-variant)" }}
         >
           {!started && phase === "idle"
-            ? mode === "interview"
-              ? "It will introduce itself and ask the first question."
-              : "It will listen, then answer from your documents and the web."
+            ? COPY[mode].idleHint
             : ended
-            ? "The interviewer has everything it needs. Start a new one to go again."
+            ? endedByUser
+              ? "You ended it. Everything said so far is kept."
+              : "The interviewer has everything it needs. Start a new one to go again."
             : listening
               ? "It will not answer until you click. Pausing mid-sentence is fine."
             : speaking
               ? "Nothing is being sent while it speaks."
               : counting
                 ? "Click to start now, or stay quiet to cancel."
-                : mode === "interview"
-                  ? "It will ask; you answer. It stops when it has what it needs."
-                  : status?.web_search
-                    ? "Your documents and the web."
-                    : "Your documents. Web search is not configured."}
+                : mode === "speak" && !status?.web_search
+                  ? "Your documents. Web search is not configured."
+                  : COPY[mode].running}
         </p>
 
         {counting && (
@@ -737,6 +808,30 @@ function Parley({ mode }: { mode: Mode }) {
           >
             Stay quiet
           </button>
+        )}
+
+        {/* ENDING IT YOURSELF.
+            Offered once the conversation is under way and not yet closed. It
+            is deliberately quiet -- a text button, below everything -- because
+            it is a way out rather than a thing to do, and a prominent one next
+            to the microphone invites a mis-click that cannot be undone. The
+            confirmation is what makes it safe to have at all. */}
+        {started && !ended && mode !== "speak" && (
+          <ConfirmButton
+            label="End the interview"
+            title="End the interview?"
+            // Says what actually happens, including the part people will not
+            // guess: it is over for good, and anything already gathered is
+            // kept rather than thrown away.
+            body="It closes now, and whoever is being interviewed cannot reopen it. Everything said so far is kept."
+            confirmLabel="End it"
+            onConfirm={() => {
+              session.current?.finish();
+              stopCountdown();
+              setEnded(true);
+              setPhase("idle");
+            }}
+          />
         )}
 
         {resumed && (
@@ -967,7 +1062,7 @@ function Row({
  * indistinguishable from a broken one — and the user finds out only after
  * speaking a whole question into nothing.
  */
-function MicButton({
+export function MicButton({
   phase,
   level,
   remaining,
@@ -1142,7 +1237,7 @@ function toolLabel(tool: string): string {
  * visible; optional ones appear only once they have something in them, because
  * a permanent row of blanks reads as a form that was abandoned.
  */
-function ProfileCard({
+export function ProfileCard({
   fields,
   profile,
   missing,
