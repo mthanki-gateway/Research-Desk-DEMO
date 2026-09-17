@@ -13,6 +13,11 @@ class of mistake that costs an hour and cannot be caught by reading the
 diff of the file that broke.
 """
 
+import asyncio
+
+import pytest
+
+from app import main
 from app.main import app
 
 # Paths the frontend calls. Kept as a literal list rather than derived from
@@ -65,3 +70,63 @@ def test_every_route_the_frontend_calls_is_registered():
 def test_the_atlas_route_is_registered():
     """The Atlas page has one dependency and this is it."""
     assert ("GET", "/corpus/atlas") in _registered()
+
+
+# ---------------------------------------------------------------------------
+# Startup must not be able to prevent the port opening
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestBootIsBounded:
+    """A dependency being down must not stop the service existing.
+
+    Render kills a deploy that never opens a port, and reports it as "Port scan
+    timeout reached, no open ports detected" -- which says nothing about the
+    cause. Startup used to `await create_tables()` and `await
+    init_checkpointer()` unguarded, so an unreachable Postgres meant uvicorn
+    never bound and that opaque line was the only evidence.
+
+    Binding and reporting a specific failure beats never binding: the log names
+    what is broken, and /health repeats it on every request.
+    """
+
+    async def test_a_hanging_step_gives_up(self, monkeypatch):
+        monkeypatch.setattr(main, "BOOT_TIMEOUT_SECONDS", 1)
+        main.BOOT_FAILURES.clear()
+
+        async def never_returns():
+            await asyncio.sleep(3600)
+
+        assert await main._boot_step("database", never_returns()) is None
+        assert "timed out" in main.BOOT_FAILURES["database"]
+
+    async def test_a_failing_step_is_recorded_not_raised(self):
+        main.BOOT_FAILURES.clear()
+
+        async def explodes():
+            raise RuntimeError("connection refused")
+
+        assert await main._boot_step("database", explodes()) is None
+        assert "connection refused" in main.BOOT_FAILURES["database"]
+
+    async def test_a_working_step_returns_its_value(self):
+        main.BOOT_FAILURES.clear()
+
+        async def fine():
+            return "saver"
+
+        assert await main._boot_step("checkpointer", fine()) == "saver"
+        assert main.BOOT_FAILURES == {}
+
+    async def test_failures_are_named_not_counted(self):
+        """"Degraded" sends whoever is looking to find out which half."""
+        main.BOOT_FAILURES.clear()
+
+        async def explodes():
+            raise RuntimeError("nope")
+
+        await main._boot_step("database", explodes())
+        await main._boot_step("checkpointer", explodes())
+        assert set(main.BOOT_FAILURES) == {"database", "checkpointer"}
+        main.BOOT_FAILURES.clear()

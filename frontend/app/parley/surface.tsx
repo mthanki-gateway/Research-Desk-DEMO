@@ -1,7 +1,7 @@
 "use client";
 
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   type LiveStatus,
   type Mode,
@@ -148,6 +148,8 @@ function Parley({ mode }: { mode: Mode }) {
   // linked to, reloaded, and reached with the back button.
   const params = useSearchParams();
   const wanted = params.get("c");
+  const router = useRouter();
+  const pathname = usePathname();
   const { refreshParleyConversations } = useApp();
 
   const [status, setStatus] = useState<LiveStatus | null>(null);
@@ -448,6 +450,15 @@ function Parley({ mode }: { mode: Mode }) {
 
   /** Leave this conversation intact and begin a new one. */
   const startFresh = useCallback(() => {
+    // CLEAR THE URL FIRST, and this is the whole bug it fixes.
+    //
+    // Which conversation is open lives in `?c=<id>`, and an effect below
+    // follows it. Resetting the state without clearing the parameter left the
+    // id in the URL, so that effect immediately reopened the very conversation
+    // that had just been closed -- "New interview" appeared to do nothing at
+    // all, every time, once one had been opened from the drawer.
+    if (wanted) router.replace(pathname);
+
     stopCountdown();
     clearInFlight();
     session.current?.close();
@@ -460,7 +471,7 @@ function Parley({ mode }: { mode: Mode }) {
     setEnded(false);
     setResumed(false);
     setPhase("idle");
-  }, [clearInFlight, stopCountdown]);
+  }, [clearInFlight, stopCountdown, wanted, router, pathname]);
 
   /** Open a stored conversation and continue it. */
   const openConversation = useCallback(

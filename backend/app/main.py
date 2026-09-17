@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import uuid
 from contextlib import asynccontextmanager
@@ -47,6 +48,41 @@ structlog.configure(
 log = structlog.get_logger()
 
 
+# What failed during startup, for /health to report.
+#
+# A dict rather than a flag: "the database is unreachable" and "Qdrant is
+# unreachable" are different problems with different fixes, and a single
+# `degraded: true` makes whoever is on call go looking for which.
+BOOT_FAILURES: dict[str, str] = {}
+
+# How long any one startup step may take before the process gives up on it.
+#
+# THE PORT MUST OPEN. Render scans for a listening socket and kills the deploy
+# if it does not appear -- reported as "Port scan timeout reached, no open
+# ports detected", which says nothing about the cause. Startup used to `await
+# create_tables()` and `await init_checkpointer()` unguarded, so an unreachable
+# Postgres meant the process hung before uvicorn ever bound, and the only
+# evidence was that opaque line.
+#
+# Binding and reporting a specific failure beats never binding at all: the log
+# then names the thing that is broken, and /health says so on every request
+# instead of the service simply not existing.
+BOOT_TIMEOUT_SECONDS = 20
+
+
+async def _boot_step(name: str, coro):
+    """Run one startup step. Never raises, never hangs for ever."""
+    try:
+        return await asyncio.wait_for(coro, timeout=BOOT_TIMEOUT_SECONDS)
+    except TimeoutError:
+        BOOT_FAILURES[name] = f"timed out after {BOOT_TIMEOUT_SECONDS}s"
+        log.error("boot_step_timeout", step=name, seconds=BOOT_TIMEOUT_SECONDS)
+    except Exception as exc:  # noqa: BLE001 - report every failure the same way
+        BOOT_FAILURES[name] = f"{type(exc).__name__}: {str(exc)[:200]}"
+        log.exception("boot_step_failed", step=name)
+    return None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info(
@@ -76,7 +112,7 @@ async def lifespan(app: FastAPI):
             hint=f"unset {field.upper()} in .env to use the profile's value",
         )
 
-    await create_tables()
+    await _boot_step("database", create_tables())
 
     # Build the embedding provider and Qdrant collection up front, so a
     # misconfigured key or a dimension mismatch fails loudly at boot rather
@@ -91,7 +127,7 @@ async def lifespan(app: FastAPI):
     # Compile the graph WITH the checkpointer, so agent state is snapshotted to
     # Postgres after every node and a session can resume. If the checkpointer
     # fails we still serve, just without resume.
-    saver = await init_checkpointer()
+    saver = await _boot_step("checkpointer", init_checkpointer())
     set_graph(build_graph(checkpointer=saver))
     log.info("agent_graph_compiled", checkpointer=saver is not None)
 
@@ -185,15 +221,22 @@ class Health(BaseModel):
     # Lets the frontend decide whether to show a login screen without needing
     # its own copy of the configuration.
     auth_enabled: bool
+    # Which startup steps failed, by name. Empty when everything came up.
+    #
+    # NAMED, not a boolean: "the database is unreachable" and "Qdrant is
+    # unreachable" are different problems with different fixes, and a bare
+    # `degraded: true` makes whoever is looking go and find out which.
+    boot_failures: dict[str, str] = {}
 
 
 @app.get("/health", response_model=Health, tags=["meta"])
 async def health() -> Health:
     """Liveness probe. Also the endpoint a free-tier keep-alive pinger would hit."""
     return Health(
-        status="ok",
+        status="degraded" if BOOT_FAILURES else "ok",
         llm_model=settings.llm_model,
         embedding_provider=settings.embedding_provider,
         google_api_key_present=bool(settings.google_api_key),
         auth_enabled=settings.auth_enabled,
+        boot_failures=dict(BOOT_FAILURES),
     )
