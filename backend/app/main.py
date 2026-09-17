@@ -15,6 +15,7 @@ from app.api import (
     chat,
     documents,
     evaluation,
+    howler,
     live,
     playground,
     profile,
@@ -211,6 +212,7 @@ app.include_router(playground.router)
 app.include_router(atlas.router)
 app.include_router(voice.router)
 app.include_router(live.router)
+app.include_router(howler.router)
 
 
 class Health(BaseModel):

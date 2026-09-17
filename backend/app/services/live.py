@@ -675,6 +675,40 @@ async def _mark_completed(session_id: uuid.UUID, turns: int) -> None:
         log.warning("mark_completed_failed", error=str(exc)[:200])
 
 
+async def adopt_project(
+    session_id: uuid.UUID,
+    project_id: uuid.UUID,
+    brief: str,
+    participant: str,
+    fields: list[dict],
+    invite_id: uuid.UUID | None = None,
+) -> None:
+    """Stamp a guest's conversation with the project it belongs to.
+
+    Only on a conversation that has not already been stamped: a link reused
+    after a dropped call must find the SAME session with the same schema, not
+    have it rewritten underneath a half-filled profile.
+    """
+    from app.db.models import ChatSession
+    from app.db.session import SessionLocal
+    from app.services import invites
+
+    try:
+        async with SessionLocal() as db:
+            chat = await db.get(ChatSession, session_id)
+            if chat is None or chat.project_id is not None:
+                return
+            chat.project_id = project_id
+            chat.brief = brief
+            chat.participant = participant
+            chat.fields = fields
+            await db.commit()
+        if invite_id is not None:
+            await invites.attach_session(invite_id, session_id)
+    except Exception as exc:  # noqa: BLE001 - never fail a call over bookkeeping
+        log.warning("adopt_project_failed", error=str(exc)[:200])
+
+
 async def store_summary(session_id: uuid.UUID, summary: str) -> None:
     """One line on who this person is, for the top of the card. Never raises."""
     from app.db.models import ChatSession

@@ -69,7 +69,7 @@ from app.auth import (
 from app.config import get_settings
 from app.db.models import ChatSession, Message, Role
 from app.db.session import SessionLocal
-from app.services import blueprint, live, voice, websearch
+from app.services import blueprint, invites, live, voice, websearch
 
 log = structlog.get_logger()
 
@@ -328,6 +328,20 @@ async def profile_fields() -> list[dict]:
     ]
 
 
+class _GuestUser:
+    """Just enough of a User for a conversation row, and nothing more.
+
+    It carries an `owner_id` so the interview lands in the right person's
+    results, and no other capability. It is not a `User`, so it cannot be
+    passed to anything expecting one without the type telling on it.
+    """
+
+    def __init__(self, owner_id: str | None) -> None:
+        self.owner_id = owner_id
+        self.id = "guest"
+        self.anonymous = True
+
+
 async def _authenticate(token: str) -> User | None:
     """Resolve the caller from a query-string token.
 
@@ -357,10 +371,41 @@ async def live_socket(
     voice_name: str = Query(default=""),
     session_id: str = Query(default=""),
     mode: str = Query(default="speak"),
+    invite: str = Query(default=""),
 ) -> None:
     await ws.accept()
 
-    user = await _authenticate(token)
+    # ---- a guest holding a link -----------------------------------------
+    #
+    # An invite is resolved SEPARATELY from `_authenticate`, and deliberately
+    # does not produce a signed-in user. It grants one thing: the right to
+    # speak into one conversation. If it resolved to a User it would inherit
+    # every permission that user has, and the safety of the whole surface would
+    # then rest on nobody ever handing it to the wrong dependency.
+    #
+    # The session, the mode and the schema all come from the invite. None of
+    # them are taken from the query string, because a guest can write anything
+    # there.
+    guest: dict | None = None
+    if invite:
+        try:
+            row, project = await invites.claim(invite)
+        except invites.InviteError as exc:
+            await ws.send_text(json.dumps({"type": "error", "detail": str(exc)}))
+            await ws.close(code=4403)
+            return
+        guest = {
+            "invite_id": row.id,
+            "session_id": str(row.session_id) if row.session_id else "",
+            "project": project,
+            "participant": row.participant or project.participant or "",
+        }
+        mode = "howler"
+        session_id = guest["session_id"]
+
+    user = await _authenticate(token) if not guest else _GuestUser(
+        guest["project"].owner_id
+    )
     if user is None:
         await ws.send_text(json.dumps({"type": "error", "detail": "Not authenticated."}))
         await ws.close(code=4401)
@@ -399,6 +444,24 @@ async def live_socket(
     # half-filled profile would stop lining up with the fields it was filling.
     # The other modes pass None and get the built-in schema.
     fields = list(chat.fields or []) if chosen_mode == "howler" else None
+
+    # A guest's conversation inherits the PROJECT's brief and schema, and is
+    # stamped with the project so its results are findable. Done here rather
+    # than at creation because `open_conversation` is shared with the other
+    # modes and knows nothing about projects.
+    if guest is not None:
+        project = guest["project"]
+        fields = list(project.fields or [])
+        await live.adopt_project(
+            chat.id,
+            project.id,
+            project.brief or "",
+            guest["participant"],
+            fields,
+            guest["invite_id"],
+        )
+        chat.brief = project.brief or ""
+        chat.participant = guest["participant"]
 
     try:
         client = live.client()

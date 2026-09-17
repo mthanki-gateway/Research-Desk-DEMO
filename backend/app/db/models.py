@@ -166,6 +166,13 @@ class ChatSession(Base):
     participant: Mapped[str | None] = mapped_column(Text, nullable=True)
     fields: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
 
+    # Which Howler project this conversation belongs to, if any. Null for
+    # Speak, Interview, and the standalone Howler sessions that predate
+    # projects.
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -176,6 +183,89 @@ class ChatSession(Base):
         cascade="all, delete-orphan",
         order_by="Message.created_at",
     )
+
+
+class HowlerProject(Base):
+    """A brief, the schema it produced, and everything run against it.
+
+    A PROJECT, not a conversation. One brief is worth interviewing several
+    people against -- that is the point of writing it down -- so the brief, the
+    generated fields and the results have to outlive any single session.
+
+    Kept in its own table rather than folded into `chat_sessions` because it is
+    genuinely a different thing: a project has no turns, no transcript and no
+    resumption handle, and giving it those columns to sit empty in would make
+    every query about conversations ambiguous.
+    """
+
+    __tablename__ = "howler_projects"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    title: Mapped[str] = mapped_column(String(256), default="Untitled project")
+    owner_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+
+    brief: Mapped[str] = mapped_column(Text, default="")
+    # Context about who is being interviewed. A DEFAULT for the project; an
+    # invite can carry its own, because the whole point of several invites is
+    # that they go to different people.
+    participant: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Generated once from the brief and frozen. See `blueprint.py`.
+    fields: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    invites: Mapped[list["HowlerInvite"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
+
+
+class HowlerInvite(Base):
+    """One link, for one participant, good until their interview is over.
+
+    REUSABLE UNTIL THE INTERVIEW ENDS, which needs no expiry logic of its own:
+    the session it points at already knows whether it finished, and that is the
+    condition. A link is dead when the conversation behind it is done, revoked
+    when someone says so, and valid the rest of the time -- including across a
+    dropped call, a closed tab and a second sitting, which is exactly what
+    somebody who got disconnected halfway needs.
+
+    The token authenticates TO ONE CONVERSATION and never as a person. A guest
+    holding it can speak into that interview and do nothing else: not list
+    projects, not reach the corpus, not open another session. That is why it is
+    resolved by its own function rather than through `current_user`.
+    """
+
+    __tablename__ = "howler_invites"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("howler_projects.id", ondelete="CASCADE"), index=True
+    )
+    # Unguessable and unique. Indexed because every guest request looks it up.
+    token: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    # Who this link was meant for, so a list of them is readable.
+    label: Mapped[str] = mapped_column(String(160), default="")
+    participant: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # The conversation this link opened, created on first use. Null until then,
+    # which is also how "never opened" is reported.
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("chat_sessions.id", ondelete="SET NULL"), nullable=True
+    )
+
+    opens: Mapped[int] = mapped_column(Integer, default=0)
+    last_opened_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    project: Mapped[HowlerProject] = relationship(back_populates="invites")
 
 
 class Role(enum.StrEnum):

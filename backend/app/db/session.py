@@ -120,6 +120,11 @@ _MIGRATIONS: tuple[str, ...] = (
     "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS participant TEXT",
     "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS fields JSONB "
     "NOT NULL DEFAULT '[]'::jsonb",
+    # A conversation run against a Howler project. The project and invite
+    # TABLES are created by create_all; only this column is an alteration.
+    "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS project_id UUID",
+    "CREATE INDEX IF NOT EXISTS chat_sessions_project_idx "
+    "ON chat_sessions (project_id)",
 )
 
 

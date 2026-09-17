@@ -113,14 +113,16 @@ function Setup() {
           value={brief}
           onChange={(e) => setBrief(e.target.value)}
           rows={5}
-          placeholder="Qualify inbound leads. Find out their budget, when they want to go live, who signs off, and what they use today. If possible, what made them reach out now."
         />
         <p
           className="md-body-small"
           style={{ color: "var(--md-on-surface-variant)" }}
         >
-          Written as instruction, not as a list. Anything you call &ldquo;if
-          possible&rdquo; becomes optional.
+          Written as instruction, not as a list — anything you call &ldquo;if
+          possible&rdquo; becomes optional. For example: &ldquo;Qualify inbound
+          leads. Find out their budget, when they want to go live, who signs
+          off, and what they use today. If possible, what made them reach out
+          now.&rdquo;
         </p>
 
         <TextArea
@@ -128,14 +130,15 @@ function Setup() {
           value={participant}
           onChange={(e) => setParticipant(e.target.value)}
           rows={3}
-          placeholder="Priya Raman, Head of Data at a logistics company. Filled in the pricing form last week. Technical, short on time."
         />
         <p
           className="md-body-small"
           style={{ color: "var(--md-on-surface-variant)" }}
         >
-          Context for the interviewer — what to skip, what to press on. It is
-          never read back to them, and what they say always wins over it.
+          Context for the interviewer — what to skip, what to press on. Never
+          read back to them, and what they say always wins over it. For example:
+          &ldquo;Priya Raman, Head of Data at a logistics company. Filled in the
+          pricing form last week. Technical, short on time.&rdquo;
         </p>
 
         <div className="flex flex-wrap items-center gap-2 pt-1">

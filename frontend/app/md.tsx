@@ -471,7 +471,19 @@ type TextAreaProps = TextareaHTMLAttributes<HTMLTextAreaElement> & {
  * browser. Counting "\n" would keep a long wrapped paragraph one line tall.
  */
 export const TextArea = forwardRef<HTMLTextAreaElement, TextAreaProps>(
-  function TextArea({ label, surface, shape, className = "", ...rest }, ref) {
+  function TextArea(
+    // `placeholder` is SWALLOWED, not forwarded.
+    //
+    // The floating label works by `:placeholder-shown`, which is why the
+    // textarea below sets `placeholder=" "` — a single space that is always
+    // "shown" while the field is empty. A caller passing a real placeholder
+    // overrode it, and the label then sat still while the hint text rendered
+    // underneath it, overlapping. Accepting and discarding it here makes that
+    // impossible rather than something to remember; hint text belongs beneath
+    // the field, where it survives being typed into.
+    { label, surface, shape, className = "", placeholder: _ignored, ...rest },
+    ref,
+  ) {
     const id = useId();
     const inner = useRef<HTMLTextAreaElement | null>(null);
 
