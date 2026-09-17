@@ -4,6 +4,8 @@ Neither raises. Both produce a session that connects, accepts audio, and then
 sits there — which in an audio-only app is indistinguishable from a crash.
 """
 
+import uuid
+
 import pytest
 
 from app.services import live
@@ -374,3 +376,100 @@ class _Hit:
         self.document_id = document_id
         self.source = "document"
         self.url = None
+
+
+class TestNaming:
+    """An interview is named after its participant, not its opening line.
+
+    Titling from the first utterance gave a drawer full of rows reading "Hi
+    there" and "Hello, can you hear me" -- and one, observed in the database,
+    reading "¿Qué tal? ¿Cómo estás?". That utterance is also the one the
+    transcriber mangles most, because nobody has warmed up yet.
+
+    Applied as soon as the name is recorded rather than only at the end, so the
+    list stops reading "Interview, Interview, Interview" while one is still
+    running -- which is precisely when you need to tell them apart.
+    """
+
+    def test_the_placeholder_is_what_marks_an_unnamed_interview(self):
+        """It has to be a value nothing else produces.
+
+        Distinguishing "not yet named" from "named by a person" is what keeps
+        the app from arguing with the user about what to call their own
+        conversation, and the placeholder is the only signal available.
+        """
+        assert live.UNNAMED_INTERVIEW == "Interview"
+
+
+@pytest.mark.asyncio
+class TestNameConversation:
+    async def test_a_name_replaces_the_placeholder(self, monkeypatch):
+        titles = _capture(monkeypatch, start="Interview")
+        await live.name_conversation(_ID, {"full_name": "Mithun Tanwar"})
+        assert titles[-1] == "Mithun Tanwar"
+
+    async def test_a_manual_rename_is_never_overwritten(self, monkeypatch):
+        """Only the placeholder is replaced.
+
+        Anything else was set by a person or already carries a name, and a
+        later correction to `full_name` must not undo their choice.
+        """
+        titles = _capture(monkeypatch, start="Renamed by hand")
+        await live.name_conversation(_ID, {"full_name": "Someone Else"})
+        assert titles == ["Renamed by hand"]
+
+    async def test_a_profile_with_no_name_changes_nothing(self, monkeypatch):
+        titles = _capture(monkeypatch, start="Interview")
+        await live.name_conversation(_ID, {"current_role": "platform engineer"})
+        assert titles == ["Interview"]
+
+    async def test_a_blank_name_is_not_a_name(self, monkeypatch):
+        titles = _capture(monkeypatch, start="Interview")
+        await live.name_conversation(_ID, {"full_name": "   "})
+        assert titles == ["Interview"]
+
+    async def test_a_failure_to_rename_does_not_raise(self, monkeypatch):
+        """A title is never worth interrupting a live conversation for."""
+
+        def boom():
+            raise RuntimeError("database is down")
+
+        monkeypatch.setattr(live, "SessionLocal", boom, raising=False)
+        await live.name_conversation(_ID, {"full_name": "Sam"})
+
+
+_ID = uuid.UUID(int=7)
+
+
+def _capture(monkeypatch, *, start: str) -> list[str]:
+    """A stand-in session whose one row records every title it is given."""
+    titles = [start]
+
+    class Row:
+        kind = "interview"
+
+        @property
+        def title(self) -> str:
+            return titles[-1]
+
+        @title.setter
+        def title(self, value: str) -> None:
+            titles.append(value)
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, model, ident):
+            return Row()
+
+        async def commit(self):
+            return None
+
+    monkeypatch.setattr(
+        "app.db.session.SessionLocal", lambda: Session(), raising=False
+    )
+    return titles

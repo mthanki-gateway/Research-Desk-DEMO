@@ -302,6 +302,8 @@ async def record_profile(
         chat.profile = merged
         await db.commit()
 
+    await name_conversation(session_id, merged)
+
     done = profile.complete(merged)
     log.info(
         "profile_recorded",
@@ -450,7 +452,7 @@ async def open_conversation(
                 return chat
 
         chat = ChatSession(
-            title="Interview" if kind == "interview" else "Spoken conversation",
+            title=UNNAMED_INTERVIEW if kind == "interview" else "Spoken conversation",
             owner_id=owner_id,
             kind=kind,
         )
@@ -501,18 +503,60 @@ async def save_turn(
                 )
             )
 
-            # The first real question becomes the title. "Spoken conversation"
-            # tells a list of conversations nothing at all.
+            # The first real question becomes the title, for SPEAK only.
+            # "Spoken conversation" tells a list of conversations nothing at
+            # all.
+            #
+            # An interview is named after the PERSON instead -- see
+            # `name_conversation`. Titling it from the opening utterance gives
+            # a list of rows reading "Hi there" and "Hello, can you hear me",
+            # and worse, that utterance is the one the transcriber mangles most
+            # because nobody has warmed up yet.
             chat = await db.get(ChatSession, session_id)
-            if chat is not None and question and chat.title in (
-                "Spoken conversation",
-                "Interview",
+            if (
+                chat is not None
+                and question
+                and chat.kind == "parley"
+                and chat.title == "Spoken conversation"
             ):
                 chat.title = question[:120]
 
             await db.commit()
     except Exception as exc:  # noqa: BLE001 - never interrupt a live call
         log.warning("live_save_turn_failed", error=str(exc)[:200])
+
+
+# The placeholder an interview carries until it learns whose it is.
+UNNAMED_INTERVIEW = "Interview"
+
+
+async def name_conversation(session_id: uuid.UUID, profile_data: dict) -> None:
+    """Title an interview after its participant. Never raises.
+
+    Applied AS SOON AS the name is recorded rather than only at the end, so the
+    drawer stops reading "Interview, Interview, Interview" while one is still
+    running -- which is exactly when you need to tell them apart.
+
+    Only replaces the placeholder. A title that is anything else was either set
+    by a person or already carries a name, and overwriting either would be the
+    app arguing with the user about what to call their own conversation.
+    """
+    name = str((profile_data or {}).get("full_name") or "").strip()
+    if not name:
+        return
+
+    from app.db.models import ChatSession
+    from app.db.session import SessionLocal
+
+    try:
+        async with SessionLocal() as db:
+            chat = await db.get(ChatSession, session_id)
+            if chat is not None and chat.title == UNNAMED_INTERVIEW:
+                chat.title = name[:120]
+                await db.commit()
+                log.info("interview_named", name=name[:60])
+    except Exception as exc:  # noqa: BLE001 - a title is never worth a failure
+        log.warning("live_name_failed", error=str(exc)[:200])
 
 
 async def store_summary(session_id: uuid.UUID, summary: str) -> None:
@@ -528,6 +572,12 @@ async def store_summary(session_id: uuid.UUID, summary: str) -> None:
                 merged["summary"] = summary
                 merged["ended"] = True
                 chat.profile = merged
+                # Last chance to name it. If `record_profile` never carried a
+                # name -- it can be learned and then corrected -- this is the
+                # point at which the profile is final.
+                name = str(merged.get("full_name") or "").strip()
+                if name and chat.title == UNNAMED_INTERVIEW:
+                    chat.title = name[:120]
                 await db.commit()
     except Exception as exc:  # noqa: BLE001
         log.warning("live_store_summary_failed", error=str(exc)[:200])
