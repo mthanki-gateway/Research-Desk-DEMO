@@ -21,7 +21,10 @@ import {
   getParleyConversations,
 } from "@/lib/api";
 import { authEnabled, getSupabase } from "@/lib/supabase";
+import { usePathname } from "next/navigation";
+
 import { ACCENTS, type Accent, DEFAULT_ACCENT } from "@/lib/accents";
+import { projectFor } from "./projects";
 
 /**
  * One place that owns sessions and documents.
@@ -32,6 +35,8 @@ import { ACCENTS, type Accent, DEFAULT_ACCENT } from "@/lib/accents";
  */
 type AppData = {
   sessions: ChatSession[];
+  /** How many exist in total, not how many are loaded above. */
+  sessionTotal: number;
   /** Spoken conversations per mode, so the drawer and the page agree.
    *  Keyed because Speak and Interview are separate lists in separate places,
    *  and mixing them would show one app's conversations inside the other. */
@@ -98,6 +103,7 @@ export function useApp(): AppData {
 
 export function Providers({ children }: { children: React.ReactNode }) {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [sessionTotal, setSessionTotal] = useState(0);
   const [parleyConversations, setParleyConversations] = useState<
     Record<Mode, ParleyConversation[]>
   >({ speak: [], interview: [], howler: [] });
@@ -115,7 +121,10 @@ export function Providers({ children }: { children: React.ReactNode }) {
   const [railActive, setRailActive] = useState(false);
   const [railCollapsed, setRailCollapsedState] = useState(false);
   const [railReady, setRailReady] = useState(false);
+  const pathname = usePathname();
   const [accent, setAccentState] = useState<Accent>(DEFAULT_ACCENT);
+  /** The user picked one, so it wins over whatever app they are looking at. */
+  const [accentChosen, setAccentChosen] = useState(false);
   const [account, setAccount] = useState<AppData["account"]>(null);
   // With auth disabled there is nothing to look up, so treat it as resolved.
   const [authReady, setAuthReady] = useState(!authEnabled);
@@ -160,15 +169,37 @@ export function Providers({ children }: { children: React.ReactNode }) {
       // been removed would otherwise set an attribute matching no CSS rule,
       // silently falling back to the default while the picker showed the old
       // choice as selected.
-      if (ACCENTS.some((a) => a.id === saved)) setAccentState(saved as Accent);
+      if (ACCENTS.some((a) => a.id === saved)) {
+        setAccentState(saved as Accent);
+        setAccentChosen(true);
+      }
     } catch {
       // private browsing or blocked storage — the defaults are fine
     }
     setRailReady(true);
   }, []);
 
+  /**
+   * EACH APP WEARS ITS OWN ACCENT, unless somebody has chosen one.
+   *
+   * Three apps sharing one shell look identical at a glance, and the drawer
+   * title is the only thing that says which you are in. Colour says it before
+   * you read anything -- and the app switcher then moves you between visibly
+   * different places rather than between three purple ones.
+   *
+   * An explicit choice still wins everywhere: that is a preference about
+   * somebody's eyes, not about the app they happen to have open.
+   */
+  useEffect(() => {
+    if (accentChosen) return;
+    const wanted = projectFor(pathname).accent;
+    document.documentElement.setAttribute("data-accent", wanted);
+    setAccentState(wanted);
+  }, [pathname, accentChosen]);
+
   const setAccent = useCallback((a: Accent) => {
     setAccentState(a);
+    setAccentChosen(true);
     // The attribute is the source of truth for rendering; state only drives
     // the picker's selected mark. The default lives on bare `:root`, so it is
     // set as an attribute too rather than removed -- keeps the two paths
@@ -192,7 +223,12 @@ export function Providers({ children }: { children: React.ReactNode }) {
 
   const refreshSessions = useCallback(async () => {
     try {
-      setSessions(await listSessions());
+      // The DRAWER's copy, and deliberately a short one. It is a "jump back
+      // into something recent" list, not the archive -- the Chat page owns
+      // paging through everything.
+      const { sessions: rows, total } = await listSessions(25, 0);
+      setSessions(rows);
+      setSessionTotal(total);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load sessions");
@@ -301,6 +337,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
   const value = useMemo<AppData>(
     () => ({
       sessions,
+      sessionTotal,
       documents,
       loading,
       error,
@@ -328,6 +365,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
     }),
     [
       sessions,
+      sessionTotal,
       documents,
       loading,
       error,

@@ -5,9 +5,9 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import selectinload
 
 from app.agent.checkpointer import discard_thread
@@ -67,21 +67,67 @@ async def create_session(
 
 
 @router.get("", response_model=list[SessionOut])
-async def list_sessions(user: User = Depends(current_user)) -> list[SessionOut]:
+async def list_sessions(
+    response: Response,
+    limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    user: User = Depends(current_user),
+) -> list[SessionOut]:
+    """Research Desk's chats. NOT Parley's conversations.
+
+    FILTERED BY KIND, which it was not. Every table in this app stores its
+    conversations in `chat_sessions`, and Parley's three modes are rows there
+    too -- so spoken conversations were appearing in the Research Desk sidebar,
+    where opening one lands on a chat page for something that was never typed.
+    They are separate apps and this is the line between them.
+
+    PAGINATED, because this list grows for ever and had no ceiling: every chat
+    anybody had ever started was fetched, counted and serialised on every page
+    load. The total goes in a header so the response stays a plain array and
+    existing callers are unaffected.
+    """
     async with SessionLocal() as db:
-        # One grouped query for the counts rather than N+1 lazy loads.
-        counts = dict(
+        owned = select(ChatSession).where(
+            # `IS NULL` as well: rows predating the column are Research Desk's,
+            # because Parley did not exist when they were written.
+            or_(ChatSession.kind == "chat", ChatSession.kind.is_(None))
+        )
+        if user.owner_id is not None:
+            owned = owned.where(ChatSession.owner_id == user.owner_id)
+
+        total = (
+            await db.execute(
+                select(func.count()).select_from(owned.subquery())
+            )
+        ).scalar() or 0
+
+        rows = list(
             (
                 await db.execute(
-                    select(Message.session_id, func.count()).group_by(Message.session_id)
+                    owned.order_by(ChatSession.updated_at.desc())
+                    .limit(limit)
+                    .offset(offset)
                 )
-            ).all()
+            ).scalars()
         )
-        query = select(ChatSession).order_by(ChatSession.updated_at.desc())
-        if user.owner_id is not None:
-            query = query.where(ChatSession.owner_id == user.owner_id)
-        rows = (await db.execute(query)).scalars()
-        return [_session_out(s, counts.get(s.id, 0)) for s in rows]
+
+        # Counted for THIS PAGE only. The grouped count over every message in
+        # the database was cheap at twenty sessions and is not at twenty
+        # thousand, and nothing off the page needs a number.
+        counts: dict = {}
+        if rows:
+            counts = dict(
+                (
+                    await db.execute(
+                        select(Message.session_id, func.count())
+                        .where(Message.session_id.in_([r.id for r in rows]))
+                        .group_by(Message.session_id)
+                    )
+                ).all()
+            )
+
+    response.headers["X-Total-Count"] = str(total)
+    return [_session_out(s, counts.get(s.id, 0)) for s in rows]
 
 
 @router.get("/{session_id}", response_model=SessionDetail)

@@ -1,8 +1,8 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
-import { createSession, deleteSession } from "@/lib/api";
+import { useEffect, useState } from "react";
+import { type ChatSession, createSession, deleteSession, listSessions } from "@/lib/api";
 import { useApp } from "../providers";
 import { Button, Checkbox, ConfirmButton, Ripplable } from "../md";
 import {
@@ -14,10 +14,43 @@ import {
   IconTrash,
 } from "../icons";
 
+/** Page sizes offered. Small enough to scan, and 100 is the server's cap. */
+const PAGE_SIZES = [10, 25, 50, 100] as const;
+
 export default function ChatIndex() {
-  const { sessions, readyDocuments, loading, refreshSessions } = useApp();
+  const { sessions: recent, readyDocuments, loading, refreshSessions } = useApp();
   const router = useRouter();
   const [creating, setCreating] = useState(false);
+  /**
+   * THIS PAGE PAGES ITSELF, rather than rendering the drawer's copy.
+   *
+   * The drawer holds a short "jump back into something recent" list; this is
+   * the archive, and the two want different lengths. Sharing one list meant
+   * either the drawer was enormous or this page could not reach anything old.
+   */
+  const [page, setPage] = useState<ChatSession[]>([]);
+  const [total, setTotal] = useState(0);
+  const [size, setSize] = useState<number>(25);
+  const [offset, setOffset] = useState(0);
+  const [paging, setPaging] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    setPaging(true);
+    listSessions(size, offset)
+      .then(({ sessions: rows, total: count }) => {
+        if (!live) return;
+        setPage(rows);
+        setTotal(count);
+      })
+      .catch(() => {})
+      .finally(() => live && setPaging(false));
+    return () => {
+      live = false;
+    };
+  }, [size, offset, recent.length]);
+
+  const sessions = page;
   /**
    * Ids ticked for deletion. An empty set means selection mode is OFF and
    * a row click navigates as usual.
@@ -239,6 +272,67 @@ export default function ChatIndex() {
           </li>
         ))}
       </ul>
+
+      {/* Only when there is more than one page. A pager over eight rows is
+          furniture. */}
+      {total > size && (
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <span
+            className="md-body-small"
+            style={{ color: "var(--md-on-surface-variant)" }}
+          >
+            {offset + 1}–{Math.min(offset + sessions.length, total)} of {total}
+          </span>
+
+          <div className="flex items-center gap-2">
+            <label
+              className="md-body-small flex items-center gap-2"
+              style={{ color: "var(--md-on-surface-variant)" }}
+            >
+              Per page
+              <select
+                value={size}
+                onChange={(e) => {
+                  // Back to the first page. Staying at an offset that no
+                  // longer exists in the new page size shows an empty list
+                  // and looks like the chats are gone.
+                  setOffset(0);
+                  setSize(Number(e.target.value));
+                }}
+                className="md-body-small rounded-[var(--md-shape-sm)] px-2 py-1"
+                style={{
+                  background: "var(--md-surface-container-high)",
+                  color: "var(--md-on-surface)",
+                  border: "1px solid var(--md-outline-variant)",
+                }}
+              >
+                {PAGE_SIZES.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <Button
+              variant="text"
+              size="sm"
+              disabled={offset === 0 || paging}
+              onClick={() => setOffset(Math.max(0, offset - size))}
+            >
+              Newer
+            </Button>
+            <Button
+              variant="text"
+              size="sm"
+              disabled={offset + size >= total || paging}
+              onClick={() => setOffset(offset + size)}
+            >
+              Older
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

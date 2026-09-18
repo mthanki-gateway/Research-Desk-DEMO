@@ -460,10 +460,28 @@ export async function createSession(
   return res.json();
 }
 
-export async function listSessions(): Promise<ChatSession[]> {
-  const res = await authedFetch("/sessions", { cache: "no-store" });
+/**
+ * Research Desk's chats — Parley's spoken conversations are excluded
+ * server-side, by `kind`.
+ *
+ * Paginated. `total` comes from a header rather than a wrapper object so the
+ * body stays a plain array and every existing caller keeps working.
+ */
+export async function listSessions(
+  limit = 25,
+  offset = 0,
+): Promise<{ sessions: ChatSession[]; total: number }> {
+  const res = await authedFetch(`/sessions?limit=${limit}&offset=${offset}`, {
+    cache: "no-store",
+  });
   if (!res.ok) throw new Error(await detail(res));
-  return res.json();
+  const sessions = await res.json();
+  return {
+    sessions,
+    // Falls back to the page length when the header is missing — a proxy that
+    // strips it should degrade to "no more pages", not to zero results.
+    total: Number(res.headers.get("X-Total-Count") ?? sessions.length),
+  };
 }
 
 export async function getSession(id: string): Promise<SessionDetail> {
@@ -1268,6 +1286,22 @@ export type InviteResult = {
    * without one, which an interview cut short usually does.
    */
   affect: { demeanour: string; moments: string[] } | null;
+  /** MEASURED from the audio, as opposed to `affect` which is what the
+   *  interviewer heard. Null until a recording exists and has been analysed. */
+  voice: {
+    model: string;
+    baseline: Record<string, number>;
+    turns: { turn: number; arousal: number; dominance: number; valence: number }[];
+    moments: { turn: number; dimension: string; delta: number; direction: string }[];
+    caveat: string;
+  } | null;
+  /** The background job, so the tab can say "queued" rather than showing
+   *  nothing and looking broken. */
+  analysis: {
+    status: "queued" | "running" | "done" | "failed";
+    error: string;
+    result: Record<string, unknown>;
+  } | null;
   /** The schema THIS conversation was given, which is not necessarily the
    *  project's current one — a link opened last week gathered last week's
    *  data points, and rendering it against today's would invent empty rows

@@ -20,10 +20,11 @@ import {
 } from "@/lib/api";
 import { useApp } from "../../providers";
 import { Answer } from "../../answer";
-import { Button, Chip, Dialog, Fab, LinkChip, TextArea } from "../../md";
+import { Button, Chip, Dialog, Fab, IconButton, LinkChip, TextArea } from "../../md";
 import {
   IconAtlas,
   IconCheck,
+  IconChevron,
   IconExternal,
   IconQuote,
   IconSpinner,
@@ -418,6 +419,17 @@ function Conversation({ id }: { id: string }) {
             boxShadow: "0 1px 0 0 var(--md-outline-variant)",
           }}
         >
+          {/* Back to the list, as every other detail page in this app has.
+              The drawer holds only the most recent chats now that it is
+              paginated, so an older conversation opened from the archive had
+              no way back to it at all. */}
+          <IconButton
+            onClick={() => router.push("/chat")}
+            aria-label="All chats"
+            className="shrink-0"
+          >
+            <IconChevron className="h-5 w-5 rotate-180" />
+          </IconButton>
           <h1 className="md-title-large min-w-0 flex-1 truncate">{title}</h1>
           {!session && <IconSpinner className="h-4 w-4 opacity-40" />}
           <Button
