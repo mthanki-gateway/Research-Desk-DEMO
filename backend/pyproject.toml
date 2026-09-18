@@ -55,6 +55,10 @@ dev = [
 # install with `uv sync --extra local-embeddings` if EMBEDDING_PROVIDER=fastembed.
 [project.optional-dependencies]
 local-embeddings = ["fastembed>=0.4"]
+# Cloudflare R2, which is S3-compatible. An EXTRA rather than a core
+# dependency: the default storage backend is a local directory, so a checkout
+# with no cloud account still stores and serves its own files.
+storage = ["boto3>=1.35"]
 # NVIDIA's hosted NeMo speech models (Parakeet, Canary, Nemotron streaming).
 #
 # A gRPC CLIENT, and that is not a preference. Those functions are reachable

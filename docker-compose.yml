@@ -117,6 +117,10 @@ services:
       #     docker compose cp api:/app/uv.lock backend/uv.lock
       #     docker compose build api
       - ./backend/uv.lock:/app/uv.lock
+      # Original uploads. A named volume rather than a bind mount: these are
+      # data, not source, and they should survive a rebuild without cluttering
+      # the working tree. `STORAGE_BACKEND=r2` bypasses this entirely.
+      - filestore:/data/files
       - hfcache:/root/.cache/huggingface # persist fastembed model download
     restart: unless-stopped
     depends_on:
@@ -143,6 +147,9 @@ services:
     volumes:
       - ./frontend/app:/app/app
       - ./frontend/lib:/app/lib
+      # Served at the site root by Next. The turn-detection models live here,
+      # and mounting it means swapping one does not need an image rebuild.
+      - ./frontend/public:/app/public
     restart: unless-stopped
     depends_on:
       - api
@@ -313,6 +320,7 @@ services:
         condition: service_healthy
 
 volumes:
+  filestore:
   pgdata:
   qdrantdata:
   hfcache:

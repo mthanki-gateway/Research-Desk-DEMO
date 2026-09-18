@@ -28,6 +28,7 @@ from app.services.chunking import TextChunk, chunk_pages
 from app.services.embeddings import get_embeddings
 from app.services.lexical import invalidate_lexical_index
 from app.services.parsing import Page, parse
+from app.services.storage import get_storage, key_for
 from app.services.vectorstore import ChunkPayload, get_vector_store
 
 log = structlog.get_logger()
@@ -66,6 +67,26 @@ async def ingest_document(document_id: uuid.UUID, data: bytes) -> None:
             if doc is None:
                 log_.error("ingest_document_missing")
                 return
+
+            # --- stage 0: keep the original ---
+            #
+            # BEFORE parsing, because parsing is the step most likely to fail
+            # and the original is exactly what somebody needs in order to work
+            # out why. Storing it also makes re-chunking a background job
+            # rather than an apology: improve the chunker and every document
+            # can be re-ingested without anybody re-uploading anything.
+            #
+            # NEVER FATAL. A store that is full, misconfigured or unreachable
+            # costs the archival copy; it must not cost the indexing, because
+            # the text is what answers questions.
+            try:
+                store = get_storage()
+                doc.storage_key = await store.put(
+                    key_for(doc.id, doc.filename), data, doc.content_type
+                )
+                await session.commit()
+            except Exception as exc:  # noqa: BLE001
+                log_.warning("ingest_store_failed", error=str(exc)[:200])
 
             # --- stage 1: parse ---
             doc.status = DocStatus.parsing

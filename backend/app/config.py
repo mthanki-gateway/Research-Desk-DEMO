@@ -733,6 +733,29 @@ class Settings(BaseSettings):
     # This does NOT relax grounding. A web result is a SOURCE that must be
     # cited, not licence to answer from memory -- the citation contract is
     # unchanged, some sources are just URLs rather than chunks.
+    # ---- file storage -------------------------------------------------
+    #
+    # `local` by default, and that is a deliberate default rather than a
+    # placeholder: object storage should not stand between cloning this repo
+    # and seeing it work, and a backend that only runs with a paid account
+    # configured is a backend nobody tests. See `services/storage.py`.
+    storage_backend: str = "local"
+    storage_dir: str = "/data/files"
+    # ANY S3-compatible endpoint. Supabase is the recommendation -- 1GB, no
+    # credit card, and already a dependency here for auth:
+    #   https://<project>.supabase.co/storage/v1/s3
+    # Cloudflare R2 is https://<account>.r2.cloudflarestorage.com and has far
+    # more room, but requires a card to enable.
+    s3_endpoint_url: str = ""
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
+    s3_bucket: str = ""
+    # R2 ignores this; Supabase wants its project region.
+    s3_region: str = "auto"
+    # Optional. A bucket served from a custom domain can be linked directly;
+    # without one, the API streams the bytes itself.
+    s3_public_base: str = ""
+
     serper_api_key: str = ""
     serper_requests_per_minute: int = 60
     web_search_results: int = 5

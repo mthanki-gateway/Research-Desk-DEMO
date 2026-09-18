@@ -12,6 +12,7 @@ from fastapi import (
     Response,
     UploadFile,
 )
+from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,6 +32,7 @@ from app.services import ingest
 from app.services.embeddings import get_embeddings
 from app.services.parsing import UnsupportedFileType, detect_kind
 from app.services.retrieval import retrieve
+from app.services.storage import StorageError, get_storage
 from app.services.vectorstore import get_vector_store
 
 log = structlog.get_logger()
@@ -190,6 +192,59 @@ async def get_document(
             raise HTTPException(status_code=404, detail="Document not found.")
         forbid_if_not_owner(doc.owner_id, user)
         return doc
+
+
+@router.get("/documents/{document_id}/file")
+async def get_document_file(
+    document_id: uuid.UUID, user: User = Depends(current_user)
+) -> Response:
+    """The ORIGINAL upload, so a citation can be checked against its source.
+
+    A redirect when the store can sign a URL, and the bytes themselves when it
+    cannot. R2 signs; the local directory has no public host to sign for, so
+    the API serves it. The caller does not need to know which -- following a
+    redirect is what a browser does anyway.
+
+    `inline` rather than `attachment`: the point is to OPEN page four, not to
+    download a copy of the handbook.
+    """
+    async with SessionLocal() as session:
+        doc = await session.get(Document, document_id)
+        if doc is None:
+            raise HTTPException(status_code=404, detail="Document not found.")
+        forbid_if_not_owner(doc.owner_id, user)
+        key, filename, content_type = doc.storage_key, doc.filename, doc.content_type
+
+    if not key:
+        # Uploaded before storage existed, or stored while the backend was
+        # unreachable. Said plainly, because "not found" would suggest the
+        # document itself is gone when its text is perfectly well indexed.
+        raise HTTPException(
+            status_code=404,
+            detail="The original file was not kept for this document.",
+        )
+
+    store = get_storage()
+    signed = await store.signed_url(key)
+    if signed:
+        return RedirectResponse(signed, status_code=307)
+
+    try:
+        data = await store.get(key)
+    except StorageError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return Response(
+        content=data,
+        media_type=content_type or "application/octet-stream",
+        headers={
+            # The filename is quoted and stripped of quotes of its own, because
+            # it is user-supplied and this header is parsed.
+            "Content-Disposition": (
+                f'inline; filename="{filename.replace(chr(34), "")}"'
+            )
+        },
+    )
 
 
 @router.delete("/documents/{document_id}", status_code=204)
