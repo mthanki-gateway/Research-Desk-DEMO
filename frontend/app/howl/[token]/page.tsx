@@ -129,6 +129,10 @@ function Guest({ token }: { token: string }) {
           if (event.ended) {
             setEnded(true);
             stopCountdown();
+            // The interview is over; hand the microphone back. The socket
+            // stays open so the closing words still play, but a finished
+            // page must not leave the recording indicator lit.
+            session.current?.releaseMic();
           }
           break;
         case "finished":
@@ -138,6 +142,7 @@ function Guest({ token }: { token: string }) {
           setEnded(true);
           setEndedByUser(true);
           stopCountdown();
+          session.current?.releaseMic();
           setPhase("idle");
           break;
         case "playback_end":

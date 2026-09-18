@@ -237,7 +237,37 @@ def end_declaration() -> dict[str, Any]:
                         "One sentence on who this person is, for the top of "
                         "the card."
                     ),
-                }
+                },
+                # HOW IT WAS SAID, gathered at the end because it is a
+                # judgement about the whole conversation. The per-answer notes
+                # carry the moments; this is the shape they add up to, and
+                # without it a reader has to reconstruct it from twenty
+                # fragments.
+                "demeanour": {
+                    "type": "STRING",
+                    "description": (
+                        "How they came across over the whole conversation, in "
+                        "a sentence or two -- energy, warmth, confidence, "
+                        "guardedness, how comfortable they seemed. Describe "
+                        "what you HEARD, not what it means about them: "
+                        "'quiet and careful, took time over each answer' is "
+                        "an observation; 'lacks confidence' is a verdict you "
+                        "are not in a position to reach."
+                    ),
+                },
+                "notable_moments": {
+                    "type": "ARRAY",
+                    "items": {"type": "STRING"},
+                    "description": (
+                        "The two to five moments where their delivery changed "
+                        "and it meant something -- what they warmed up about, "
+                        "what they hurried past, where they hesitated, where "
+                        "they became precise. Each one names the subject and "
+                        "what changed: 'lit up describing the migration they "
+                        "led -- fastest and most detailed answer'. Leave it "
+                        "empty rather than inventing any."
+                    ),
+                },
             },
             "required": [],
         },
@@ -558,3 +588,49 @@ def render(profile: dict, fields: list[dict] | None = None) -> str:
             "their own words. Record more."
         )
     return "\n".join(lines)
+
+
+# Field names that hold A PERSON'S name, as an ALLOWLIST rather than a pattern.
+#
+# Interview has a fixed `full_name`. Howler's schema is written from a brief, so
+# it arrives as `candidate_name`, `respondent_name`, or nothing at all -- which
+# is why a Howler conversation stayed called "Interview" and its link stayed
+# "Unnamed" long after the interview had finished.
+#
+# Matching `*_name` instead would be shorter and wrong: `company_name`,
+# `product_name` and `tool_name` are all names, and none of them is the
+# person's. Naming somebody's interview after their employer is worse than
+# leaving it unnamed, so a new spelling gets added here deliberately.
+_NAME_FIELDS = (
+    "full_name",
+    "name",
+    "candidate_name",
+    "participant_name",
+    "interviewee_name",
+    "respondent_name",
+    "applicant_name",
+    "contact_name",
+    "person_name",
+)
+
+
+def person_name(profile: dict) -> str:
+    """The name of whoever was interviewed, or "" if it was never recorded.
+
+    `_blank` FIRST, before `_flat`. `_flat` is a formatter, not a validator --
+    it stringifies whatever it is handed, so a missing field came back as the
+    literal "None" and passed every check below it. That renamed an
+    unnamed conversation to "None", which the tests caught.
+    """
+    data = profile or {}
+    for key in _NAME_FIELDS:
+        raw = data.get(key)
+        if _blank(raw):
+            continue
+        value = _flat(raw).strip()
+        # A NAME, not a sentence. The model sometimes files a whole
+        # introduction under a name field -- "John Doe, a senior engineer
+        # looking for remote work" -- and that is a summary, not a title.
+        if value and len(value) <= 60 and len(value.split()) <= 5:
+            return value
+    return ""

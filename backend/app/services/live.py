@@ -213,7 +213,9 @@ def _declarations(
     return out
 
 
-def _system(mode: str, brief: str, participant: str) -> str:
+def _system(
+    mode: str, brief: str, participant: str, vocabulary: list[str] | None = None
+) -> str:
     """The system prompt for this mode, with Howler's slots filled.
 
     `str.format` is not used: the prompts contain braces of their own in
@@ -223,9 +225,14 @@ def _system(mode: str, brief: str, participant: str) -> str:
     text = MODES[mode_of(mode)]["system"]
     if mode_of(mode) != "howler":
         return text
-    return text.replace("{brief}", brief.strip() or "(no brief given)").replace(
-        "{participant}",
-        participant.strip() or "(nothing known about them yet)",
+    terms = ", ".join(vocabulary or [])
+    return (
+        text.replace("{brief}", brief.strip() or "(no brief given)")
+        .replace(
+            "{participant}",
+            participant.strip() or "(nothing known about them yet)",
+        )
+        .replace("{vocabulary}", terms or "(none listed)")
     )
 
 
@@ -236,6 +243,7 @@ def config(
     fields: list[dict] | None = None,
     brief: str = "",
     participant: str = "",
+    vocabulary: list[str] | None = None,
 ) -> types.LiveConnectConfig:
     reach = (
         ""
@@ -256,12 +264,34 @@ def config(
         ),
         tools=[types.Tool(function_declarations=_declarations(mode, fields))],
         system_instruction=types.Content(
-            parts=[types.Part(text=_system(mode, brief, participant) + reach)]
+            parts=[
+                types.Part(text=_system(mode, brief, participant, vocabulary) + reach)
+            ]
         ),
         # Both transcripts are requested purely so the SCREEN can show what was
         # heard and said. They are a side output, not the mechanism -- the model
         # is not reading them, and nothing in the answer path depends on them.
-        input_audio_transcription=types.AudioTranscriptionConfig(),
+        input_audio_transcription=types.AudioTranscriptionConfig(
+            # SPELLINGS FOR THE MICROPHONE.
+            #
+            # "React", "Node.js", "GCP" and "Kubernetes" are exactly the words a
+            # recogniser is worst at and exactly the ones that matter in the
+            # answer -- a profile that says "angular JS" or hears "jeep" for
+            # "GCP" is wrong in the only part anybody reads it for.
+            #
+            # `custom_vocabulary` biases the ASR towards these phrases.
+            # `adaptation_phrases` does the same thing and is deprecated, so it
+            # is deliberately not used. The list is generated per project, from
+            # ITS subject: a mythology interview gets Yggdrasil and Snorri
+            # Sturluson, and feeding it a list of web frameworks would bias the
+            # recogniser towards words nobody is going to say.
+            #
+            # The same terms also go into the system prompt, because this
+            # setting steers the TRANSCRIPT and the prompt steers the model's
+            # own understanding -- and it is the model, not the transcript,
+            # that writes the profile.
+            custom_vocabulary=list(vocabulary) if vocabulary else None,
+        ),
         output_audio_transcription=types.AudioTranscriptionConfig(),
         # THE BUTTON OWNS THE TURN. Automatic detection is switched off.
         #
@@ -411,8 +441,21 @@ async def run_tool_call(
             )
 
         summary = str(args.get("summary") or "").strip()
-        if session_id is not None and summary:
-            await store_summary(session_id, summary)
+        moments = [
+            " ".join(str(m).split())
+            for m in (args.get("notable_moments") or [])
+            if str(m).strip()
+        ]
+        affect = {
+            "demeanour": " ".join(str(args.get("demeanour") or "").split()),
+            "moments": moments[:8],
+        }
+        # STORED EVEN WITH NO SUMMARY. `ended` is set inside `store_summary`,
+        # and gating the whole call on a summary meant a model that ended
+        # without one left the conversation open for ever -- the link stayed
+        # live and the card never said complete.
+        if session_id is not None:
+            await store_summary(session_id, summary, affect)
         return (
             types.FunctionResponse(
                 id=call.id,
@@ -620,7 +663,7 @@ async def name_conversation(session_id: uuid.UUID, profile_data: dict) -> None:
     by a person or already carries a name, and overwriting either would be the
     app arguing with the user about what to call their own conversation.
     """
-    name = str((profile_data or {}).get("full_name") or "").strip()
+    name = profile.person_name(profile_data or {})
     if not name:
         return
 
@@ -689,6 +732,7 @@ async def adopt_project(
     participant: str,
     fields: list[dict],
     invite_id: uuid.UUID | None = None,
+    vocabulary: list[str] | None = None,
 ) -> None:
     """Stamp a guest's conversation with the project it belongs to.
 
@@ -709,6 +753,11 @@ async def adopt_project(
             chat.brief = brief
             chat.participant = participant
             chat.fields = fields
+            # Snapshotted with the schema, and for the same reason: the
+            # spellings are baked into the transcription config when the socket
+            # opens, so a session already running keeps the ones it started
+            # with however the project changes underneath it.
+            chat.vocabulary = vocabulary or []
             await db.commit()
         if invite_id is not None:
             await invites.attach_session(invite_id, session_id)
@@ -716,8 +765,15 @@ async def adopt_project(
         log.warning("adopt_project_failed", error=str(exc)[:200])
 
 
-async def store_summary(session_id: uuid.UUID, summary: str) -> None:
-    """One line on who this person is, for the top of the card. Never raises."""
+async def store_summary(
+    session_id: uuid.UUID, summary: str, affect: dict | None = None
+) -> None:
+    """Close the interview: the one-line summary, and how it sounded.
+
+    Never raises. Both are written here because both arrive on the same tool
+    call, and this is also where `ended` is set -- see the caller for why that
+    must not depend on the model having bothered with a summary.
+    """
     from app.db.models import ChatSession
     from app.db.session import SessionLocal
 
@@ -726,13 +782,16 @@ async def store_summary(session_id: uuid.UUID, summary: str) -> None:
             chat = await db.get(ChatSession, session_id)
             if chat is not None:
                 merged = dict(chat.profile or {})
-                merged["summary"] = summary
+                if summary:
+                    merged["summary"] = summary
+                if affect and (affect.get("demeanour") or affect.get("moments")):
+                    merged["affect"] = affect
                 merged["ended"] = True
                 chat.profile = merged
                 # Last chance to name it. If `record_profile` never carried a
                 # name -- it can be learned and then corrected -- this is the
                 # point at which the profile is final.
-                name = str(merged.get("full_name") or "").strip()
+                name = profile.person_name(merged)
                 if name and chat.title == UNNAMED_INTERVIEW:
                     chat.title = name[:120]
                 await db.commit()
@@ -770,7 +829,7 @@ async def finish_interview(session_id: uuid.UUID) -> None:
             merged["ended"] = True
             merged["ended_by"] = "participant"
             chat.profile = merged
-            name = str(merged.get("full_name") or "").strip()
+            name = profile.person_name(merged)
             if name and chat.title == UNNAMED_INTERVIEW:
                 chat.title = name[:120]
             await db.commit()

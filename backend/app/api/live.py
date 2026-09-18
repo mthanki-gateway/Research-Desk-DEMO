@@ -459,6 +459,7 @@ async def live_socket(
     if guest is not None:
         project = guest["project"]
         fields = list(project.fields or [])
+        vocabulary = list(project.vocabulary or [])
         await live.adopt_project(
             chat.id,
             project.id,
@@ -466,9 +467,14 @@ async def live_socket(
             guest["participant"],
             fields,
             guest["invite_id"],
+            vocabulary,
         )
         chat.brief = project.brief or ""
         chat.participant = guest["participant"]
+        # In memory too, not only in the row: `config` is built from `chat` a
+        # few lines below, and a guest's session is adopted in the same request
+        # that opens it.
+        chat.vocabulary = vocabulary
 
     try:
         client = live.client()
@@ -481,6 +487,7 @@ async def live_socket(
                 fields,
                 chat.brief or "",
                 chat.participant or "",
+                chat.vocabulary or [],
             ),
         ) as session:
             await ws.send_text(

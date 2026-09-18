@@ -36,6 +36,13 @@ class Document(Base):
     content_type: Mapped[str] = mapped_column(String(128))
     size_bytes: Mapped[int] = mapped_column(Integer)
 
+    # Where the ORIGINAL bytes live, e.g. `docs/<uuid>.pdf`. Null for anything
+    # uploaded before storage existed, and null when a store is unreachable --
+    # a document whose file could not be kept is still a document whose text
+    # was indexed, and failing the upload over the archival copy would be the
+    # tail wagging the dog. See `services/storage.py`.
+    storage_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
     status: Mapped[DocStatus] = mapped_column(
         Enum(DocStatus, name="doc_status"), default=DocStatus.pending, index=True
     )
@@ -165,6 +172,10 @@ class ChatSession(Base):
     brief: Mapped[str | None] = mapped_column(Text, nullable=True)
     participant: Mapped[str | None] = mapped_column(Text, nullable=True)
     fields: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    # Snapshotted from the project when the conversation starts, like
+    # `fields` -- a session already under way keeps the spellings it opened
+    # with, because they were baked into its transcription config at connect.
+    vocabulary: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
 
     # Which Howler project this conversation belongs to, if any. Null for
     # Speak, Interview, and the standalone Howler sessions that predate
@@ -225,6 +236,15 @@ class HowlerProject(Base):
     # with the schema. Putting it in the conversation table would make every
     # query about interviews have to exclude it.
     design: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+
+    # Terms the participant is likely to say, spelled correctly.
+    #
+    # NOT data to gather -- hints for the microphone. They are passed as
+    # `custom_vocabulary` on the live session's transcription config, and
+    # listed in the interviewer's prompt, because a recogniser that writes
+    # "angular JS" and a model that thinks it heard a different framework are
+    # two separate failures with the same cause.
+    vocabulary: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

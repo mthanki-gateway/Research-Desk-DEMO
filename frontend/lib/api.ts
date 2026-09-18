@@ -1240,6 +1240,9 @@ export type HowlerProject = {
   brief: string;
   participant: string;
   fields: BlueprintField[];
+  /** Spellings for the microphone, not data to gather. Passed to the live
+   *  session as `custom_vocabulary` and listed in the interviewer's prompt. */
+  vocabulary: string[];
   design: DesignMessage[];
   created_at: string | null;
   /** Only on the list endpoint. */
@@ -1256,6 +1259,15 @@ export type InviteResult = {
   missing: string[];
   /** What was gathered. */
   profile: Profile;
+  /**
+   * How the whole conversation SOUNDED, from the only thing that heard it.
+   *
+   * Observations about delivery, not conclusions about the person — the
+   * interviewer is told in as many words to record "took time over each
+   * answer" and never "lacks confidence". Null when the interview ended
+   * without one, which an interview cut short usually does.
+   */
+  affect: { demeanour: string; moments: string[] } | null;
   /** The schema THIS conversation was given, which is not necessarily the
    *  project's current one — a link opened last week gathered last week's
    *  data points, and rendering it against today's would invent empty rows
@@ -1280,8 +1292,16 @@ export type DesignTurn = {
   reply: string;
   ready: boolean;
   project: HowlerProject;
-  /** Only from `synthesiseHowlerProject`. */
-  invite?: HowlerInvite;
+  /**
+   * The link, when one was made this turn.
+   *
+   * Always present from `synthesiseHowlerProject`. From `designHowlerProject`
+   * it is null MOST turns and set on the one where the designer decided the
+   * data points were finished and settled them itself — it does not need
+   * permission, and a button to confirm what it has just said is done is the
+   * form this replaced.
+   */
+  invite?: HowlerInvite | null;
 };
 
 export async function listHowlerProjects(): Promise<HowlerProject[]> {

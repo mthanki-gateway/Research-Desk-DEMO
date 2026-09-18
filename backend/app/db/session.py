@@ -129,6 +129,15 @@ _MIGRATIONS: tuple[str, ...] = (
     # is only needed for projects that predate the conversation.
     "ALTER TABLE howler_projects ADD COLUMN IF NOT EXISTS design JSONB "
     "NOT NULL DEFAULT '[]'::jsonb",
+    # Spellings for the microphone. On both tables, because a conversation
+    # snapshots the project's list when it starts.
+    "ALTER TABLE howler_projects ADD COLUMN IF NOT EXISTS vocabulary JSONB "
+    "NOT NULL DEFAULT '[]'::jsonb",
+    "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS vocabulary JSONB "
+    "NOT NULL DEFAULT '[]'::jsonb",
+    # Where the original upload is kept. Nullable, so every document that
+    # predates object storage stays exactly as valid as it was.
+    "ALTER TABLE documents ADD COLUMN IF NOT EXISTS storage_key VARCHAR(512)",
 )
 
 

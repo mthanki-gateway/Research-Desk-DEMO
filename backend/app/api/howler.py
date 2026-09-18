@@ -28,7 +28,7 @@ from sqlalchemy import select
 from app.auth import User, current_user, forbid_if_not_owner
 from app.db.models import ChatSession, HowlerInvite, HowlerProject, Message
 from app.db.session import SessionLocal
-from app.services import blueprint, designer, invites, profile
+from app.services import blueprint, designer, invites, live, profile
 
 log = structlog.get_logger()
 
@@ -125,10 +125,20 @@ async def design(
         ) from exc
 
     row = await _apply(project_id, history, message, result)
+
+    # IT MAY FINISH THE JOB ITSELF. The designer can decide the data points
+    # will stand up to a real interview, and then there is nothing left for a
+    # button to confirm -- so the link is generated on the same turn that says
+    # so, and arrives beside the reply that announced it.
+    invite = None
+    if result.get("synthesise"):
+        invite = await _invite_out(await _live_invite(project_id))
+
     return {
         "reply": result["reply"],
         "ready": bool(result.get("ready")),
         "project": _project_out(row),
+        "invite": invite,
     }
 
 
@@ -184,7 +194,7 @@ async def synthesise(
         )
 
     row = await _apply(project_id, history, message, result)
-    invite = await _live_invite(project_id, row.participant or "")
+    invite = await _live_invite(project_id)
 
     return {
         "reply": result["reply"],
@@ -219,6 +229,8 @@ async def _apply(
                 setattr(row, key, result[key])
         if result.get("fields"):
             row.fields = result["fields"]
+        if result.get("vocabulary"):
+            row.vocabulary = result["vocabulary"]
 
         if row.brief and row.title in ("", UNTITLED):
             row.title = await designer.title_for(row.brief) or row.brief[:60]
@@ -228,12 +240,20 @@ async def _apply(
     return row
 
 
-async def _live_invite(project_id: uuid.UUID, participant: str) -> HowlerInvite:
+async def _live_invite(project_id: uuid.UUID) -> HowlerInvite:
     """The link for this project, made if there is not one already.
 
     "Live" means not withdrawn and not already finished. A completed interview
     leaves a link that can never be used again, so synthesising after one has
     come back gives the next person a new link rather than a dead one.
+
+    IT CARRIES NO PARTICIPANT OF ITS OWN, deliberately. An invite's own
+    `participant` OVERRIDES the project's at connect time, which is right for a
+    link made for a named person and wrong here: this link is made the moment
+    the schema settles -- often on the first turn -- so copying the paragraph
+    across would freeze an early guess and later refinement would never reach
+    the guest. Left empty, the interviewer reads whatever the project says
+    when the call actually starts.
     """
     async with SessionLocal() as db:
         rows = (
@@ -253,7 +273,7 @@ async def _live_invite(project_id: uuid.UUID, participant: str) -> HowlerInvite:
             if chat is None or not (chat.profile or {}).get("ended"):
                 return row
 
-    return await invites.create(project_id, participant=participant)
+    return await invites.create(project_id)
 
 
 @router.get("/projects")
@@ -348,6 +368,18 @@ async def revoke_invite(
     await invites.revoke(invite_id)
 
 
+def _derived_label(result: dict | None) -> str:
+    """The participant's name, if the interview learned one."""
+    if not result:
+        return ""
+    title = str(result.get("title") or "").strip()
+    # The placeholder is not a name. An interview that never learned one is
+    # still called "Interview", and copying that across would label every
+    # anonymous link identically -- which is worse than "Unnamed", because it
+    # looks deliberate.
+    return "" if title == live.UNNAMED_INTERVIEW else title
+
+
 def _project_out(p: HowlerProject) -> dict:
     return {
         "id": str(p.id),
@@ -355,6 +387,7 @@ def _project_out(p: HowlerProject) -> dict:
         "brief": p.brief,
         "participant": p.participant or "",
         "fields": p.fields or [],
+        "vocabulary": p.vocabulary or [],
         "design": p.design or [],
         "created_at": p.created_at.isoformat() if p.created_at else None,
     }
@@ -402,12 +435,26 @@ async def _invite_out(invite: HowlerInvite) -> dict:
                 # dropped.
                 "profile": data,
                 "fields": fields or [],
+                # How the whole conversation sounded, from the one thing that
+                # heard it. Separate from the field values because it is about
+                # delivery rather than content.
+                "affect": data.get("affect") or None,
             }
 
     return {
         "id": str(invite.id),
         "token": invite.token,
-        "label": invite.label,
+        # A LINK NAMES ITSELF once the interview has happened. Most links are
+        # made without a label -- the designer mints one the moment the schema
+        # settles, before anybody has said who it is for -- so the list read
+        # "Unnamed" beside a finished profile that plainly knew the person's
+        # name.
+        #
+        # Derived here rather than written to the row, for the same reason
+        # `status` is: it comes from the conversation, and a stored copy is a
+        # second source of truth that drifts the moment the name is corrected.
+        # A label somebody typed always wins.
+        "label": invite.label or _derived_label(result),
         "participant": invite.participant or "",
         "opens": invite.opens,
         "last_opened_at": invite.last_opened_at.isoformat()

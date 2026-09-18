@@ -444,3 +444,50 @@ class TestDeclaration:
 def test_the_list_fields_are_lists(name):
     field = next(f for f in profile.FIELDS if f["name"] == name)
     assert field.get("type") == "ARRAY"
+
+
+class TestPersonName:
+    """Finding the interviewee's name in a schema nobody wrote in advance.
+
+    Interview has a fixed `full_name`. Howler's fields come from a brief, so
+    the name arrives as `candidate_name`, `respondent_name`, or not at all --
+    which is why a finished Howler conversation stayed titled "Interview" and
+    its link stayed "Unnamed" next to a profile that plainly knew who it was.
+    """
+
+    def test_it_finds_the_fixed_field(self):
+        assert profile.person_name({"full_name": "John Doe"}) == "John Doe"
+
+    def test_it_finds_a_generated_one(self):
+        assert profile.person_name({"candidate_name": "Priya Raman"}) == "Priya Raman"
+
+    def test_a_list_is_flattened(self):
+        """ARRAY fields are legal, and the model sometimes picks one."""
+        assert profile.person_name({"respondent_name": ["Sam Okoro"]}) == "Sam Okoro"
+
+    def test_a_company_is_not_a_person(self):
+        """The reason the lookup is an allowlist rather than a `*_name` match.
+
+        Naming somebody's interview after their employer is worse than leaving
+        it unnamed, because it looks deliberate.
+        """
+        assert profile.person_name({"company_name": "Acme Logistics"}) == ""
+        assert profile.person_name({"product_name": "Acme Cloud"}) == ""
+
+    def test_a_missing_name_is_not_the_string_None(self):
+        """`_flat` is a formatter, not a validator.
+
+        Handed a missing field it returned the literal "None", which passed
+        every check after it and retitled the conversation "None".
+        """
+        assert profile.person_name({}) == ""
+        assert profile.person_name({"full_name": None}) == ""
+        assert profile.person_name({"current_role": "platform engineer"}) == ""
+
+    def test_whitespace_is_not_a_name(self):
+        assert profile.person_name({"full_name": "   "}) == ""
+
+    def test_an_introduction_is_not_a_name(self):
+        """A whole sentence filed under a name field is a summary, not a title."""
+        long = "John Doe, a senior engineer looking for remote work in Berlin"
+        assert profile.person_name({"full_name": long}) == ""

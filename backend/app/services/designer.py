@@ -88,7 +88,31 @@ SCHEMA = {
         },
         "brief": {"type": "string", "maxLength": MAX_BRIEF_CHARS},
         "participant": {"type": "string", "maxLength": MAX_PARTICIPANT_CHARS},
+        # Spellings for the microphone, not facts for the profile.
+        "vocabulary": {
+            "type": "array",
+            "items": {"type": "string", "maxLength": 60},
+            "description": (
+                "Words and names the PARTICIPANT is likely to say that a "
+                "speech recogniser gets wrong: jargon, tools, acronyms, proper "
+                "nouns, anything spelled unusually. Written exactly as they "
+                "should appear. Drawn from THIS subject only."
+            ),
+        },
         "ready": {"type": "boolean"},
+        # Its own decision to finish, rather than waiting to be told. Described
+        # for the same reason `research` is: it changes what happens next
+        # instead of what gets stored, and an undescribed key is one the model
+        # never touches.
+        "synthesise": {
+            "type": "boolean",
+            "description": (
+                "True to settle the data points NOW and generate the link, "
+                "exactly as if they had pressed Synthesise. Set it when you "
+                "have enough to interview against and there is no important "
+                "question left -- not on every turn you happen to be ready."
+            ),
+        },
         # DESCRIBED, unlike its neighbours, because it is the one key whose
         # meaning is not obvious from its name and the only one that changes
         # what happens next rather than what gets stored. Left bare it was
@@ -175,6 +199,22 @@ Mark as few required as you honestly can -- three to six is usually right.
 Every required field is one the interviewer will keep pushing for, and an
 interview that cannot end until it has all twelve is an interrogation.
 
+`vocabulary` IS FOR THE MICROPHONE. Speech recognition mangles exactly the
+words that matter most: "React" becomes "react", "GCP" becomes "GCP" or "G C
+P" or "jeep", "Node.js" becomes "node J S". List the terms this particular
+participant is likely to say, spelled the way they should be written, and the
+interviewer will hear them correctly.
+
+Draw them FROM THE SUBJECT, always. An interview about front-end engineering
+wants React, Node.js, TypeScript, Kubernetes, GCP. One about Norse mythology
+wants Ragnarok, Yggdrasil, Snorri Sturluson, Skaldskaparmal. One about
+cardiology wants echocardiogram, atrial fibrillation, NSTEMI. A list of
+programming languages in a mythology interview is worse than no list at all --
+it biases the recogniser towards words nobody is going to say.
+
+Twenty to forty terms is right, and they should be the ones an outsider would
+misspell. There is no value in listing "budget" or "team".
+
 `brief` is the instruction as you now understand it, rewritten in full each time
 it changes. Write it as an instruction to an interviewer.
 
@@ -183,6 +223,32 @@ paragraph. Context only -- it is never read back to them.
 
 `ready` is true once the fields are good enough to run with, which is usually
 straight away. Say so, and make clear they can keep changing things.
+
+`synthesise` FINISHES THE JOB YOURSELF. Set it when the data points would
+stand up to a real interview and you have nothing important left to ask -- you
+do not need permission, and making somebody hunt for a button to confirm what
+you have just told them is finished is the form this replaced. It settles the
+schema and generates the link in the same turn.
+
+Set it ONCE, when it is genuinely ready. Not on the first turn just because you
+produced some fields, and not again on every later turn -- they have the link
+by then, and it keeps working as the data points change.
+
+WHERE THINGS ARE ON THEIR SCREEN
+
+You are the Design tab of a project. Beside this conversation, a panel shows
+the data points as you write them and who is being interviewed, so there is no
+need to list them back -- they are already on screen.
+
+Two more tabs along the top:
+
+  Links    one link per person, and whether each has been opened
+  Results  what each participant said, filed against the data points
+
+When you generate a link, SAY WHERE IT IS -- "the link is under Links" -- and
+that it can be sent to anyone, with no account needed at their end. Point at
+Results when there would be something there to read. Do not describe the
+interface beyond that, and never name a button that is not one of these.
 
 `brief` and `participant` may be omitted on a turn that does not change them.
 `fields` may not: return the whole list every time, including the ones you are
@@ -294,12 +360,20 @@ async def respond(
         cleaned = normalise(parsed["fields"])
         if cleaned:
             out["fields"] = cleaned
+    if isinstance(parsed.get("vocabulary"), list):
+        out["vocabulary"] = clean_vocabulary(parsed["vocabulary"])
     out["ready"] = bool(parsed.get("ready")) or bool(out.get("fields"))
+    # Only meaningful alongside a schema. A model that asks to finish while
+    # returning nothing to finish is asking for an empty interview.
+    out["synthesise"] = bool(parsed.get("synthesise")) and bool(out.get("fields"))
 
     log.info(
         "designer_turn",
-        revised=[k for k in ("brief", "participant", "fields") if k in out],
+        revised=[
+            k for k in ("brief", "participant", "fields", "vocabulary") if k in out
+        ],
         ready=out["ready"],
+        synthesise=out["synthesise"],
         researched=bool(findings),
     )
     return out
@@ -363,6 +437,35 @@ async def _research(query: str) -> str:
         "user only wants the better data points that came of it. Leave "
         "`research` empty now."
     )
+
+
+# The API takes up to 1000 phrases and recommends staying near 100; past that
+# the bias is spread so thin it stops helping. Forty is about what one subject
+# actually has, and leaves room for the operator to think about the list.
+MAX_VOCABULARY = 60
+
+
+def clean_vocabulary(raw: list) -> list[str]:
+    """Deduplicated, trimmed, and capped. Case is PRESERVED.
+
+    The casing is the point: "Node.js" and "node js" are the same phrase to a
+    recogniser and different things to whoever reads the profile afterwards,
+    and this list is what the interviewer copies the spelling from.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        term = " ".join(item.split())[:60]
+        key = term.lower()
+        if not term or key in seen:
+            continue
+        seen.add(key)
+        out.append(term)
+        if len(out) >= MAX_VOCABULARY:
+            break
+    return out
 
 
 async def title_for(brief: str) -> str:

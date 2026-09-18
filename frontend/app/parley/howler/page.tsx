@@ -318,7 +318,7 @@ function Project({ id }: { id: string }) {
       run: () => Promise<{
         reply: string;
         project: HowlerProject;
-        invite?: HowlerInvite;
+        invite?: HowlerInvite | null;
       }>,
       kind: "say" | "synthesise",
     ): Promise<boolean> => {
@@ -442,14 +442,40 @@ function Project({ id }: { id: string }) {
           {/* In the bar rather than over the composer: it is the action that
               settles this project, it should be reachable from any tab and any
               scroll position, and a second button beside the send key is the
-              one place a stray Enter can go somewhere expensive. */}
+              one place a stray Enter can go somewhere expensive.
+
+              IN TERTIARY, which is the point of having a third colour role.
+              Primary is spent on the drawer, the active tab and the send key,
+              so a primary button here was one more purple thing in a row of
+              purple things. Tertiary reads as a different KIND of action at a
+              glance, which is what it is: everything else on this screen edits
+              the project, and this one publishes it.
+
+              Full size and ringed until a link exists; afterwards it drops to
+              the quieter container pair, because by then it is a revision
+              rather than the point. */}
           {lines.length > 0 && (
             <Button
-              variant="tonal"
-              size="sm"
               onClick={() => void synthesise()}
               disabled={busy !== null}
               className="shrink-0"
+              style={{
+                background: invites.length
+                  ? "var(--md-tertiary-container)"
+                  : "var(--md-tertiary)",
+                color: invites.length
+                  ? "var(--md-on-tertiary-container)"
+                  : "var(--md-on-tertiary)",
+                // A steady ring, not the tab's ping: this one sits and waits
+                // rather than announcing something that just happened, and a
+                // pulsing filled button is an alarm.
+                ...(!invites.length && (project?.fields ?? []).length > 0
+                  ? {
+                      boxShadow:
+                        "0 0 0 4px color-mix(in srgb, var(--md-tertiary) 24%, transparent)",
+                    }
+                  : {}),
+              }}
             >
               {busy === "synthesise" ? <IconSpinner /> : <IconCheck />}
               {invites.length ? "Synthesise again" : "Synthesise now"}
@@ -614,7 +640,7 @@ function Design({
     run: () => Promise<{
       reply: string;
       project: HowlerProject;
-      invite?: HowlerInvite;
+      invite?: HowlerInvite | null;
     }>,
     kind: "say" | "synthesise",
   ) => Promise<boolean>;
@@ -833,6 +859,7 @@ function Panel({
   onOpenLinks: () => void;
 }) {
   const fields = project?.fields ?? [];
+  const vocabulary = project?.vocabulary ?? [];
   const live = invites.filter((i) => !i.revoked).length;
   /**
    * Narrow screens only. On a phone the panel sits ABOVE the conversation --
@@ -953,6 +980,37 @@ function Panel({
             >
               Context for the interviewer. Never read back to them, and what
               they say always wins over it.
+            </p>
+          </Section>
+        )}
+
+        {vocabulary.length > 0 && (
+          <Section
+            title="Words it will hear"
+            count={vocabulary.length}
+            collapses
+            className="lg:shrink-0"
+            bodyClassName="md-scroll lg:max-h-40 lg:overflow-y-auto"
+          >
+            <div className="flex flex-wrap gap-1.5">
+              {vocabulary.map((term) => (
+                <span key={term} className="md-badge">
+                  {term}
+                </span>
+              ))}
+            </div>
+            <p
+              className="md-body-small mt-3 border-t pt-3"
+              style={{
+                color: "var(--md-on-surface-variant)",
+                borderColor: "var(--md-outline-variant)",
+              }}
+            >
+              {/* Said plainly because it looks like data and is not. */}
+              Not things to ask about — spellings. Speech recognition mangles
+              exactly the words that matter, so these are given to the
+              microphone and to the interviewer. Say so in the chat if one is
+              wrong or missing.
             </p>
           </Section>
         )}
@@ -1471,6 +1529,44 @@ function Results({
                 one -- a link opened last week gathered last week's data
                 points, and rendering it against today's would invent empty
                 rows for questions nobody was ever asked. */}
+            {result.affect && (
+              <section className="md-card md-card-outlined mb-3 p-5">
+                <h3 className="md-title-small">How they came across</h3>
+                {result.affect.demeanour && (
+                  <p className="md-body-medium mt-2">{result.affect.demeanour}</p>
+                )}
+                {result.affect.moments.length > 0 && (
+                  <ul className="mt-3 space-y-1.5">
+                    {result.affect.moments.map((moment) => (
+                      <li
+                        key={moment}
+                        className="md-body-small flex gap-2"
+                        style={{ color: "var(--md-on-surface-variant)" }}
+                      >
+                        <span aria-hidden="true">·</span>
+                        <span>{moment}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {/* SAID OUT LOUD, because this is the part of a profile most
+                    likely to be read as fact. It is one model's impression of
+                    a voice, it is not evidence, and anybody deciding about a
+                    person on the strength of it should know that. */}
+                <p
+                  className="md-body-small mt-3 border-t pt-3"
+                  style={{
+                    color: "var(--md-on-surface-variant)",
+                    borderColor: "var(--md-outline-variant)",
+                  }}
+                >
+                  An impression of how the conversation sounded, not a finding
+                  about the person. Tone reads differently across cultures, and
+                  a bad line or a bad day sounds like a lot of things.
+                </p>
+              </section>
+            )}
+
             <ProfileCard
               fields={result.fields.map((f) => ({
                 name: f.name,
