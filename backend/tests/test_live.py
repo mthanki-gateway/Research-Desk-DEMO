@@ -569,8 +569,12 @@ class TestParticipantEnding:
         class _Chat:
             profile: dict = {}
             owner_id = "owner-1"
+            id = uuid.UUID(int=1)
+            project_id = None
             title = live.UNNAMED_INTERVIEW
             owner_id = "owner-1"
+            id = uuid.UUID(int=1)
+            project_id = None
 
         chat = _Chat()
         _patch_session(monkeypatch, chat, stored)
@@ -598,6 +602,8 @@ class TestParticipantEnding:
                 "affect": {"demeanour": "Warm, unhurried.", "moments": ["x"]},
             }
             owner_id = "owner-1"
+            id = uuid.UUID(int=1)
+            project_id = None
             title = "Priya Raman"
 
         chat = _Chat()
@@ -621,6 +627,8 @@ class TestParticipantEnding:
         class _Chat:
             profile = {"ended": True, "ended_by": "model", "summary": "Done."}
             owner_id = "owner-1"
+            id = uuid.UUID(int=1)
+            project_id = None
             title = "Priya Raman"
 
         chat = _Chat()
@@ -639,9 +647,24 @@ class TestParticipantEnding:
 def _patch_session(monkeypatch, chat, stored):
     """Stand in for the database, so these assert on behaviour not on SQL."""
 
+    class _Result:
+        """What a lookup returns when there is nothing to find.
+
+        `name_from_context` asks for an invite label and a project title as a
+        last resort before leaving a conversation unnamed. These stubs have
+        neither, so both come back empty -- which is the path worth covering
+        here: the ending must still be recorded when nothing can name it.
+        """
+
+        def scalar_one_or_none(self):
+            return None
+
     class _DB:
         async def get(self, _model, _id):
             return chat
+
+        async def execute(self, *_args, **_kwargs):
+            return _Result()
 
         async def commit(self):
             stored["committed"] = True

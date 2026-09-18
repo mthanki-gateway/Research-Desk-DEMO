@@ -803,8 +803,10 @@ async def store_summary(
                 # name -- it can be learned and then corrected -- this is the
                 # point at which the profile is final.
                 name = profile.person_name(merged)
-                if name and chat.title == UNNAMED_INTERVIEW:
+                if name and chat.title in DEFAULT_TITLES:
                     chat.title = name[:120]
+                else:
+                    await name_from_context(db, chat)
                 owner = getattr(chat, "owner_id", None)
                 await db.commit()
         await _queue_analysis(session_id, owner)
@@ -852,14 +854,60 @@ async def finish_interview(session_id: uuid.UUID) -> None:
             merged.setdefault("ended_by", "participant")
             chat.profile = merged
             name = profile.person_name(merged)
-            if name and chat.title == UNNAMED_INTERVIEW:
+            if name and chat.title in DEFAULT_TITLES:
                 chat.title = name[:120]
+            else:
+                await name_from_context(db, chat)
             owner = getattr(chat, "owner_id", None)
             await db.commit()
         await _queue_analysis(session_id, owner)
         log.info("interview_ended_by_participant", session=str(session_id))
     except Exception as exc:  # noqa: BLE001
         log.warning("live_finish_failed", error=str(exc)[:200])
+
+
+DEFAULT_TITLES = ("Spoken conversation", UNNAMED_INTERVIEW, "")
+
+
+async def name_from_context(db, chat) -> None:
+    """Name a conversation from what surrounds it, if it still has no name.
+
+    THE LAST FALLBACK, after `person_name`. That one looks for a name FIELD,
+    and Howler's schemas are generated -- so a participant's name usually lands
+    in a note where it cannot be found, and the conversation keeps the default
+    for ever.
+
+    Everything else about it is already known: the link was made for somebody,
+    or the project it belongs to has a title. Either beats a row that reads
+    "Spoken conversation" next to three others saying the same.
+
+    Runs INSIDE the caller's session and does not commit -- it is one more
+    field on a write that was happening anyway.
+    """
+    if chat.title not in DEFAULT_TITLES:
+        return
+
+    from sqlalchemy import select
+
+    from app.db.models import HowlerInvite, HowlerProject
+
+    label = (
+        await db.execute(
+            select(HowlerInvite.label).where(HowlerInvite.session_id == chat.id)
+        )
+    ).scalar_one_or_none()
+    if label:
+        chat.title = label[:120]
+        return
+
+    if chat.project_id:
+        title = (
+            await db.execute(
+                select(HowlerProject.title).where(HowlerProject.id == chat.project_id)
+            )
+        ).scalar_one_or_none()
+        if title:
+            chat.title = title[:120]
 
 
 async def _queue_analysis(session_id: uuid.UUID, owner_id: str | None) -> None:

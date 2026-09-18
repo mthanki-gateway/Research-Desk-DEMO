@@ -123,8 +123,6 @@ export function Providers({ children }: { children: React.ReactNode }) {
   const [railReady, setRailReady] = useState(false);
   const pathname = usePathname();
   const [accent, setAccentState] = useState<Accent>(DEFAULT_ACCENT);
-  /** The user picked one, so it wins over whatever app they are looking at. */
-  const [accentChosen, setAccentChosen] = useState(false);
   const [account, setAccount] = useState<AppData["account"]>(null);
   // With auth disabled there is nothing to look up, so treat it as resolved.
   const [authReady, setAuthReady] = useState(!authEnabled);
@@ -169,10 +167,12 @@ export function Providers({ children }: { children: React.ReactNode }) {
       // been removed would otherwise set an attribute matching no CSS rule,
       // silently falling back to the default while the picker showed the old
       // choice as selected.
-      if (ACCENTS.some((a) => a.id === saved)) {
-        setAccentState(saved as Accent);
-        setAccentChosen(true);
-      }
+      // DELIBERATELY IGNORED now. The accent belongs to the app, not to a
+      // personal setting, and nothing in the UI has ever written this key --
+      // so the only values that exist are left over from an older build, and
+      // honouring one pinned every app to a single colour with no way to
+      // clear it. Removed rather than migrated: there is nothing to preserve.
+      void saved;
     } catch {
       // private browsing or blocked storage — the defaults are fine
     }
@@ -180,26 +180,24 @@ export function Providers({ children }: { children: React.ReactNode }) {
   }, []);
 
   /**
-   * EACH APP WEARS ITS OWN ACCENT, unless somebody has chosen one.
+   * EACH APP WEARS ITS OWN ACCENT.
    *
    * Three apps sharing one shell look identical at a glance, and the drawer
-   * title is the only thing that says which you are in. Colour says it before
-   * you read anything -- and the app switcher then moves you between visibly
-   * different places rather than between three purple ones.
+   * title is the only thing saying which you are in. Colour says it before you
+   * read anything, and the app switcher then moves you between visibly
+   * different places rather than three purple ones.
    *
-   * An explicit choice still wins everywhere: that is a preference about
-   * somebody's eyes, not about the app they happen to have open.
+   * `projects.ts` is the source of truth; the inline script in `layout.tsx`
+   * duplicates the prefixes only to avoid a flash before this runs.
    */
   useEffect(() => {
-    if (accentChosen) return;
     const wanted = projectFor(pathname).accent;
     document.documentElement.setAttribute("data-accent", wanted);
     setAccentState(wanted);
-  }, [pathname, accentChosen]);
+  }, [pathname]);
 
   const setAccent = useCallback((a: Accent) => {
     setAccentState(a);
-    setAccentChosen(true);
     // The attribute is the source of truth for rendering; state only drives
     // the picker's selected mark. The default lives on bare `:root`, so it is
     // set as an attribute too rather than removed -- keeps the two paths
