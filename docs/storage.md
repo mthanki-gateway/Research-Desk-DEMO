@@ -180,25 +180,76 @@ stakes considerably on the point above.
 
 ---
 
-## Planned: a dedicated emotion model
+## Planned: a dedicated emotion model, server-side
 
 Today's "How they came across" is the *interviewer's* impression, recorded as
 `demeanour` and `notable_moments` on `end_interview` and deliberately worded as
-observation rather than diagnosis.
+observation rather than diagnosis. The local models in this app — Silero and
+Smart Turn — do **turn detection**. Neither knows anything about emotion.
 
-A dedicated model is the obvious next step, and the plumbing already exists —
-`turnWorker.ts` runs ONNX in a Web Worker, with a ring buffer of recent audio.
-Candidates: [`onnx-community/wav2vec2-base-Speech_Emotion_Recognition-ONNX`][ser]
-(ready-made ONNX), or [Wav2Small][ws] at 72K parameters and ~120 KB quantised.
+**It belongs on the backend, not in the browser.** The browser had a hard
+budget: every megabyte is a download before the feature works, and inference
+competes with a live call. A stored recording has neither constraint — it can
+be analysed after the interview, at leisure, and **re-analysed** when a better
+model appears. That last point is the same argument as keeping original
+uploads, and it only works if the audio was kept.
 
-Two things to check before committing, both learned the hard way from Smart
-Turn: **verify the real ONNX input contract** rather than trusting the model
-card, and note that wav2vec2 takes a **raw waveform**, not a mel — so `mel.ts`
-would not be reused, though the worker and ORT plumbing would.
+So the order is: recordings → storage → analysis. Not the other way round.
 
-And one caution worth keeping in the design: speech emotion recognition is
-substantially less reliable than turn detection, and varies by culture and
-accent. It belongs in a profile as a note, never as a number anyone decides on.
+### Dimensional, not categorical
 
-[ser]: https://huggingface.co/onnx-community/wav2vec2-base-Speech_Emotion_Recognition-ONNX
-[ws]: https://arxiv.org/html/2408.13920v4
+The obvious design is a label — "happy", "angry", "sad". It is the wrong one
+here, twice over.
+
+Most categorical SER models are trained on **acted** corpora (RAVDESS and
+friends), where someone performs an emotion on cue. They report accuracy in the
+eighties and collapse on natural speech, because nobody in a job interview is
+performing anger. And a label is a verdict: "the model says this candidate was
+angry" will be read as fact by whoever is deciding about them.
+
+[`audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim`][aud] is the better
+fit. It outputs **arousal, dominance and valence** as continuous values in
+roughly 0–1, and it was fine-tuned on **MSP-Podcast** — spontaneous speech,
+not acted — which is far closer to an interview than any acted set.
+
+Those three map onto language the profile already uses: how animated, how
+assertive, how positive somebody sounded. Observations, not diagnoses.
+
+**Change matters more than level.** An absolute arousal of 0.6 means very
+little; arousal rising sharply on one question and falling on the next is a
+real signal, and it is exactly what `notable_moments` is already reaching for.
+Per-turn recordings give that for free, since the turn boundaries are the same
+ones the profile was recorded against.
+
+### The others worth knowing
+
+| | |
+|---|---|
+| [Wav2Small][ws] | 72K params, ~120 KB quantised — for when size is the constraint |
+| `emotion2vec_plus_large` (FunASR) | newer self-supervised speech-emotion representation |
+| SenseVoice (FunASR) | ASR + emotion + audio events in one pass |
+| [speechbrain IEMOCAP][sb] | categorical, and IEMOCAP is largely acted |
+| Hume AI | hosted prosody API, no self-hosting |
+
+### The constraint that will bite
+
+**Render's free tier is 512 MB of RAM.** `wav2vec2-large-robust-12` does not
+fit, and neither does the PyTorch that usually runs it — torch alone is well
+over a gigabyte in the image. Options, in order of preference:
+
+1. Export to **ONNX** and run through `onnxruntime` on CPU. The runtime is tens
+   of megabytes rather than gigabytes, and this repo already uses ONNX in the
+   browser, so the pattern is familiar.
+2. Run analysis **off the request path entirely** — a job that reads finished
+   recordings, on a box with more memory, writing results back.
+3. A hosted inference API, accepting that the audio then leaves our control,
+   which is a different conversation with the participant.
+
+And the caveat to keep in the design regardless: SER is substantially less
+reliable than turn detection and varies by culture and accent. It belongs in a
+profile as a note, never as a number anyone decides on. Verify the real ONNX
+input contract before building against it — Smart Turn taught that twice.
+
+[aud]: https://huggingface.co/audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim
+[ws]: https://arxiv.org/html/2408.13920
+[sb]: https://huggingface.co/speechbrain/emotion-recognition-wav2vec2-IEMOCAP

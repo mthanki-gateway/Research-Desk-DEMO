@@ -38,6 +38,9 @@ import {
   IconTrash,
 } from "../../icons";
 import ParleySurface, { ProfileCard } from "../surface";
+import Transcript from "./transcript";
+import VoiceTimeline from "./voiceTimeline";
+import ConversationPanel from "./conversationPanel";
 
 /**
  * Howler — design an interview by talking about it, then send someone a link.
@@ -90,10 +93,22 @@ export default function HowlerPage() {
 
 function Howler() {
   const params = useSearchParams();
-  // A conversation in the URL is a live interview; hand over to the surface
-  // that runs the microphone. A project is a design session.
-  if (params.get("c")) return <ParleySurface mode="howler" />;
+  const conversation = params.get("c");
   const project = params.get("p");
+
+  // READING a conversation and HOLDING one are different pages.
+  //
+  // `?c=` used to hand over to the live surface, so opening a finished result
+  // came with a microphone, a voice picker and a keep-the-socket-open toggle
+  // -- controls for running an interview, shown to somebody who came to read
+  // one. `?live=1` is the owner running one themselves; anything else reads.
+  if (conversation) {
+    return params.get("live") ? (
+      <ParleySurface mode="howler" />
+    ) : (
+      <Transcript id={conversation} projectId={project} />
+    );
+  }
   return project ? <Project id={project} /> : <Projects />;
 }
 
@@ -1416,7 +1431,7 @@ function LinkRow({
             href={`/parley/howler?c=${invite.result.session_id}`}
             className="md-btn md-btn-text md-btn-sm md-state"
           >
-            Read the conversation
+            Open the result
           </a>
         )}
         {/* Only while there is something to withdraw. A finished interview
@@ -1544,6 +1559,72 @@ function Results({
                 one -- a link opened last week gathered last week's data
                 points, and rendering it against today's would invent empty
                 rows for questions nobody was ever asked. */}
+            {/* WHERE THE EMOTION ANALYSIS LIVES, and what it says while there
+                is none. Showing nothing made this look missing rather than
+                pending -- and the honest answer is usually "there is no
+                recording to analyse yet", which nobody could guess. */}
+            {(result.voice || result.analysis) && (
+              <section className="md-card md-card-outlined mb-3 p-5">
+                <h3 className="md-title-small">Voice analysis</h3>
+                {result.voice ? (
+                  <>
+                    <div className="mt-3">
+                      <VoiceTimeline
+                        turns={result.voice.turns}
+                        baseline={result.voice.baseline}
+                        moments={result.voice.moments}
+                      />
+                    </div>
+                    {result.voice.moments.length > 0 && (
+                      <>
+                        <h4
+                          className="md-label-medium mt-4"
+                          style={{ color: "var(--md-on-surface-variant)" }}
+                        >
+                          Where it departed
+                        </h4>
+                        <ul className="mt-1 space-y-1">
+                          {result.voice.moments.map((m, i) => (
+                            <li key={i} className="md-body-small">
+                              <span className="font-medium">Turn {m.turn + 1}</span>
+                              <span style={{ color: "var(--md-on-surface-variant)" }}>
+                                {" — "}
+                                {m.dimension} {m.direction} than they were
+                                elsewhere ({m.delta > 0 ? "+" : ""}
+                                {m.delta.toFixed(2)})
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      </>
+                    )}
+                    <p
+                      className="md-body-small mt-3 border-t pt-3"
+                      style={{
+                        color: "var(--md-on-surface-variant)",
+                        borderColor: "var(--md-outline-variant)",
+                      }}
+                    >
+                      {result.voice.caveat}
+                    </p>
+                  </>
+                ) : (
+                  <p
+                    className="md-body-small mt-2"
+                    style={{ color: "var(--md-on-surface-variant)" }}
+                  >
+                    {result.analysis?.status === "failed"
+                      ? `Analysis failed: ${result.analysis.error || "unknown error"}`
+                      : result.analysis?.status === "running"
+                        ? "Analysing the audio…"
+                        : result.analysis?.status === "done"
+                          ? "Nothing to analyse — this interview has no audio recording."
+                          : "Waiting. Interviews are queued as they finish, and analysed once recordings exist and the model is switched on."}
+                  </p>
+                )}
+              </section>
+            )}
+
             {result.affect && (
               <section className="md-card md-card-outlined mb-3 p-5">
                 <h3 className="md-title-small">How they came across</h3>
@@ -1592,14 +1673,10 @@ function Results({
               missing={result.missing}
               complete={result.complete}
             />
-            <div className="mt-2">
-              <a
-                href={`/parley/howler?c=${result.session_id}`}
-                className="md-btn md-btn-text md-btn-sm md-state"
-              >
-                Read the conversation
-              </a>
-            </div>
+            <ConversationPanel
+              sessionId={result.session_id}
+              turns={result.turns}
+            />
           </section>
         );
       })}

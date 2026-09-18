@@ -304,7 +304,6 @@ function Parley({ mode }: { mode: Mode }) {
   // Read after mount, not in the initialiser: Next renders this on the server
   // for the first HTML, where `localStorage` does not exist.
   useEffect(() => {
-    if (mode !== "speak") return;
     try {
       setAutoTurns(localStorage.getItem("parley.autoTurns") === "1");
       const saved = localStorage.getItem("parley.patience");
@@ -644,7 +643,7 @@ function Parley({ mode }: { mode: Mode }) {
    * "fetching the models" for ever, having never begun.
    */
   useEffect(() => {
-    if (mode !== "speak" || !autoTurns) {
+    if (!autoTurns) {
       disableTurnDetection();
       return;
     }
@@ -691,7 +690,7 @@ function Parley({ mode }: { mode: Mode }) {
   }, [stop]);
 
   useEffect(() => {
-    autoRef.current = mode === "speak" && autoTurns && detector === "ready";
+    autoRef.current = autoTurns && detector === "ready";
   }, [mode, autoTurns, detector]);
 
   useEffect(() => {
@@ -1179,8 +1178,19 @@ function Parley({ mode }: { mode: Mode }) {
               line running through the text in the screenshot. Nested, there
               is no divider to collide with and the pair reads as one setting,
               which is what they are. */}
-          {mode === "speak" && (
-            <div className="[&>div:first-child]:pb-3">
+          {/* EVERY MODE THIS SURFACE RUNS.
+              It began as Speak-only, because Interview and Howler take
+              somebody THROUGH a conversation, and cutting a participant off
+              mid-answer costs more there than the convenience is worth. Speak
+              was simply where that risk was cheapest to carry while the
+              thresholds were wrong -- and they were, twice.
+
+              The GUEST page is still excluded, and that is a separate decision
+              rather than an oversight: somebody on a magic link has no
+              settings to read, so enabling it for them would be the operator
+              choosing on their behalf. That belongs on the project, not on a
+              toggle they never see. */}
+          <div className="[&>div:first-child]:pb-3">
               <Row
                 title="End my turn automatically"
                 detail={
@@ -1190,7 +1200,9 @@ function Parley({ mode }: { mode: Mode }) {
                       ? "Fetching the models (~11MB, once)"
                       : autoTurns
                         ? "Two local models listen for the end of a sentence. Nothing is uploaded"
-                        : "Off — the button decides when you have finished"
+                        : mode === "speak"
+                          ? "Off — the button decides when you have finished"
+                          : "Off — the button decides when an answer is finished"
                 }
               >
                 <Switch
@@ -1280,8 +1292,7 @@ function Parley({ mode }: { mode: Mode }) {
                   })}
                 </div>
               </div>
-            </div>
-          )}
+          </div>
 
           <Row
             title="Stay connected between questions"

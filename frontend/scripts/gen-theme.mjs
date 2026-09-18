@@ -46,6 +46,10 @@ const ACCENTS = [
   { id: "amber", label: "Amber", seed: "#b45309" },
   { id: "olive", label: "Olive", seed: "#3f6212" },
   { id: "blue", label: "Blue", seed: "#0284c7" }, // what the app shipped with
+  // Material's own Brown 500. Parley wears this: the three apps share one
+  // shell, and a warm neutral reads as a different PLACE at a glance without
+  // competing with Research Desk's purple the way another saturated hue would.
+  { id: "brown", label: "Brown", seed: "#795548" },
 ];
 
 // The navigation drawer is a LIGHT surface, which is what stock M3 specifies.

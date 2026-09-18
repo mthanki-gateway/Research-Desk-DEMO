@@ -10,6 +10,7 @@ export const ACCENTS = [
   { id: "amber", label: "Amber", seed: "#b45309" },
   { id: "olive", label: "Olive", seed: "#3f6212" },
   { id: "blue", label: "Blue", seed: "#0284c7" },
+  { id: "brown", label: "Brown", seed: "#795548" },
 ] as const;
 
 /** The one on bare `:root`, i.e. what renders with no data-accent set. */

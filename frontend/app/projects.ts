@@ -1,3 +1,4 @@
+import type { Accent } from "@/lib/accents";
 import {
   IconChat,
   IconAtlas,
@@ -26,6 +27,13 @@ import {
  */
 export type Project = {
   id: string;
+  /**
+   * The accent this app wears, so which one you are in is legible before you
+   * read a word of it. A DEFAULT rather than a lock: somebody who picks an
+   * accent explicitly gets it everywhere, because that is a preference about
+   * their eyes rather than about the app.
+   */
+  accent: Accent;
   name: string;
   /** One line, shown in the switcher. Say what it is FOR, not what it is. */
   blurb: string;
@@ -42,6 +50,7 @@ export type Project = {
 export const PROJECTS: Project[] = [
   {
     id: "research-desk",
+    accent: "purple",
     name: "Research Desk",
     blurb: "Ask questions across your documents and the web, with citations.",
     Icon: IconLibrary,
@@ -56,6 +65,7 @@ export const PROJECTS: Project[] = [
   },
   {
     id: "model-lab",
+    accent: "blue",
     name: "Model Lab",
     blurb: "Call open models directly — text and speech — and watch what they cost.",
     Icon: IconChip,
@@ -68,6 +78,7 @@ export const PROJECTS: Project[] = [
   },
   {
     id: "parley",
+    accent: "brown",
     name: "Parley",
     blurb: "Talk it through out loud, or be interviewed. Speech in, speech out.",
     Icon: IconParley,

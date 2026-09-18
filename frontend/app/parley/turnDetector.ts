@@ -4,6 +4,13 @@ let worker: Worker | null = null;
 let ready = false;
 let enabled = false;
 let listener: ((event: TurnEvent) => void) | null = null;
+/** Held here because `attach` runs after an await and needs the value the
+ *  caller asked for, not whatever the default happens to be. */
+let chosen: Patience = "balanced";
+/** The dynamic import is in flight. Without this a second call -- an effect
+ *  re-running, a toggle flicked twice -- starts a SECOND worker, and two of
+ *  them would both fetch 11MB and both report endpoints. */
+let starting = false;
 
 function send(message: ToWorker, transfer?: Transferable[]) {
   worker?.postMessage(message, transfer ?? []);
@@ -133,25 +140,45 @@ export function enableTurnDetection(
 ): void {
   listener = onEvent;
   enabled = true;
+  chosen = patience;
 
-  if (worker) {
-    // Already here. Say so, so a UI that just mounted is not left waiting for
-    // an event that fired before it was listening.
+  if (worker || starting) {
+    // Already here, or on its way. Say so, so a UI that just mounted is not
+    // left waiting for an event that fired before it was listening.
     setPatience(patience);
     onEvent(ready ? { type: "ready" } : { type: "loading" });
     return;
   }
 
+  starting = true;
   onEvent({ type: "loading" });
-  try {
-    worker = new Worker(new URL("./turnWorker.ts", import.meta.url));
-  } catch (e) {
-    onEvent({
-      type: "error",
-      detail: e instanceof Error ? e.message : "The turn detector could not start.",
-    });
-    return;
-  }
+  // DYNAMICALLY IMPORTED, so onnxruntime-web is not in this route's compile.
+  // Webpack resolves `new Worker(new URL(...))` statically wherever it appears,
+  // which pulled ~10MB of ORT into /parley whether or not anybody switched
+  // this on -- a 32-second first compile in dev, long enough for the browser
+  // to give up. Behind `import()` it is a lazy chunk built on first use.
+  void (async () => {
+    try {
+      const { createTurnWorker } = await import("./turnWorkerHost");
+      worker = createTurnWorker();
+    } catch (e) {
+      onEvent({
+        type: "error",
+        detail:
+          e instanceof Error ? e.message : "The turn detector could not start.",
+      });
+      starting = false;
+      return;
+    }
+    starting = false;
+    attach(onEvent);
+  })();
+}
+
+/** Wire the worker up and start it loading. Split out so `enable` can await
+ *  the import without the rest of it becoming async. */
+function attach(onEvent: (event: TurnEvent) => void): void {
+  if (!worker) return;
 
   worker.onmessage = (event: MessageEvent<FromWorker>) => {
     const message = event.data;
@@ -184,7 +211,7 @@ export function enableTurnDetection(
     turnUrl: "/models/smart_turn_v3.onnx",
     wasmBase: "/ort/",
   });
-  setPatience(patience);
+  setPatience(chosen);
 }
 
 /** Stop acting on it. The worker and its weights are KEPT. */

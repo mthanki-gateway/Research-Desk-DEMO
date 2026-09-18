@@ -122,9 +122,17 @@ indicator staying lit between two turns is correct.
 [ff1]: https://bugzilla.mozilla.org/show_bug.cgi?id=1725336
 [ff2]: https://bugzilla.mozilla.org/show_bug.cgi?id=1388586
 
-### Turn detection (Speak only)
+### Turn detection
 
-Off by default. Two models, answering different questions:
+Off by default, and available in all three modes on the owner's surface. It
+began as Speak-only, because Interview and Howler take somebody *through* a
+conversation and cutting a participant off mid-answer costs more there — Speak
+was simply where that risk was cheapest to carry while the thresholds were
+wrong, and they were, twice.
+
+The **guest page is still excluded**, deliberately: somebody on a magic link
+has no settings to read, so enabling it for them would be the operator choosing
+on their behalf. That belongs on the project, not on a toggle they never see. Two models, answering different questions:
 
 | | Silero VAD (2.2 MB) | Smart Turn v3 (8.7 MB) |
 |---|---|---|
@@ -225,4 +233,12 @@ dependency. The guest page (`/howl/<token>`) renders outside the app shell.
 - **A dedicated emotion model.** Today "How they came across" is the
   interviewer's own impression, recorded as `demeanour` and `notable_moments`
   on `end_interview`. It is deliberately worded as observation, never
-  diagnosis.
+  diagnosis. The local models in this app are Silero and Smart Turn, and they
+  do TURN DETECTION -- neither of them knows anything about emotion.
+
+  A participant who ends the interview themselves now gets a closing pass:
+  the live model is asked to call `end_interview` before the socket closes,
+  bounded to 8 seconds. It goes to the model that HEARD the audio rather than
+  to a text pass over the transcript afterwards, because that transcript is a
+  separate and lossier recognition of the same sound -- asking it to describe
+  how somebody sounded would be inventing from a bad reading.
