@@ -1,4 +1,5 @@
 import { type Mode, browserBase } from "@/lib/api";
+import { feedTurnDetector, resetTurnDetector } from "./turnDetector";
 import { getAccessToken } from "@/lib/supabase";
 
 /**
@@ -102,6 +103,22 @@ export type LiveSession = {
   /** The PARTICIPANT ending the interview, not the interviewer. Closes the
    *  conversation server-side and stops the link working again. */
   finish: () => void;
+  /**
+   * Hand the microphone back WITHOUT closing the conversation.
+   *
+   * The capture graph is built once and kept between turns on purpose --
+   * rebuilding it costs 100-500ms and swallows the first words of every turn
+   * after the first. The cost of keeping it is that the browser's recording
+   * indicator stays lit, which is correct between two turns and alarming once
+   * a conversation has finished or been paused: the tab looks like it is
+   * still listening, because it is.
+   *
+   * So the two are separated. This releases the device and leaves the socket
+   * and the conversation intact; the next `beginTurn` rebuilds the graph, and
+   * pays the opening-words cost exactly where it never mattered -- a turn the
+   * user starts by pressing a button and then speaking.
+   */
+  releaseMic: () => void;
 };
 
 export async function openLiveSession(
@@ -260,24 +277,6 @@ export async function openLiveSession(
   let processor: ScriptProcessorNode | null = null;
   let capturing = false;
 
-  /**
-   * Build the capture graph ONCE, and keep it for the whole conversation.
-   *
-   * THE BUG THIS FIXES. Every turn used to call `getUserMedia` and build a
-   * fresh AudioContext and ScriptProcessor. Opening a capture device takes
-   * anywhere from 100 to 500 milliseconds, and the countdown starts the next
-   * turn automatically -- so the speaker is very often already talking while
-   * the microphone is still opening, and those opening words are never
-   * captured at all.
-   *
-   * The first turn always looked fine because it is the one the user starts by
-   * clicking, and then speaks. Every turn after it lost its beginning, which
-   * reached the screen as a mangled transcript or a single stray word: a whole
-   * spoken sentence arriving as "7".
-   *
-   * So the graph is built on the first turn and reused. `capturing` gates
-   * whether frames are SENT, which is a boolean rather than a device.
-   */
   async function ensureGraph(): Promise<void> {
     if (input) return;
 
@@ -291,7 +290,21 @@ export async function openLiveSession(
         autoGainControl: false,
       },
     });
-    input = new AudioContext({ sampleRate: INPUT_RATE });
+    // THE CONTEXT TAKES THE DEVICE'S OWN RATE, and we resample ourselves.
+    //
+    // `new AudioContext({ sampleRate: 16000 })` followed by
+    // `createMediaStreamSource` is a CHROME-ONLY pattern. Chrome and Safari
+    // quietly resample the microphone into the context; FIREFOX THROWS --
+    // "Connecting AudioNodes from AudioContexts with different sample-rate is
+    // currently not supported" (Bugzilla 1725336, still open). The throw came
+    // out of `ensureGraph`, so every turn failed as "the microphone was
+    // refused" on Firefox while working perfectly in Chrome.
+    //
+    // Asking for the rate as a getUserMedia constraint is not the fix either:
+    // Firefox does not implement the sampleRate constraint (Bugzilla 1388586).
+    // So the only portable answer is to take whatever the device gives --
+    // 48000 on most Linux machines -- and do the conversion in JS.
+    input = new AudioContext();
     const source = input.createMediaStreamSource(stream);
     processor = input.createScriptProcessor(2048, 1, 1);
     source.connect(processor);
@@ -303,16 +316,77 @@ export async function openLiveSession(
     processor.onaudioprocess = (e) => {
       if (!capturing || ws.readyState !== WebSocket.OPEN) return;
       const floats = e.inputBuffer.getChannelData(0);
-      const pcm = new Int16Array(floats.length);
       let peak = 0;
       for (let i = 0; i < floats.length; i++) {
-        const s = Math.max(-1, Math.min(1, floats[i]));
-        pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-        peak = Math.max(peak, Math.abs(s));
+        peak = Math.max(peak, Math.abs(floats[i]));
       }
-      ws.send(pcm.buffer);
+      const pcm = toModelRate(floats, input!.sampleRate);
+      if (pcm.length) {
+        ws.send(pcm);
+        // The SAME samples the model gets, so the detector is judging exactly
+        // what was sent rather than a parallel reading of the microphone.
+        feedTurnDetector(pcm);
+      }
       onEvent({ type: "level", level: peak });
     };
+  }
+
+  /**
+   * Device rate to the model's 16kHz, as signed 16-bit PCM.
+   *
+   * A BOX FILTER, not sample-dropping: averaging the samples that collapse
+   * into one output sample low-passes as it decimates, and skipping two of
+   * every three instead folds everything above 8kHz back down into the speech
+   * band as aliasing -- which a recogniser hears as a lisp.
+   *
+   * The accumulator is deliberately OUTSIDE the function. A ScriptProcessor
+   * hands over 2048 samples at a time and 2048 does not divide evenly by the
+   * ratio, so resetting per callback would round the boundary off every 43
+   * milliseconds and leave a periodic tick through the whole recording.
+   */
+  let acc = 0;
+  let accN = 0;
+  let debt = 0;
+
+  // `Int16Array<ArrayBuffer>`, spelled out: the bare `Int16Array` resolves to
+  // `Int16Array<ArrayBufferLike>`, and `WebSocket.send` will not take one --
+  // it might be backed by a SharedArrayBuffer, which is not transferable.
+  function toModelRate(
+    floats: Float32Array,
+    rate: number,
+  ): Int16Array<ArrayBuffer> {
+    // Already there, or close enough that resampling would only add error.
+    if (rate === INPUT_RATE) {
+      const same = new Int16Array(floats.length);
+      for (let i = 0; i < floats.length; i++) same[i] = clamp(floats[i]);
+      return same;
+    }
+
+    const per = INPUT_RATE / rate; // output samples produced per input sample
+    const out = new Int16Array(Math.ceil(floats.length * per) + 1);
+    let n = 0;
+
+    for (let i = 0; i < floats.length; i++) {
+      acc += floats[i];
+      accN++;
+      debt += per;
+      if (debt >= 1) {
+        out[n++] = clamp(acc / accN);
+        acc = 0;
+        accN = 0;
+        debt -= 1;
+      }
+    }
+    // `slice`, not `subarray`: a copy with its own exactly-sized buffer. A
+    // view would carry the over-allocated tail along with it, and anything
+    // reading `.buffer` downstream would find however many unused zeros were
+    // left at the end of it.
+    return out.slice(0, n);
+  }
+
+  function clamp(sample: number): number {
+    const s = Math.max(-1, Math.min(1, sample));
+    return s < 0 ? s * 0x8000 : s * 0x7fff;
   }
 
   async function beginTurn() {
@@ -339,6 +413,10 @@ export async function openLiveSession(
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "start" }));
     }
+    // A new turn starts with an empty ring. Otherwise the tail of the previous
+    // answer is still in the 8-second window and the detector is asked whether
+    // a sentence nobody is speaking has finished.
+    resetTurnDetector();
     capturing = true;
   }
 
@@ -414,6 +492,7 @@ export async function openLiveSession(
     beginTurn,
     endTurn,
     stopSpeaking,
+    releaseMic: releaseMicrophone,
     finish() {
       // Microphone first. Whatever is captured after this decision is not
       // wanted, and leaving it live records somebody's reaction to having

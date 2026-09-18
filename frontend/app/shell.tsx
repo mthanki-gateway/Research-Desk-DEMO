@@ -288,7 +288,18 @@ export default function Shell({ children }: { children: React.ReactNode }) {
           </Button>
         )}
 
-        <nav className="md-nav-group space-y-1">
+        {/* SCROLLS RATHER THAN PUSHING. Each collapsible list is capped on its
+            own, but Parley has three of them -- Conversations, Profiles,
+            Sessions -- and three capped lists still add up to more than the
+            drawer is tall. The account block at the bottom was being shoved
+            off the screen by the sum of them.
+
+            `min-h-0` is what makes it work: a flex child refuses to shrink
+            below its content without it, so the overflow never engages and
+            the column grows instead. The spacer below sits at basis 0, so
+            when there IS room it takes it and this stays its natural
+            height. */}
+        <nav className="md-nav-group scroll-thin min-h-0 space-y-1 overflow-y-auto">
           {project.nav.map(({ href, label, Icon }) => {
             // LONGEST MATCH WINS, not merely "starts with".
             //

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   type Mode,
@@ -189,7 +190,10 @@ export default function ParleyNav({
             {section.empty}
           </p>
         ) : (
-          <ul className="scroll-thin max-h-72 overflow-y-auto">
+          // Capped so ONE long list cannot crowd out the other two. The
+          // drawer's nav scrolls as well, which handles the sum of them; this
+          // is about no single app's history taking the whole column.
+          <ul className="scroll-thin max-h-56 overflow-y-auto">
             {items.map((c) => {
               const active = pathname === section.href && current === c.id;
               return (
@@ -258,10 +262,17 @@ export default function ParleyNav({
           </ul>
         ))}
 
-      {/* ONE menu for the whole list, rendered outside the scrolling <ul>.
-          Rendered per-row it was clipped by the list's own overflow; rendered
-          once here and positioned `fixed`, it sits above everything. */}
-      {menu && (
+      {/* ONE menu for the whole list, and PORTALLED TO THE BODY.
+          Rendered per-row it was clipped by the list's own overflow. Moving it
+          out of the <ul> fixed that, but only until the drawer's <nav> became
+          scrollable too -- `position: fixed` is still clipped by a scrolling
+          ancestor when something between it and the viewport establishes a
+          containing block, and the drawer does exactly that with its slide-in
+          `transition-transform`.
+          A portal takes it out of that subtree entirely, so no ancestor can
+          clip it and no future one can either. The coordinates already assume
+          the viewport, which is what they now actually get. */}
+      {menu && typeof document !== "undefined" && createPortal(
         <div
           role="menu"
           className="md-menu"
@@ -293,7 +304,8 @@ export default function ParleyNav({
             <IconTrash className="h-3.5 w-3.5" />
             Delete
           </button>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

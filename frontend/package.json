@@ -6,13 +6,17 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "ort": "node scripts/copyOrt.mjs",
+    "predev": "node scripts/copyOrt.mjs",
+    "prebuild": "node scripts/copyOrt.mjs"
   },
   "dependencies": {
     "@fontsource/roboto": "^5.3.0",
     "@supabase/ssr": "^0.12.5",
     "@supabase/supabase-js": "^2.109.0",
     "next": "^16.3.4",
+    "onnxruntime-web": "^1.30.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "three": "^0.186.0"

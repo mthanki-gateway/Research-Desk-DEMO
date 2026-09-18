@@ -15,6 +15,13 @@ import {
 import { useApp } from "../providers";
 import { ConfirmButton, Switch } from "../md";
 import {
+  DEFAULT_PATIENCE,
+  PATIENCE,
+  type Patience,
+  disableTurnDetection,
+  enableTurnDetection,
+} from "./turnDetector";
+import {
   IconHowler,
   IconInterview,
   IconParley,
@@ -208,6 +215,34 @@ function Parley({ mode }: { mode: Mode }) {
   const [elapsed, setElapsed] = useState(0);
   /** Keep the socket open between questions — reconnecting costs a second. */
   const [keepOpen, setKeepOpen] = useState(true);
+  /**
+   * Let the local models decide when a turn is over.
+   *
+   * OFF BY DEFAULT, and Speak only. The button owning turns is the behaviour
+   * this app deliberately chose -- people pause mid-sentence and energy VAD
+   * cuts them off -- so this is an opt-in on top of it, not a replacement for
+   * it. Remembered per browser, because it is a preference about how somebody
+   * likes to talk rather than anything about the conversation.
+   */
+  const [autoTurns, setAutoTurns] = useState(false);
+  const [detector, setDetector] = useState<"off" | "loading" | "ready" | "failed">(
+    "off",
+  );
+  /** How long to wait before deciding somebody has finished. */
+  const [patience, setPatienceStep] = useState<Patience>(DEFAULT_PATIENCE);
+  /** Why the last turn ended itself, shown once so it is not a mystery. */
+  const [endedBy, setEndedBy] = useState<string | null>(null);
+  /**
+   * The conversation is held: no turn will open by itself.
+   *
+   * Distinct from `ended`, which is the interviewer closing an interview for
+   * good. This is "stop for a moment" -- the socket stays open, the
+   * conversation keeps its context, and pressing the microphone carries on
+   * where it left off. With auto-turns running there was otherwise no way out
+   * of the loop at all: every answer reopened the microphone, and the only
+   * exit was leaving the page.
+   */
+  const [held, setHeld] = useState(false);
   const [exchanges, setExchanges] = useState<Exchange[]>([]);
   /** Which stored conversation this socket appends to. */
   const [conversationId, setConversationId] = useState<string | null>(null);
@@ -264,6 +299,21 @@ function Parley({ mode }: { mode: Mode }) {
     // they arrive with it in `openConversation` below. Fetching a global list
     // for Howler would render the wrong schema entirely.
     if (mode === "interview") getProfileFields().then(setFields).catch(() => {});
+  }, [mode]);
+
+  // Read after mount, not in the initialiser: Next renders this on the server
+  // for the first HTML, where `localStorage` does not exist.
+  useEffect(() => {
+    if (mode !== "speak") return;
+    try {
+      setAutoTurns(localStorage.getItem("parley.autoTurns") === "1");
+      const saved = localStorage.getItem("parley.patience");
+      if (PATIENCE.some((p) => p.id === saved)) {
+        setPatienceStep(saved as Patience);
+      }
+    } catch {
+      /* private window; the defaults stand */
+    }
   }, [mode]);
 
   useEffect(() => {
@@ -324,9 +374,22 @@ function Parley({ mode }: { mode: Mode }) {
    * listening cancels any countdown.
    */
   const startRef = useRef<() => void>(() => {});
+  /** `stop` is defined below this callback; the ref lets them refer to each
+   *  other without either having to be declared first. */
+  const stopRef = useRef<() => void>(() => {});
+  /** Read inside the socket callback, which was captured when the socket
+   *  opened -- a plain `autoTurns` there is whatever it was at that moment. */
+  const autoRef = useRef(false);
+  /** Read in the socket callback, for the same reason as `autoRef`. */
+  const heldRef = useRef(false);
 
   useEffect(() => {
     endedRef.current = ended;
+    // A finished interview is not listening to anything. The socket is left
+    // open -- the transcript and profile are still being written -- but the
+    // microphone goes back, or the recording indicator stays lit over a
+    // conversation that is plainly over.
+    if (ended) session.current?.releaseMic();
   }, [ended]);
 
   const beginCountdown = useCallback(() => {
@@ -419,7 +482,23 @@ function Parley({ mode }: { mode: Mode }) {
           // Read through a ref rather than the state value: this callback is
           // captured when the socket opens, so a plain `ended` here would be
           // whatever it was at that moment -- always false.
-          if (!endedRef.current) beginCountdown();
+          // NO COUNTDOWN WHEN THE DETECTOR IS RUNNING. The countdown exists
+          // to give somebody a moment before the microphone reopens, because
+          // reopening it starts a turn that only the button can end. With
+          // auto-turns on that is no longer true -- the turn does not end
+          // until they have actually spoken and then paused -- so the delay
+          // is dead time, and a counter ticking down next to a microphone
+          // that is about to decide for itself reads as two things competing.
+          if (endedRef.current) break;
+          // HELD BEATS EVERYTHING. Somebody who asked for a pause gets one,
+          // whether the next turn would have come from the detector or from
+          // the countdown.
+          if (heldRef.current) {
+            setPhase("idle");
+            break;
+          }
+          if (autoRef.current) startRef.current();
+          else beginCountdown();
           break;
         case "finished":
           // The PARTICIPANT ended it. Same closed state the model's
@@ -520,6 +599,11 @@ function Parley({ mode }: { mode: Mode }) {
       }
       await session.current.beginTurn();
       setStarted(true);
+      setEndedBy(null);
+      // Pressing the microphone IS the resume. A separate Resume button next
+      // to a microphone that already means "talk to me now" is two controls
+      // for one intention.
+      setHeld(false);
       setPhase("listening");
       setElapsed(0);
       // CLEAR BEFORE SETTING. Without this every start left its interval
@@ -547,9 +631,50 @@ function Parley({ mode }: { mode: Mode }) {
     startRef.current = () => void start();
   }, [start]);
 
+
   useEffect(() => {
     openRef.current = (id: string) => void openConversation(id);
   });
+
+  /**
+   * Own the detector directly, not through the socket.
+   *
+   * It loads when the SETTING is switched on, which is nearly always before
+   * anybody presses Start -- so anything that waited for a live session sat on
+   * "fetching the models" for ever, having never begun.
+   */
+  useEffect(() => {
+    if (mode !== "speak" || !autoTurns) {
+      disableTurnDetection();
+      return;
+    }
+    enableTurnDetection((event) => {
+      if (event.type === "loading") return setDetector("loading");
+      if (event.type === "ready") return setDetector("ready");
+      if (event.type === "error") {
+        setDetector("failed");
+        setError(event.detail);
+        return;
+      }
+      // THE SURFACE DECIDES, not the detector. It reports that somebody sounds
+      // finished; ending the turn is the same action the button takes, routed
+      // through the same place, so there is one answer to "what closed this
+      // turn".
+      //
+      // Only while LISTENING. A report arriving during playback, or after the
+      // button was already pressed, is about audio that is no longer a turn.
+      setPhase((p) => {
+        if (p !== "listening") return p;
+        setEndedBy(
+          event.reason === "timeout"
+            ? "Ended after a long pause"
+            : `Ended — sounded finished (${Math.round(event.probability * 100)}%)`,
+        );
+        stopRef.current();
+        return p;
+      });
+    }, patience);
+  }, [autoTurns, mode, patience]);
 
   const stop = useCallback(() => {
     if (timer.current) {
@@ -561,7 +686,49 @@ function Parley({ mode }: { mode: Mode }) {
     setPhase("thinking");
   }, []);
 
+  useEffect(() => {
+    stopRef.current = () => stop();
+  }, [stop]);
+
+  useEffect(() => {
+    autoRef.current = mode === "speak" && autoTurns && detector === "ready";
+  }, [mode, autoTurns, detector]);
+
+  useEffect(() => {
+    heldRef.current = held;
+  }, [held]);
+
   /** Leave this conversation intact and begin a new one. */
+  /**
+   * Stop for now, without ending anything.
+   *
+   * What happens depends on where the turn is, because "pause" means different
+   * things mid-sentence and mid-answer:
+   *
+   *   listening  commit what was said and let it answer -- discarding audio
+   *              somebody has already spoken is the one outcome nobody wants
+   *   speaking   cut the answer off, the same as clicking the mic would
+   *   otherwise  simply stop the clock
+   *
+   * In every case the microphone does not reopen afterwards.
+   */
+  const hold = useCallback(() => {
+    setHeld(true);
+    heldRef.current = true;
+    stopCountdown();
+    if (phase === "listening") {
+      stopRef.current();
+      return;
+    }
+    if (phase === "speaking") session.current?.stopSpeaking();
+    // Give the device back. The socket stays open so resuming is instant, but
+    // a paused conversation must not leave the browser's recording indicator
+    // lit -- a tab that looks like it is still listening, while the user
+    // believes they paused it, is the worst version of this.
+    session.current?.releaseMic();
+    setPhase("idle");
+  }, [phase, stopCountdown]);
+
   const startFresh = useCallback(() => {
     // Howler cannot start blank -- a session without a schema has nothing to
     // fill -- so "new" means going back to the project that defined one, and
@@ -600,6 +767,7 @@ function Parley({ mode }: { mode: Mode }) {
     setEndedByUser(false);
     setStarted(false);
     setResumed(false);
+    setHeld(false);
     setPhase("idle");
   }, [clearInFlight, stopCountdown, wanted, router, pathname, mode, projectId]);
 
@@ -670,6 +838,8 @@ function Parley({ mode }: { mode: Mode }) {
   );
 
   const busy = phase === "thinking" || phase === "connecting";
+  // Auto-turns is on but its models have not arrived yet.
+  const loadingModels = autoTurns && detector === "loading";
   const listening = phase === "listening";
   const speaking = phase === "speaking";
   const counting = phase === "counting";
@@ -724,15 +894,21 @@ function Parley({ mode }: { mode: Mode }) {
           <button
             type="button"
             onClick={() => void startSession()}
-            disabled={!status?.enabled}
-            className="md-label-large rounded-[var(--md-shape-full)] px-8 py-4 disabled:opacity-60"
+            // HELD WHILE THE MODELS ARE STILL ARRIVING. Starting now would open
+            // the microphone with auto-turns switched on and nothing able to
+            // detect a turn, so the first thing somebody said would be
+            // answered only when they gave up and pressed the button -- which
+            // reads as the setting not working.
+            disabled={!status?.enabled || loadingModels}
+            className="md-label-large flex items-center gap-2 rounded-[var(--md-shape-full)] px-8 py-4 disabled:opacity-60"
             style={{
               background: "var(--md-primary)",
               color: "var(--md-on-primary)",
               boxShadow: "var(--md-elev-2)",
             }}
           >
-            {COPY[mode].start}
+            {loadingModels && <IconSpinner className="h-4 w-4" />}
+            {loadingModels ? "Loading turn detection" : COPY[mode].start}
           </button>
         ) : (
         <MicButton
@@ -742,20 +918,23 @@ function Parley({ mode }: { mode: Mode }) {
           // Once the model has closed the interview there is nothing to say to
           // it. Leaving the button live invites a question that reopens a
           // conversation the model has already finished.
-          disabled={!status?.enabled || ended}
+          disabled={!status?.enabled || ended || loadingModels}
           onStart={() => void start()}
           onStop={stop}
           onStopSpeaking={() => {
             // The exchange is already stored; stopping playback only ends the
             // sound, so nothing is lost by cutting it off.
             session.current?.stopSpeaking();
-            beginCountdown();
+            if (autoTurns && detector === "ready") void start();
+            else beginCountdown();
           }}
         />
         )}
 
         <p className="md-title-small text-center">
-          {!started && phase === "idle"
+          {held && phase === "idle"
+            ? "Paused"
+            : !started && phase === "idle"
             ? COPY[mode].idle
             : ended
             ? "Interview complete"
@@ -776,14 +955,20 @@ function Parley({ mode }: { mode: Mode }) {
           className="md-body-small text-center"
           style={{ color: "var(--md-on-surface-variant)" }}
         >
-          {!started && phase === "idle"
+          {held && phase === "idle"
+            ? "Nothing is being recorded. Press the microphone to carry on where you left off."
+            : !started && phase === "idle"
             ? COPY[mode].idleHint
             : ended
             ? endedByUser
               ? "You ended it. Everything said so far is kept."
               : "The interviewer has everything it needs. Start a new one to go again."
+            : endedBy && phase === "thinking"
+              ? endedBy
             : listening
-              ? "It will not answer until you click. Pausing mid-sentence is fine."
+              ? autoTurns && detector === "ready"
+                ? "Click when you are done, or pause and it will work it out."
+                : "It will not answer until you click. Pausing mid-sentence is fine."
             : speaking
               ? "Nothing is being sent while it speaks."
               : counting
@@ -792,6 +977,34 @@ function Parley({ mode }: { mode: Mode }) {
                   ? "Your documents. Web search is not configured."
                   : COPY[mode].running}
         </p>
+
+        {/* THE WAY OUT. Shown while a turn is in flight, because that is
+            exactly when there is something to stop -- and with auto-turns on,
+            every answer reopened the microphone with no exit but leaving the
+            page. Quiet, and no confirmation: a pause is undone by pressing
+            the microphone.
+
+            Not during the countdown: "Stay quiet" below already cancels that,
+            and the countdown only runs when auto-turns is OFF, so there is no
+            loop to escape from there. Two buttons for one intention is
+            clutter. */}
+        {started && !ended && phase !== "idle" && phase !== "counting" && (
+          <button
+            type="button"
+            onClick={hold}
+            className="md-label-large rounded-[var(--md-shape-full)] px-4 py-2"
+            style={{
+              background: "var(--md-surface-container-high)",
+              color: "var(--md-on-surface)",
+            }}
+          >
+            {/* Named for what it DOES to the words already spoken. "Stop"
+                over a live microphone reads as "discard this", and throwing
+                away a sentence somebody just finished is the one outcome
+                nobody wants. */}
+            {listening ? "Send and stop" : "Stop for now"}
+          </button>
+        )}
 
         {counting && (
           <button
@@ -955,6 +1168,121 @@ function Parley({ mode }: { mode: Mode }) {
             </select>
           </Row>
 
+          {/* SPEAK ONLY, for now. Interview and Howler are conversations
+              somebody is being taken through, and the cost of cutting a
+              participant off mid-answer is higher there than the convenience
+              is worth -- so this gets proven here first. */}
+          {/* ONE CHILD OF THE SECTION, not two. The section draws its
+              dividers with `divide-y`, so a sibling block would get a rule
+              above it -- and the negative margin that pulled the stepper up
+              under the switch dragged its label onto that rule, which is the
+              line running through the text in the screenshot. Nested, there
+              is no divider to collide with and the pair reads as one setting,
+              which is what they are. */}
+          {mode === "speak" && (
+            <div className="[&>div:first-child]:pb-3">
+              <Row
+                title="End my turn automatically"
+                detail={
+                  detector === "failed"
+                    ? "The detector could not load — the button still works"
+                    : detector === "loading" && autoTurns
+                      ? "Fetching the models (~11MB, once)"
+                      : autoTurns
+                        ? "Two local models listen for the end of a sentence. Nothing is uploaded"
+                        : "Off — the button decides when you have finished"
+                }
+              >
+                <Switch
+                  on={autoTurns}
+                  onChange={(v) => {
+                    setAutoTurns(v);
+                    try {
+                      localStorage.setItem("parley.autoTurns", v ? "1" : "0");
+                    } catch {
+                      /* private window; it just will not be remembered */
+                    }
+                  }}
+                  aria-label="End my turn automatically"
+                />
+              </Row>
+
+              {/* DISABLED RATHER THAN HIDDEN. A control that appears and
+                  disappears makes the panel jump and hides what the setting
+                  can even do; greyed out, it still says there is a choice
+                  here and what it would be. */}
+              <div className="px-4 pb-5 pl-8" aria-hidden={!autoTurns}>
+                <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3">
+                  <span
+                    className="md-label-medium"
+                    style={{
+                      color: "var(--md-on-surface-variant)",
+                      opacity: autoTurns ? 1 : 0.5,
+                    }}
+                  >
+                    How long to wait
+                  </span>
+                  <span
+                    className="md-body-small"
+                    style={{
+                      color: "var(--md-on-surface-variant)",
+                      opacity: autoTurns ? 1 : 0.5,
+                    }}
+                  >
+                    {PATIENCE.find((p) => p.id === patience)?.detail}
+                  </span>
+                </div>
+
+                {/* Four steps, not a slider. Each one moves a pause length AND
+                    a confidence bar together, which a continuous track cannot
+                    honestly represent -- and nobody can tell 640ms from 700ms
+                    by dragging. */}
+                <div
+                  role="radiogroup"
+                  aria-label="How long to wait before answering"
+                  className="flex gap-1 rounded-[var(--md-shape-full)] p-1"
+                  style={{
+                    background: "var(--md-surface-container-high)",
+                    opacity: autoTurns ? 1 : 0.5,
+                  }}
+                >
+                  {PATIENCE.map((step) => {
+                    const on = step.id === patience;
+                    return (
+                      <button
+                        key={step.id}
+                        type="button"
+                        role="radio"
+                        aria-checked={on}
+                        disabled={!autoTurns}
+                        title={step.detail}
+                        onClick={() => {
+                          setPatienceStep(step.id);
+                          try {
+                            localStorage.setItem("parley.patience", step.id);
+                          } catch {
+                            /* private window; it will not be remembered */
+                          }
+                        }}
+                        className="md-label-medium md-state flex-1 rounded-[var(--md-shape-full)] px-2 py-1.5 disabled:cursor-not-allowed"
+                        style={{
+                          background: on
+                            ? "var(--md-secondary-container)"
+                            : "transparent",
+                          color: on
+                            ? "var(--md-on-secondary-container)"
+                            : "var(--md-on-surface-variant)",
+                        }}
+                      >
+                        {step.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+
           <Row
             title="Stay connected between questions"
             detail="Holds the socket open so the next question starts instantly"
@@ -1038,7 +1366,11 @@ function Row({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between gap-4 p-4">
+    // `py-5`, not `p-4`. These are separate settings that happen to share a
+    // card, and at 16px the rules between them did more separating than the
+    // space did -- which reads as a table of rows rather than a handful of
+    // independent choices.
+    <div className="flex items-center justify-between gap-4 px-4 py-5">
       <span className="md-body-medium">
         {title}
         <span

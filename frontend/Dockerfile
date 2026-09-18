@@ -8,6 +8,10 @@ COPY package.json package-lock.json* ./
 RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
 COPY tsconfig.json next.config.ts postcss.config.mjs ./
+# `predev` and `prebuild` both run scripts/copyOrt.mjs, which lifts
+# onnxruntime-web's WASM out of node_modules into public/ort. Without this the
+# container has the npm scripts but not the file they call.
+COPY scripts ./scripts
 
 # --- dev: app/ and lib/ are bind-mounted by compose --------------------------
 FROM base AS dev
@@ -23,6 +27,11 @@ CMD ["npm", "run", "dev", "--", "--webpack"]
 FROM base AS build
 COPY app ./app
 COPY lib ./lib
+# `public` carries the turn-detection models (~11MB of ONNX). It was missing
+# here, which broke this stage in two ways at once: the build produced no
+# `/app/public` for the prod stage to copy on line 33, and any page fetching
+# `/models/*.onnx` got a 404 from a container that had never seen the files.
+COPY public ./public
 RUN npm run build
 
 FROM node:22-alpine AS prod
