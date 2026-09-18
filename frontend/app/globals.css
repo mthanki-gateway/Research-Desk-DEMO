@@ -1320,6 +1320,13 @@ textarea:focus-visible {
     scrollbar-width: thin;
     scrollbar-color: transparent transparent;
     transition: scrollbar-color var(--md-dur-medium) var(--md-ease-standard);
+    /* RESERVE THE TRACK, always.
+       Without this the scrollbar is drawn OVER the content at the right edge,
+       and in the drawer that edge is where the collapse chevrons and item
+       counts live -- so the bar sat on top of them. `stable` keeps the gutter
+       whether or not the bar is visible, which also means content does not
+       shift sideways the moment a list grows long enough to scroll. */
+    scrollbar-gutter: stable;
   }
   .scroll-thin:hover {
     scrollbar-color: var(--md-outline-variant) transparent;

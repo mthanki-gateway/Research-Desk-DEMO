@@ -223,6 +223,21 @@ class Health(BaseModel):
     # Lets the frontend decide whether to show a login screen without needing
     # its own copy of the configuration.
     auth_enabled: bool
+    # WHICH STORE IS ACTUALLY LIVE -- "local" or "s3" -- and the bucket, when
+    # there is one.
+    #
+    # Here because the failure it catches is silent. Editing `.env` and
+    # restarting does NOT change a container's environment: `docker compose
+    # restart`, and Docker Desktop's restart button, both reuse the existing
+    # one. So the app carries on with the old configuration, and with storage
+    # that looks like nothing at all -- uploads succeed, text indexes, answers
+    # cite correctly, and the original is quietly going somewhere else.
+    #
+    # The same reading catches the deploy version of it: Render's free tier has
+    # no persistent disk, so `local` there loses every file on the next
+    # restart. One GET now answers "where are my files actually going".
+    storage_backend: str
+    storage_bucket: str = ""
     # Which startup steps failed, by name. Empty when everything came up.
     #
     # NAMED, not a boolean: "the database is unreachable" and "Qdrant is
@@ -240,5 +255,7 @@ async def health() -> Health:
         embedding_provider=settings.embedding_provider,
         google_api_key_present=bool(settings.google_api_key),
         auth_enabled=settings.auth_enabled,
+        storage_backend="s3" if settings.storage_backend in ("s3", "r2") else "local",
+        storage_bucket=settings.s3_bucket,
         boot_failures=dict(BOOT_FAILURES),
     )

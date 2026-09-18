@@ -412,6 +412,11 @@ function Project({ id }: { id: string }) {
   if (!project && !error) return <Skeleton />;
 
   const results = invites.filter((i) => i.result);
+  // "Live" is a link somebody can still use: not withdrawn, and not attached
+  // to an interview that has already finished.
+  const usable = invites.filter(
+    (i) => i.status === "unopened" || i.status === "in_progress",
+  );
   const live = invites.filter((i) => !i.revoked).length;
 
   return (
@@ -454,7 +459,17 @@ function Project({ id }: { id: string }) {
               Full size and ringed until a link exists; afterwards it drops to
               the quieter container pair, because by then it is a revision
               rather than the point. */}
-          {lines.length > 0 && (
+          {/* ONLY WHILE THERE IS NO USABLE LINK.
+              "Synthesise again" was doing nothing worth a model call. A link
+              reads the project's data points when the CONVERSATION STARTS, not
+              when the link was made, so one that has not been opened yet
+              already gathers whatever the latest turn produced -- there is
+              nothing to re-settle and no new link to hand back.
+
+              It still matters when there is no usable link: the first one, and
+              a replacement after the last was withdrawn or its interview
+              finished. From then on the Links tab owns making them. */}
+          {lines.length > 0 && usable.length === 0 && (
             <Button
               onClick={() => void synthesise()}
               disabled={busy !== null}
@@ -478,7 +493,7 @@ function Project({ id }: { id: string }) {
               }}
             >
               {busy === "synthesise" ? <IconSpinner /> : <IconCheck />}
-              {invites.length ? "Synthesise again" : "Synthesise now"}
+              {invites.length ? "New link" : "Synthesise now"}
             </Button>
           )}
         </header>
@@ -1033,7 +1048,7 @@ function Panel({
             style={{ color: "var(--md-on-surface-variant)" }}
           >
             {live
-              ? "Send one to whoever you are interviewing. No account needed at their end."
+              ? "Send one to whoever you are interviewing. It gathers whatever the data points say when they open it, so keep changing them if you want."
               : fields.length
                 ? "Press Synthesise now and you will get a link to send."
                 : "Once there are data points worth gathering, you will get a link to send."}

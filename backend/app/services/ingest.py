@@ -218,10 +218,29 @@ async def delete_document(document_id: uuid.UUID) -> bool:
         doc = await session.get(Document, document_id)
         if doc is None:
             return False
+        storage_key = doc.storage_key
 
         await get_vector_store().delete_document(document_id)
         await session.delete(doc)  # chunks cascade
         await session.commit()
+
+        # AND THE ORIGINAL. Without this every delete leaks a file: the row and
+        # its vectors go, and the only record of where the bytes were goes with
+        # them, so nothing can ever find them again. On a 1GB bucket that is a
+        # quota filling up with objects no query can name.
+        #
+        # AFTER the commit, and never fatal. The row is the thing that makes a
+        # document exist; an object store that is briefly unreachable must not
+        # leave a document half-deleted and still listed.
+        if storage_key:
+            try:
+                await get_storage().delete(storage_key)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "delete_stored_file_failed",
+                    key=storage_key,
+                    error=str(exc)[:200],
+                )
         # A stale lexical index would keep serving chunk ids for a deleted
         # document. They no longer resolve to a dense hit so nothing would be
         # shown -- but the BM25 half would be silently scoring against text that

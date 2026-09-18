@@ -299,7 +299,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
             the column grows instead. The spacer below sits at basis 0, so
             when there IS room it takes it and this stays its natural
             height. */}
-        <nav className="md-nav-group scroll-thin min-h-0 space-y-1 overflow-y-auto">
+        <nav className="md-nav-group scroll-thin min-h-0 space-y-1 overflow-y-auto pr-1">
           {project.nav.map(({ href, label, Icon }) => {
             // LONGEST MATCH WINS, not merely "starts with".
             //

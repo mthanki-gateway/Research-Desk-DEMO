@@ -184,7 +184,15 @@ renders is not a profile.
 
 **Designing it is a conversation** (`designer.py`). It drafts data points from
 the first turn and revises them as you talk; "Synthesise now" settles them and
-returns a magic link. Two scars live in its schema: `fields` is **required**,
+returns a magic link.
+
+That button disappears once a usable link exists, and the reason is worth
+stating: a link reads the project's data points when the CONVERSATION STARTS,
+not when the link was made. An unopened link therefore already gathers whatever
+the latest turn produced, so there is nothing to re-settle and no new link to
+hand back — "synthesise again" was a model call that returned the same link.
+It comes back when the last link is withdrawn or its interview finishes, since
+then there genuinely is a new one to make. Two scars live in its schema: `fields` is **required**,
 because with only `reply` required the cheapest valid completion was a reply
 and nothing else — including replies claiming to have drafted data points while
 returning none. And there is **no `title` field**, because asked for one inline

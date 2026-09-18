@@ -125,5 +125,12 @@ Deployed builds are unaffected: they build the image from the committed
 ## Working style
 
 - `docker compose restart` does **not** re-read `.env`. Use
-  `docker compose up -d --force-recreate <service>`.
+  `docker compose up -d --force-recreate <service>`. **Docker Desktop's restart
+  button is the same trap** — it reuses the existing container, so an edited
+  `.env` is silently ignored.
+
+  This one is worth checking rather than remembering, because it fails
+  quietly: `GET /health` reports `storage_backend` and `storage_bucket`, so a
+  container still running yesterday's configuration is one request away from
+  being obvious.
 - Never commit or push unless asked in that message.
