@@ -49,6 +49,7 @@ import asyncio
 import contextlib
 import json
 import uuid
+from typing import Any
 
 import structlog
 from fastapi import (
@@ -406,6 +407,9 @@ async def live_socket(
             "session_id": str(row.session_id) if row.session_id else "",
             "project": project,
             "participant": row.participant or project.participant or "",
+            # What to call the conversation. A link made for a named person
+            # says who; an auto-made one falls back to the project.
+            "label": (row.label or "").strip(),
         }
         mode = "howler"
         session_id = guest["session_id"]
@@ -468,6 +472,7 @@ async def live_socket(
             fields,
             guest["invite_id"],
             vocabulary,
+            guest["label"] or project.title or "",
         )
         chat.brief = project.brief or ""
         chat.participant = guest["participant"]
@@ -520,7 +525,10 @@ async def live_socket(
             # against ending an interview before the closing question has been
             # answered -- see `run_tool_call`. The uplink knows when a turn is
             # sent; the tool layer decides whether the model may end.
-            turn_state: dict[str, int] = {"turns": 0}
+            # `closed` is set by the downlink when `end_interview` comes back,
+            # so a participant-initiated close can wait for the model's
+            # account rather than polling for it.
+            turn_state: dict[str, Any] = {"turns": 0, "closed": asyncio.Event()}
 
             uplink = asyncio.create_task(_uplink(ws, session, turn_state, chat.id))
             downlink = asyncio.create_task(
@@ -558,6 +566,21 @@ async def live_socket(
         with contextlib.suppress(Exception):
             await ws.close()
         log.info("live_session_closed")
+
+
+# How long to let the model write its closing account before the interview ends
+# anyway. Long enough for one tool call, short enough that somebody who pressed
+# stop does not sit watching a spinner.
+CLOSING_SECONDS = 8.0
+
+CLOSING = (
+    "The participant has just ended the interview themselves. Do not ask "
+    "anything further and do not say goodbye. Call end_interview now, with "
+    "your one-sentence summary of who they are, `demeanour` describing how "
+    "they came across over the whole conversation, and `notable_moments`. "
+    "Base all of it only on what you actually heard -- an interview that was "
+    "cut short has less to go on, and saying less is correct."
+)
 
 
 async def _uplink(ws: WebSocket, session, turn_state: dict, chat_id=None) -> None:
@@ -632,6 +655,33 @@ async def _uplink(ws: WebSocket, session, turn_state: dict, chat_id=None) -> Non
         # the socket closes -- and because the link checks that flag, it stops
         # working too, which is the point of pressing it.
         elif kind == "finish":
+            # ASK IT TO CLOSE PROPERLY FIRST, then close regardless.
+            #
+            # `demeanour` and `notable_moments` only exist on `end_interview`,
+            # so an interview the participant ended used to have no account of
+            # how it sounded at all -- which is most of them, and exactly the
+            # ones where knowing would help.
+            #
+            # The request goes to the LIVE model, not to a text pass over the
+            # transcript afterwards. That transcript is a separate, lossier
+            # recognition of the same audio; asking it to describe how somebody
+            # sounded would be inventing from a bad reading, which is the one
+            # failure this feature cannot afford.
+            #
+            # Bounded, and never blocking: if the model does not answer within
+            # CLOSING_SECONDS the interview still ends. Somebody who pressed
+            # stop is not waiting on a model's paperwork.
+            turn_state["closing"] = True
+            with contextlib.suppress(Exception):
+                await session.send_client_content(
+                    turns=types.Content(role="user", parts=[types.Part(text=CLOSING)]),
+                    turn_complete=True,
+                )
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(
+                        turn_state["closed"].wait(), timeout=CLOSING_SECONDS
+                    )
+
             if chat_id is not None:
                 await live.finish_interview(chat_id)
             await ws.send_text(json.dumps({"type": "finished"}))
@@ -789,6 +839,10 @@ async def _downlink(
                     for source in report["sources"]:
                         if source not in sources:
                             sources.append(source)
+                    # So the `finish` handler knows the model has closed it
+                    # and can stop waiting.
+                    if report.get("ended"):
+                        turn_state["closed"].set()
                     await ws.send_text(json.dumps({"type": "tool", **report}))
                 await session.send_tool_response(function_responses=responses)
 

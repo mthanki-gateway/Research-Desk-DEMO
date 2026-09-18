@@ -28,7 +28,7 @@ from sqlalchemy import select
 from app.auth import User, current_user, forbid_if_not_owner
 from app.db.models import ChatSession, HowlerInvite, HowlerProject, Message
 from app.db.session import SessionLocal
-from app.services import blueprint, designer, invites, live, profile
+from app.services import blueprint, designer, invites, jobs, live, profile
 
 log = structlog.get_logger()
 
@@ -439,6 +439,12 @@ async def _invite_out(invite: HowlerInvite) -> dict:
                 # heard it. Separate from the field values because it is about
                 # delivery rather than content.
                 "affect": data.get("affect") or None,
+                # Measured from the audio, as opposed to `affect` which is what
+                # the interviewer heard and put into words. Both, not either.
+                "voice": data.get("voice") or None,
+                # So the tab can say "queued" or "failed" rather than showing
+                # nothing and looking broken while the work is still pending.
+                "analysis": await jobs.status_for(chat.id, "emotion"),
             }
 
     return {

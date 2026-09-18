@@ -196,6 +196,50 @@ class ChatSession(Base):
     )
 
 
+class Job(Base):
+    """Work queued to happen after a request is over.
+
+    The queue is this table -- see `services/jobs.py` for why Postgres rather
+    than Celery or arq. The short version: a broker plus a worker is two more
+    services than Render's free tier has, and Postgres is already here.
+    """
+
+    __tablename__ = "jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    kind: Mapped[str] = mapped_column(String(64), index=True)
+    # queued | running | done | failed
+    status: Mapped[str] = mapped_column(String(16), index=True, default="queued")
+
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
+    result: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3, server_default="3")
+
+    # WHAT THE JOB IS ABOUT, so a UI can find it without knowing the shape of a
+    # payload. "The emotion job for this conversation" is then a query rather
+    # than a scan through JSON.
+    subject_type: Mapped[str] = mapped_column(String(32), default="", server_default="")
+    subject_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True
+    )
+    owner_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
 class HowlerProject(Base):
     """A brief, the schema it produced, and everything run against it.
 

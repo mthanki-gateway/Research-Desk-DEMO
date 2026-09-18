@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 import uuid
 from contextlib import asynccontextmanager
@@ -25,7 +26,8 @@ from app.api import (
 from app.api import auth as auth_api
 from app.config import get_settings
 from app.db.session import create_tables
-from app.services import tracing
+from app.services import jobs, tracing
+from app.services.analysis import run_emotion_job
 from app.services.embeddings import close_embeddings, get_embeddings
 from app.services.llm import close_llm
 from app.services.vectorstore import close_vector_store, get_vector_store
@@ -137,7 +139,40 @@ async def lifespan(app: FastAPI):
     # someone's first question. Returns None and logs when unconfigured.
     tracing.get_tracer()
 
+    # THE JOB WORKER, in this process. See `services/jobs.py` for why the queue
+    # is a Postgres table rather than Celery: a broker plus a worker is two
+    # more services than the target deployment has.
+    #
+    # A task rather than a thread, because every handler is async and shares
+    # this loop's database pool. Handlers that block -- model inference does --
+    # are responsible for using a thread themselves, which `emotion.score_clip`
+    # does.
+    worker: asyncio.Task | None = None
+    if settings.jobs_worker_enabled:
+        # REGISTERED ONLY WHEN IT CAN ACTUALLY RUN.
+        #
+        # `claim` only takes kinds that have a handler, so leaving this
+        # unregistered means emotion jobs sit QUEUED rather than being claimed
+        # and failed. That is the honest state: the interview is waiting for
+        # analysis, and switching the model on later picks up everything that
+        # accumulated in the meantime.
+        #
+        # Registering it regardless and raising "EMOTION_ANALYSIS is off" was
+        # worse than useless -- it reported a failure for a deployment working
+        # exactly as configured, and burned the retry budget doing it, so the
+        # day somebody enabled the model every earlier interview was already
+        # permanently failed.
+        if settings.emotion_analysis:
+            jobs.register("emotion", run_emotion_job)
+        worker = asyncio.create_task(jobs.work())
+
     yield
+
+    # Stopped FIRST, before the clients it uses are closed underneath it.
+    if worker is not None:
+        worker.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await worker
 
     # Flush BEFORE anything else closes. The SDK batches in a background
     # thread, so a process that exits promptly drops its last traces -- and the

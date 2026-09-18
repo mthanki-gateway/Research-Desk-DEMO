@@ -733,6 +733,7 @@ async def adopt_project(
     fields: list[dict],
     invite_id: uuid.UUID | None = None,
     vocabulary: list[str] | None = None,
+    title: str = "",
 ) -> None:
     """Stamp a guest's conversation with the project it belongs to.
 
@@ -758,6 +759,16 @@ async def adopt_project(
             # opens, so a session already running keeps the ones it started
             # with however the project changes underneath it.
             chat.vocabulary = vocabulary or []
+            # NAME IT NOW, from what the link already knows.
+            #
+            # Howler conversations used to inherit Speak's default and sit in
+            # the drawer as four identical "Spoken conversation" rows. The
+            # usual renamer cannot help: it looks for a name FIELD, and a
+            # generated schema often has none -- the participant's name ends up
+            # in a note instead. The link's own label, or failing that the
+            # project, is known before anybody speaks.
+            if title and chat.title in ("Spoken conversation", UNNAMED_INTERVIEW):
+                chat.title = title[:120]
             await db.commit()
         if invite_id is not None:
             await invites.attach_session(invite_id, session_id)
@@ -794,7 +805,9 @@ async def store_summary(
                 name = profile.person_name(merged)
                 if name and chat.title == UNNAMED_INTERVIEW:
                     chat.title = name[:120]
+                owner = getattr(chat, "owner_id", None)
                 await db.commit()
+        await _queue_analysis(session_id, owner)
     except Exception as exc:  # noqa: BLE001
         log.warning("live_store_summary_failed", error=str(exc)[:200])
 
@@ -821,21 +834,53 @@ async def finish_interview(session_id: uuid.UUID) -> None:
             if chat is None:
                 return
             merged = dict(chat.profile or {})
-            # An interview the model already closed stays closed BY THE MODEL.
-            # Pressing the button on a finished interview is a person tidying
-            # up after it, not a different ending.
-            if merged.get("ended"):
+            # IT RUNS AFTER THE CLOSING PASS, and must not undo it.
+            #
+            # Pressing stop now asks the live model to call `end_interview`
+            # first, so by the time this runs the profile may already carry a
+            # summary, a demeanour and the notable moments -- written by the
+            # only thing that heard the audio. Those are kept; `ended_by` is
+            # recorded alongside them, because the participant is still who
+            # ended it and a half-filled profile somebody walked out of is a
+            # different finding from one the interviewer finished.
+            #
+            # Not set twice: an interview the model had ALREADY closed on its
+            # own, before anybody pressed anything, keeps its own ending.
+            if merged.get("ended") and merged.get("ended_by"):
                 return
             merged["ended"] = True
-            merged["ended_by"] = "participant"
+            merged.setdefault("ended_by", "participant")
             chat.profile = merged
             name = profile.person_name(merged)
             if name and chat.title == UNNAMED_INTERVIEW:
                 chat.title = name[:120]
+            owner = getattr(chat, "owner_id", None)
             await db.commit()
+        await _queue_analysis(session_id, owner)
         log.info("interview_ended_by_participant", session=str(session_id))
     except Exception as exc:  # noqa: BLE001
         log.warning("live_finish_failed", error=str(exc)[:200])
+
+
+async def _queue_analysis(session_id: uuid.UUID, owner_id: str | None) -> None:
+    """Queue the emotion pass for a finished interview. Never raises.
+
+    ENQUEUED WHETHER OR NOT ANYTHING CAN RUN IT YET. The job is the record that
+    this interview is waiting for analysis, so a deployment too small for the
+    model still collects the work and anything that can run it finds it later.
+    Only queueing when the feature happens to be switched on would silently
+    lose every interview held before that.
+    """
+    from app.services import jobs
+    from app.services.analysis import KIND, SUBJECT
+
+    await jobs.enqueue(
+        KIND,
+        {"session_id": str(session_id)},
+        subject_type=SUBJECT,
+        subject_id=session_id,
+        owner_id=owner_id,
+    )
 
 
 async def store_handle(session_id: uuid.UUID, handle: str) -> None:

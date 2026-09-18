@@ -138,6 +138,11 @@ _MIGRATIONS: tuple[str, ...] = (
     # Where the original upload is kept. Nullable, so every document that
     # predates object storage stays exactly as valid as it was.
     "ALTER TABLE documents ADD COLUMN IF NOT EXISTS storage_key VARCHAR(512)",
+    # The job queue's claim query orders by created_at within a kind, and
+    # sweeps stale `running` rows by started_at. Without this it is a sequential
+    # scan on every poll -- cheap at this size and not worth leaving to grow.
+    "CREATE INDEX IF NOT EXISTS jobs_claim_idx "
+    "ON jobs (kind, status, created_at)",
 )
 
 

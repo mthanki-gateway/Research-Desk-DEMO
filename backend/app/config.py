@@ -756,6 +756,23 @@ class Settings(BaseSettings):
     # without one, the API streams the bytes itself.
     s3_public_base: str = ""
 
+    # ---- background jobs -------------------------------------------------
+    # The queue is a Postgres table and the worker runs in this process. Off
+    # switches the worker only -- jobs still queue, and are picked up whenever
+    # a worker next runs, which is what makes moving it to its own process a
+    # deployment change rather than a code one.
+    jobs_worker_enabled: bool = True
+
+    # ---- emotion analysis -------------------------------------------------
+    # Dimensional (arousal/dominance/valence), not categorical. See
+    # `services/emotion.py` for why that distinction is the whole design.
+    #
+    # OFF by default: it needs torch and transformers, which is about a
+    # gigabyte of dependencies, and the model does not fit in Render's 512MB
+    # free tier. Queued jobs simply wait until something can run them.
+    emotion_analysis: bool = False
+    emotion_model: str = "audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim"
+
     serper_api_key: str = ""
     serper_requests_per_minute: int = 60
     web_search_results: int = 5

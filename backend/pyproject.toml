@@ -59,6 +59,11 @@ local-embeddings = ["fastembed>=0.4"]
 # dependency: the default storage backend is a local directory, so a checkout
 # with no cloud account still stores and serves its own files.
 storage = ["boto3>=1.35"]
+# Dimensional speech-emotion analysis. A LARGE extra -- torch alone is over a
+# gigabyte -- and deliberately not installed by default: the feature is off
+# unless EMOTION_ANALYSIS is set, and the model does not fit Render's free
+# tier anyway. See `services/emotion.py`.
+emotion = ["torch>=2.4", "transformers>=4.44"]
 # NVIDIA's hosted NeMo speech models (Parakeet, Canary, Nemotron streaming).
 #
 # A gRPC CLIENT, and that is not a preference. Those functions are reachable

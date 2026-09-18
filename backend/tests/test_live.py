@@ -568,7 +568,9 @@ class TestParticipantEnding:
 
         class _Chat:
             profile: dict = {}
+            owner_id = "owner-1"
             title = live.UNNAMED_INTERVIEW
+            owner_id = "owner-1"
 
         chat = _Chat()
         _patch_session(monkeypatch, chat, stored)
@@ -579,17 +581,23 @@ class TestParticipantEnding:
         assert chat.profile["ended_by"] == "participant"
         assert stored["committed"]
 
-    def test_the_model_ending_it_first_wins(self, monkeypatch):
-        """Pressing the button afterwards is tidying up, not a new ending.
+    def test_it_keeps_the_closing_account_the_model_just_wrote(self, monkeypatch):
+        """Pressing stop asks the model to close properly FIRST.
 
-        `end_interview` has already written the interviewer's summary and its
-        own account of why it stopped. Overwriting that with "the participant
-        ended it" would misreport a completed interview as an abandoned one.
+        So by the time this runs, the profile may already carry a summary, a
+        demeanour and the notable moments -- written by the only thing that
+        heard the audio. Overwriting them with nothing would throw away the
+        entire point of asking.
         """
         stored: dict = {}
 
         class _Chat:
-            profile = {"ended": True, "summary": "A senior engineer."}
+            profile = {
+                "ended": True,
+                "summary": "A senior engineer.",
+                "affect": {"demeanour": "Warm, unhurried.", "moments": ["x"]},
+            }
+            owner_id = "owner-1"
             title = "Priya Raman"
 
         chat = _Chat()
@@ -597,8 +605,30 @@ class TestParticipantEnding:
 
         asyncio.run(live.finish_interview(uuid.uuid4()))
 
-        assert "ended_by" not in chat.profile
         assert chat.profile["summary"] == "A senior engineer."
+        assert chat.profile["affect"]["demeanour"] == "Warm, unhurried."
+        assert chat.profile["ended_by"] == "participant"
+
+    def test_an_ending_the_model_owned_is_not_reattributed(self, monkeypatch):
+        """An interview it closed on its own keeps its own ending.
+
+        Only reachable if somebody presses stop on an interview that had
+        already finished, which the UI hides -- but reattributing a completed
+        interview to the participant would misreport it as abandoned.
+        """
+        stored: dict = {}
+
+        class _Chat:
+            profile = {"ended": True, "ended_by": "model", "summary": "Done."}
+            owner_id = "owner-1"
+            title = "Priya Raman"
+
+        chat = _Chat()
+        _patch_session(monkeypatch, chat, stored)
+
+        asyncio.run(live.finish_interview(uuid.uuid4()))
+
+        assert chat.profile["ended_by"] == "model"
 
     def test_a_missing_conversation_is_not_an_error(self, monkeypatch):
         """Bookkeeping must never take down a call that is already over."""
