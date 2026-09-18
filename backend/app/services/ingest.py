@@ -82,7 +82,9 @@ async def ingest_document(document_id: uuid.UUID, data: bytes) -> None:
             try:
                 store = get_storage()
                 doc.storage_key = await store.put(
-                    key_for(doc.id, doc.filename), data, doc.content_type
+                    key_for(doc.owner_id, doc.id, doc.filename),
+                    data,
+                    doc.content_type,
                 )
                 await session.commit()
             except Exception as exc:  # noqa: BLE001

@@ -120,7 +120,24 @@ GOOGLE_API_KEY   <the ROTATED key>
 SUPABASE_URL     https://<ref>.supabase.co
 CORS_ORIGINS     https://<your-app>.vercel.app
 ALLOW_CLAIM_UNOWNED  false
+
+STORAGE_BACKEND       s3                    # `local` LOSES FILES on Render
+S3_ENDPOINT_URL       https://<ref>.supabase.co/storage/v1/s3
+S3_ACCESS_KEY_ID      <Storage -> S3 -> New access key>
+S3_SECRET_ACCESS_KEY  <same page, shown once>
+S3_BUCKET             research-desk
+S3_REGION             <shown on the S3 page>
 ```
+
+`STORAGE_BACKEND=s3` is not optional on Render, and it fails in the least
+useful way if forgotten. Render's free tier has **no persistent disk**, so
+`local` writes originals into the container filesystem and every deploy,
+restart and idle spin-down throws them away. Nothing errors: uploads succeed,
+text indexes, answers cite correctly — and then `/documents/{id}/file` 404s on
+files that were there an hour ago.
+
+The S3 keys are **not** the Supabase anon or service keys. They come from
+Storage → S3 → New access key, and the secret is shown once.
 
 **Vercel** (frontend):
 

@@ -22,8 +22,12 @@ WORKDIR /app
 #   docker compose exec api uv lock
 #   docker compose cp api:/app/uv.lock ./backend/uv.lock
 COPY pyproject.toml uv.lock ./
+# `--extra storage` is on the BASE sync, not just dev, because `prod` inherits
+# from base -- and prod is the stage that actually talks to object storage.
+# boto3 is ~15MB; the alternative is a deploy where STORAGE_BACKEND=s3 raises
+# on the first upload and nothing in the build log hints at why.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project
+    uv sync --frozen --no-install-project --extra storage
 
 # --- dev: source is bind-mounted by compose, so don't COPY it in -------------
 FROM base AS dev
@@ -39,7 +43,7 @@ FROM base AS dev
 # stage below stays at 177MB and cannot judge anything, which is correct --
 # evaluation is a development activity and serving a request never needs it.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --group dev --extra eval --extra speech
+    uv sync --frozen --no-install-project --group dev --extra eval --extra speech         --extra storage
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 

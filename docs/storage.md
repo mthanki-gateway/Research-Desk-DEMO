@@ -48,10 +48,44 @@ boto3. One setting chooses, and nothing above the module knows which is in use.
 
 **Store the original, never the extracted text.** Re-chunking needs the source.
 
-**Key by UUID, never by filename** — `docs/<uuid>.pdf`. Filenames collide on
-the second upload of `report.pdf`, and a filename in a path is how directory
-traversal gets in. The extension is kept, because that is what makes a signed
-URL open in a viewer instead of downloading as a blob.
+**Key by UUID, never by filename.** Filenames collide on the second upload of
+`report.pdf`, and a filename in a path is how directory traversal gets in. The
+extension is kept, because that is what makes a signed URL open in a viewer
+instead of downloading as a blob.
+
+**Prefix by tenant.**
+
+```
+t/<owner>/docs/<document-uuid>.pdf
+t/<owner>/howl/<session-uuid>/0007.wav     (planned)
+t/_local/docs/<document-uuid>.pdf          (auth off)
+```
+
+The prefix is **not** what keeps tenants apart — the API does that, checking
+ownership before it ever looks at a key, and keys are never exposed to a
+client. It earns its place three other ways:
+
+- **Deleting a tenant** becomes one prefixed list instead of a full scan joined
+  against the database. So does measuring what one is using, and exporting
+  everything they own when they ask for it.
+- **Bucket policies** can be scoped by prefix — S3 IAM and Supabase Storage
+  rules both work on paths. A flat namespace cannot be divided, so every
+  credential is necessarily a credential for everything.
+- **Defence in depth.** Ownership is enforced in one place today; a prefix
+  means a future mistake there is not automatically a cross-tenant read.
+
+Anonymous uploads get a named segment (`_local`) rather than an empty one,
+which would collapse the path and put them where a prefixed delete for any
+tenant could reach them. It mirrors the `COALESCE(owner_id, '')` the SQL side
+already uses for the same reason.
+
+For recordings the owner is the **project's** owner, not the person speaking:
+a guest holding a magic link has no account and owns nothing, so one delete
+removes a tenant's documents and their audio together.
+
+**Changing the scheme orphans nothing**, because `storage_key` is *stored* per
+document rather than derived. Anything written under the earlier flat scheme is
+still fetched from where it actually is.
 
 **Storing is never fatal.** A store that is full, misconfigured or unreachable
 costs the archival copy — it must not cost the indexing, because the text is

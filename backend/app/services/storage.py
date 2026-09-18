@@ -48,8 +48,10 @@ nothing above this module knows which is in use.
 TWO RULES, AGREED UP FRONT
 
   Store the ORIGINAL, never the extracted text. Re-chunking needs the source.
-  Key by UUID (`docs/<uuid>.pdf`), never by filename. Filenames collide, and a
-  filename in a path is how directory traversal gets in.
+  Key by UUID, never by filename. Filenames collide, and a filename in a path
+  is how directory traversal gets in.
+  Prefix by TENANT -- `t/<owner>/docs/<uuid>.pdf`. See `key_for` for why that
+  is worth doing even though it is not what keeps tenants apart.
 """
 
 from __future__ import annotations
@@ -265,15 +267,76 @@ def reset_storage() -> None:
     _store = None
 
 
-def key_for(document_id, filename: str) -> str:
-    """`docs/<uuid><ext>` -- keyed by id, with the extension kept.
+# The segment an anonymous upload lives under.
+#
+# `owner_id` is None when auth is off, and "None" or "" as a path segment is
+# how one tenant's prefix quietly becomes another's. A named sentinel makes
+# those files findable and deletable like anybody else's, and it mirrors the
+# `COALESCE(owner_id, '')` the SQL side already uses for the same reason.
+ANONYMOUS_TENANT = "_local"
 
-    The EXTENSION ONLY, never the name. A filename in a key is a collision
-    waiting to happen and a traversal waiting to be tried; the extension is
-    kept because it is what makes a signed URL open in a viewer rather than
-    download as a blob.
+
+def _tenant(owner_id: str | None) -> str:
+    """One path segment for an owner, safe to concatenate.
+
+    Owner ids are Supabase UUIDs, so this should never change anything --
+    which is exactly why it is here. A key is built once and stored for ever;
+    an id that ever contained a slash would silently reparent every file that
+    user uploads, and nothing downstream would notice.
+    """
+    raw = (owner_id or "").strip()
+    if not raw:
+        return ANONYMOUS_TENANT
+    safe = "".join(c for c in raw if c.isalnum() or c in "-_")[:64]
+    return safe or ANONYMOUS_TENANT
+
+
+def key_for(owner_id: str | None, document_id, filename: str) -> str:
+    """`t/<owner>/docs/<uuid><ext>` -- keyed by TENANT, then by id.
+
+    WHY THE OWNER IS IN THE PATH
+
+    Not because it is what keeps tenants apart -- the API does that, and it
+    checks ownership before it ever looks at a key. The prefix earns its place
+    three other ways:
+
+      DELETING A TENANT becomes one prefixed list instead of a full scan
+      joined against the database. So does measuring what one is using, and so
+      does exporting everything they own when they ask for it.
+
+      BUCKET POLICIES can be scoped by prefix -- S3 IAM and Supabase Storage
+      rules both work on paths. A flat namespace cannot be divided at all, so
+      every credential is necessarily a credential for everything.
+
+      DEFENCE IN DEPTH. Ownership is enforced in one place today. A prefix
+      means a future mistake there is not automatically a cross-tenant read.
+
+    The EXTENSION ONLY from the filename, never the name. A filename in a key
+    is a collision waiting to happen and a traversal waiting to be tried; the
+    extension is kept because it is what makes a signed URL open in a viewer
+    rather than download as a blob.
+
+    Old keys keep working. `storage_key` is STORED per document rather than
+    derived, so anything written under the previous flat scheme is still
+    fetched from where it actually is -- changing this function does not
+    orphan a single file.
     """
     suffix = Path(filename or "").suffix.lower()[:12]
-    if not suffix.isascii() or any(c in suffix for c in "/\\.." if c != "."):
+    if not suffix.isascii() or any(c in suffix for c in "/\.." if c != "."):
         suffix = ""
-    return f"docs/{document_id}{suffix}"
+    return f"t/{_tenant(owner_id)}/docs/{document_id}{suffix}"
+
+
+def media_key_for(owner_id: str | None, session_id, turn: int, ext: str) -> str:
+    """`t/<owner>/howl/<session>/<n>.<ext>` -- for interview recordings.
+
+    The same tenant prefix, so one delete removes a tenant's documents and
+    their recordings together.
+
+    THE OWNER IS THE PROJECT'S OWNER, not the person speaking. A guest holding
+    a magic link has no account and owns nothing; the recording belongs to
+    whoever sent the link, which is the same answer the conversation row
+    already gives.
+    """
+    clean = "".join(c for c in (ext or "wav") if c.isalnum())[:8] or "wav"
+    return f"t/{_tenant(owner_id)}/howl/{session_id}/{int(turn):04d}.{clean}"

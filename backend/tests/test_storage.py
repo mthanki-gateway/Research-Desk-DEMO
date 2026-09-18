@@ -20,11 +20,53 @@ def store(tmp_path):
 
 
 class TestKeys:
-    """`docs/<uuid><ext>` -- by id, never by name."""
+    """`t/<owner>/docs/<uuid><ext>` -- by tenant, then by id, never by name."""
 
-    def test_it_keys_by_id_and_keeps_the_extension(self):
+    def test_it_keys_by_tenant_then_id(self):
         did = uuid.UUID("11111111-2222-3333-4444-555555555555")
-        assert storage.key_for(did, "Quarterly Report.PDF") == f"docs/{did}.pdf"
+        assert storage.key_for("user-7", did, "Quarterly Report.PDF") == (
+            f"t/user-7/docs/{did}.pdf"
+        )
+
+    def test_two_owners_never_share_a_prefix(self):
+        """The property every other use of the prefix rests on.
+
+        Deleting a tenant, measuring one, exporting one and writing a bucket
+        policy for one are all a prefix match -- and all of them are wrong the
+        moment two owners can land under the same path.
+        """
+        did = uuid.uuid4()
+        a = storage.key_for("owner-a", did, "x.pdf")
+        b = storage.key_for("owner-b", did, "x.pdf")
+        assert a != b
+        assert not a.startswith(b.rsplit("/docs", 1)[0] + "/")
+
+    def test_anonymous_gets_a_named_segment(self):
+        """Not "None", and not an empty segment.
+
+        `owner_id` is None with auth off. An empty segment collapses the path
+        and puts anonymous uploads at the root of the tenant space, where a
+        prefixed delete for any tenant could reach them.
+        """
+        did = uuid.uuid4()
+        for owner in (None, "", "   "):
+            key = storage.key_for(owner, did, "x.pdf")
+            assert key == f"t/{storage.ANONYMOUS_TENANT}/docs/{did}.pdf"
+            assert "//" not in key
+            assert "None" not in key
+
+    def test_an_owner_id_cannot_reparent_the_path(self):
+        """Ids are UUIDs, so this should never fire -- which is why it exists.
+
+        A key is built once and stored for ever. An id containing a slash
+        would silently move every file that user uploads into somebody else's
+        prefix, and nothing downstream would notice.
+        """
+        did = uuid.uuid4()
+        key = storage.key_for("../../owner-b", did, "x.pdf")
+        assert key.startswith("t/")
+        assert ".." not in key
+        assert key.count("/docs/") == 1
 
     def test_the_filename_never_reaches_the_key(self):
         """Two files called report.pdf are two documents, not one.
@@ -33,13 +75,26 @@ class TestKeys:
         how traversal gets in.
         """
         did = uuid.uuid4()
-        key = storage.key_for(did, "../../etc/passwd")
+        key = storage.key_for("user-7", did, "../../etc/passwd")
         assert ".." not in key
         assert "passwd" not in key
 
     def test_a_missing_extension_is_fine(self):
         did = uuid.uuid4()
-        assert storage.key_for(did, "README") == f"docs/{did}"
+        assert storage.key_for("user-7", did, "README") == f"t/user-7/docs/{did}"
+
+    def test_recordings_share_the_tenant_prefix(self):
+        """So one delete removes a tenant's documents and their audio together."""
+        sid = uuid.uuid4()
+        key = storage.media_key_for("user-7", sid, 3, "wav")
+        assert key == f"t/user-7/howl/{sid}/0003.wav"
+        assert key.startswith("t/user-7/")
+
+    def test_recording_turns_sort_lexicographically(self):
+        """A listing is ordered by key, and turn 10 must not precede turn 2."""
+        sid = uuid.uuid4()
+        keys = [storage.media_key_for("u", sid, n, "wav") for n in (2, 10, 1)]
+        assert sorted(keys) == [keys[2], keys[0], keys[1]]
 
 
 class TestLocalStorage:
