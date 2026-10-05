@@ -26,6 +26,7 @@ from app.db.models import Chunk, DocStatus, Document
 from app.db.session import SessionLocal
 from app.services.chunking import TextChunk, chunk_pages
 from app.services.embeddings import get_embeddings
+from app.services import atlas, graph
 from app.services.lexical import invalidate_lexical_index
 from app.services.parsing import Page, parse
 from app.services.storage import get_storage, key_for
@@ -190,7 +191,12 @@ async def ingest_document(document_id: uuid.UUID, data: bytes) -> None:
             # That asymmetry would be near-impossible to spot: hybrid results
             # would simply be a little worse for the newest document.
             invalidate_lexical_index()
+            atlas.invalidate()
             log_.info("ingest_complete", chunks=len(rows))
+            # The graph is a follow-up, not part of being ready: a document is
+            # searchable now, and its entities arrive when the job runs.
+            if get_settings().graph_extraction:
+                await graph.enqueue_for(document_id, doc.owner_id)
 
     except Exception as exc:
         log_.exception("ingest_failed")
@@ -247,6 +253,7 @@ async def delete_document(document_id: uuid.UUID) -> bool:
         # is gone, which is a worse bug than it looks: deletion should mean
         # deletion everywhere.
         invalidate_lexical_index()
+        atlas.invalidate()
         return True
 
 

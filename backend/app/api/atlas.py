@@ -14,7 +14,7 @@ from sqlalchemy import select
 from app.auth import User, current_user, forbid_if_not_owner
 from app.db.models import ChatSession, Message, Role
 from app.db.session import SessionLocal
-from app.services import atlas
+from app.services import atlas, graph
 
 log = structlog.get_logger()
 
@@ -24,6 +24,18 @@ router = APIRouter(prefix="/corpus", tags=["corpus"])
 @router.get("/atlas")
 async def get_atlas(user: User = Depends(current_user)) -> dict:
     return await atlas.build(user.owner_id)
+
+
+@router.get("/graph")
+async def get_graph(user: User = Depends(current_user)) -> dict:
+    """Entities and stated relations, merged across this owner's documents."""
+    return await graph.read(user.owner_id)
+
+
+@router.post("/graph/build")
+async def build_graph(user: User = Depends(current_user)) -> dict:
+    """Queue extraction for every document that has no graph yet."""
+    return {"queued": await graph.backfill(user.owner_id)}
 
 
 @router.get("/atlas/ray/{message_id}")

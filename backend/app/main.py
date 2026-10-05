@@ -28,6 +28,8 @@ from app.config import get_settings
 from app.db.session import create_tables
 from app.services import jobs, tracing
 from app.services.analysis import run_emotion_job
+from app.services.graph import KIND as GRAPH_JOB
+from app.services.graph import run_graph_job
 from app.services.embeddings import close_embeddings, get_embeddings
 from app.services.llm import close_llm
 from app.services.vectorstore import close_vector_store, get_vector_store
@@ -164,6 +166,8 @@ async def lifespan(app: FastAPI):
         # permanently failed.
         if settings.emotion_analysis:
             jobs.register("emotion", run_emotion_job)
+        if settings.graph_extraction:
+            jobs.register(GRAPH_JOB, run_graph_job)
         worker = asyncio.create_task(jobs.work())
 
     yield

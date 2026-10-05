@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
@@ -219,10 +220,35 @@ def _compute(
     return points, explained, basis, encoded
 
 
-async def _build(
-    owner_id: str | None, with_matrix: bool
-) -> tuple[dict[str, Any], Basis | None]:
+# Built atlases, per owner, until the corpus changes.
+#
+# A build is a full scroll of the vector store plus an SVD and an n^2 matrix
+# -- seconds on a large corpus -- and its inputs change only when a document
+# finishes indexing or is deleted. Recomputing on every visit made Atlas slow
+# every time for an answer that had not moved. `invalidate()` is called from
+# exactly the places the lexical index is, for the same reason.
+#
+# Always built WITH the matrix, so one entry serves both endpoints; the ray
+# endpoint drops it from its response rather than triggering a second build.
+_CACHE: OrderedDict[str | None, tuple[dict[str, Any], Basis | None]] = OrderedDict()
+_CACHE_SIZE = 8
+
+
+def invalidate() -> None:
+    """Forget every cached atlas. Global, like the lexical index: cheap, and a
+    per-owner key would have to be threaded through ingest and delete."""
+    _CACHE.clear()
+
+
+async def _build(owner_id: str | None) -> tuple[dict[str, Any], Basis | None]:
+    if owner_id in _CACHE:
+        _CACHE.move_to_end(owner_id)
+        return _CACHE[owner_id]
     async with _BUILD_LOCK:
+        # Re-checked under the lock: a second visitor who waited on the first
+        # build gets its result instead of repeating it.
+        if owner_id in _CACHE:
+            return _CACHE[owner_id]
         raw = await _load(owner_id)
         if not raw:
             return {
@@ -235,23 +261,26 @@ async def _build(
         # Off the event loop: the single worker must keep answering /health
         # and every other request while a large corpus is cross-multiplied.
         points, explained, basis, encoded = await asyncio.to_thread(
-            _compute, raw, with_matrix
+            _compute, raw, True
         )
-    log.info("atlas_built", n=len(points), explained=round(sum(explained), 3))
-    return {
-        "points": points,
-        # base64 uint8, row-major, n x n -- see _encode_matrix. None on the
-        # ray endpoint, whose view never draws it.
-        "similarity": encoded,
-        "explained_variance": explained,
-        "n_documents": len({p["filename"] for p in points}),
-        "truncated": len(raw) >= MAX_POINTS,
-    }, basis
+        log.info("atlas_built", n=len(points), explained=round(sum(explained), 3))
+        result = {
+            "points": points,
+            # base64 uint8, row-major, n x n -- see _encode_matrix.
+            "similarity": encoded,
+            "explained_variance": explained,
+            "n_documents": len({p["filename"] for p in points}),
+            "truncated": len(raw) >= MAX_POINTS,
+        }, basis
+        _CACHE[owner_id] = result
+        while len(_CACHE) > _CACHE_SIZE:
+            _CACHE.popitem(last=False)
+        return result
 
 
 async def build(owner_id: str | None) -> dict[str, Any]:
     """Project the corpus and cross-multiply it. One pass over the vectors."""
-    atlas, _ = await _build(owner_id, with_matrix=True)
+    atlas, _ = await _build(owner_id)
     return atlas
 
 
@@ -279,10 +308,12 @@ async def build_ray(
 
     One embedding call, to place the query. Nothing else is recomputed.
     """
-    # One fetch, one fit. This used to call build() and then fetch and refit
+    # One cached build. This used to call build() and then fetch and refit
     # every vector a second time for the basis -- and serialise a similarity
     # matrix the ray view never draws.
-    atlas, basis = await _build(owner_id, with_matrix=False)
+    cached, basis = await _build(owner_id)
+    # The matrix stays in the cache; the ray view never draws it.
+    atlas = {**cached, "similarity": None}
     points = atlas["points"]
     if not points or basis is None:
         return {**atlas, "query": None, "rays": [], "question": question}

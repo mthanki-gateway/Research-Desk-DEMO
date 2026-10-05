@@ -435,3 +435,50 @@ class Preference(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class GraphEntity(Base):
+    """One entity as ONE DOCUMENT mentions it.
+
+    Per document, not global, and that is the design. Deleting a document must
+    delete its share of the graph, and an entity row shared across documents
+    would need reference counting to know when it was orphaned -- the bug where
+    a deleted contract's counterparty stays in the graph forever. Here the
+    cascade does it. Entities are merged across documents at READ time by
+    `key`, which is cheap at corpus scale and means a better merge rule never
+    needs a re-extraction.
+    """
+
+    __tablename__ = "graph_entities"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), index=True
+    )
+    # Normalised name: the merge key across documents.
+    key: Mapped[str] = mapped_column(String(256), index=True)
+    name: Mapped[str] = mapped_column(String(256))
+    type: Mapped[str] = mapped_column(String(64))
+    mentions: Mapped[int] = mapped_column(Integer, default=1)
+
+
+class GraphRelation(Base):
+    """A stated relationship between two entities, with the chunk that says so.
+
+    `chunk_id` is what makes an edge checkable: clicking it opens the passage
+    the claim came from. An edge with no passage behind it is the model's
+    opinion, and the graph would present it as the corpus's.
+    """
+
+    __tablename__ = "graph_relations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), index=True
+    )
+    chunk_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    source_key: Mapped[str] = mapped_column(String(256))
+    target_key: Mapped[str] = mapped_column(String(256))
+    predicate: Mapped[str] = mapped_column(String(128))

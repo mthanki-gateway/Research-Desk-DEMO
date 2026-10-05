@@ -6,6 +6,7 @@ import { useApp } from "../providers";
 import { Button } from "../md";
 import Scatter, { PALETTES, type PlotTheme } from "./scatter";
 import Heatmap from "./heatmap";
+import GraphView from "./graph";
 
 /**
  * The corpus as geometry rather than as chat.
@@ -170,6 +171,19 @@ export default function AtlasPage() {
         look close here may be far apart in the space retrieval actually
         searches.
       </p>
+
+      <section>
+        <h2 className="md-title-medium">Knowledge graph</h2>
+        <p
+          className="md-body-small mt-0.5 mb-3"
+          style={{ color: "var(--md-on-surface-variant)" }}
+        >
+          The plot above shows passages that MEAN similar things. This shows what
+          the documents SAY connects the people, organisations and ideas in
+          them. Every link is a sentence you can open.
+        </p>
+        <GraphView />
+      </section>
 
       <section className="grid gap-6 md:grid-cols-[1fr_18rem]">
         <div>

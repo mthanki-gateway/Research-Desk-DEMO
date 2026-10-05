@@ -159,12 +159,26 @@ export default function LocalModels() {
             color: "var(--md-on-error-container)",
           }}
         >
-          <p className="md-title-small">Local models are not installed</p>
-          <p className="md-body-medium mt-1">
-            They are in the <code>local-nlp</code> extra, which the dev image installs.
-            Rebuild it: <code>docker compose build api</code>, then{" "}
-            <code>docker compose up -d --force-recreate api</code>.
-          </p>
+          {status.hosted ? (
+            <>
+              <p className="md-title-small">Runs in the local stack only</p>
+              <p className="md-body-medium mt-1">
+                These models run on the API&apos;s own CPU, and the hosted API is
+                deliberately built without torch — it is over a gigabyte and does
+                not fit the free tier. Run the app locally with{" "}
+                <code>docker compose up</code> to try them.
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="md-title-small">Local models are not installed</p>
+              <p className="md-body-medium mt-1">
+                They are in the <code>local-nlp</code> extra, which the dev image
+                installs. Rebuild it: <code>docker compose build api</code>, then{" "}
+                <code>docker compose up -d --force-recreate api</code>.
+              </p>
+            </>
+          )}
         </div>
       )}
 

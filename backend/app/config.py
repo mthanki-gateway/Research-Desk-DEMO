@@ -763,6 +763,13 @@ class Settings(BaseSettings):
     # deployment change rather than a code one.
     jobs_worker_enabled: bool = True
 
+    # ---- knowledge graph (Atlas > Graph) ----------------------------------
+    # One structured-output call per ~6k characters of a document, queued as
+    # a job when indexing finishes. See services/graph.py. Capped per document
+    # so one huge upload cannot spend a day's free-tier quota on its own.
+    graph_extraction: bool = True
+    graph_max_windows: int = 30
+
     # ---- emotion analysis -------------------------------------------------
     # Dimensional (arousal/dominance/valence), not categorical. See
     # `services/emotion.py` for why that distinction is the whole design.

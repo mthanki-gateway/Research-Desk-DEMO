@@ -234,6 +234,9 @@ async def local_status(_: User = Depends(current_user)) -> dict:
     settings = get_settings()
     return {
         "installed": local_nlp.installed(),
+        # The prod image never has torch, so "not installed" there is the
+        # design, not a setup step -- the UI says which it is.
+        "hosted": settings.app_env == "prod",
         # Whether weights are already in memory, so the UI can warn that the
         # FIRST call includes a download and load and is not the real latency.
         "loaded": local_nlp.loaded(),

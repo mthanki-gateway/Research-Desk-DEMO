@@ -918,6 +918,8 @@ export async function nvidiaFunctions(): Promise<NvidiaFunction[]> {
 
 export type LocalStatus = {
   installed: boolean;
+  /** The deployed API, whose image deliberately has no torch. */
+  hosted: boolean;
   /** Weights already in memory. False means the next call includes a load. */
   loaded: { gliner: boolean; gliclass: boolean };
   gliner_model: string;
@@ -1057,6 +1059,51 @@ export type QueryRay = Atlas & {
    *  deleted since). Surfaced so the UI can say why it drew fewer lines. */
   dropped: number;
 };
+
+// --- Knowledge graph ------------------------------------------------------
+
+export type GraphNode = {
+  /** Normalised name -- the merge key across documents. */
+  id: string;
+  name: string;
+  type: string;
+  mentions: number;
+  degree: number;
+  /** More than one means the entity bridges files. */
+  documents: string[];
+};
+
+export type GraphEdge = {
+  source: string;
+  target: string;
+  predicate: string;
+  /** The passage that states it. Null only for very old rows. */
+  chunk_id: string | null;
+  filename: string;
+};
+
+export type KnowledgeGraph = {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  n_entities: number;
+  truncated: boolean;
+  n_documents: number;
+  n_documents_with_graph: number;
+  /** Extraction jobs still queued or running. */
+  pending: number;
+};
+
+export async function getGraph(): Promise<KnowledgeGraph> {
+  const res = await authedFetch("/corpus/graph");
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function buildGraph(): Promise<{ queued: number }> {
+  const res = await authedFetch("/corpus/graph/build", { method: "POST" });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
 
 export async function getQueryRay(messageId: string): Promise<QueryRay> {
   const res = await authedFetch(`/corpus/atlas/ray/${messageId}`);

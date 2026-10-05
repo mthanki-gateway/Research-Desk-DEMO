@@ -465,6 +465,49 @@ export default function Scatter({
     dust.renderOrder = 0;
     scene.add(dust);
 
+    // ---- stars ----------------------------------------------------------
+    // A distant field far outside the fog, for SPACE rather than for depth --
+    // dust already does parallax. Kept quiet on purpose: fixed pixel size so
+    // they never swell into blobs when the camera flies, brightness varied
+    // but capped well below the points, and a drift so slow it reads as still
+    // unless you look for it. Nothing here may compete with the data.
+    const STARS = 1400;
+    const starPositions = new Float32Array(STARS * 3);
+    const starColors = new Float32Array(STARS * 3);
+    const starInk = new THREE.Color(theme === "dark" ? 0xdfe6ff : 0x5a6290);
+    for (let i = 0; i < STARS; i++) {
+      const r = 60 + rand() * 25;
+      const theta = rand() * Math.PI * 2;
+      const u = rand() * 2 - 1;
+      const w = Math.sqrt(1 - u * u);
+      starPositions[i * 3] = r * w * Math.cos(theta);
+      starPositions[i * 3 + 1] = r * u;
+      starPositions[i * 3 + 2] = r * w * Math.sin(theta);
+      // Most stars dim, a few bright: a uniform field reads as noise.
+      const b = 0.25 + Math.pow(rand(), 3) * 0.75;
+      starColors[i * 3] = starInk.r * b;
+      starColors[i * 3 + 1] = starInk.g * b;
+      starColors[i * 3 + 2] = starInk.b * b;
+    }
+    const starGeometry = new THREE.BufferGeometry();
+    starGeometry.setAttribute("position", new THREE.BufferAttribute(starPositions, 3));
+    starGeometry.setAttribute("color", new THREE.BufferAttribute(starColors, 3));
+    const stars = new THREE.Points(
+      starGeometry,
+      new THREE.PointsMaterial({
+        size: 1.4,
+        sizeAttenuation: false,
+        vertexColors: true,
+        transparent: true,
+        opacity: theme === "dark" ? 0.75 : 0.3,
+        depthWrite: false,
+        // Outside the fog by design; fogged, they would vanish entirely.
+        fog: false,
+      }),
+    );
+    stars.renderOrder = -1;
+    scene.add(stars);
+
 
     // ---- reading-order threads ------------------------------------------
     // One polyline per document, through its chunks in chunk_index order.
@@ -862,6 +905,7 @@ export default function Scatter({
       radius += (wantRadius - radius) * k;
       target.lerp(wantTarget, k);
       place();
+      stars.rotation.y += 0.00004;
       renderer.render(scene, camera);
     };
     loop();
@@ -889,6 +933,8 @@ export default function Scatter({
       backdrop.dispose();
       dustGeometry.dispose();
       (dust.material as THREE.Material).dispose();
+      starGeometry.dispose();
+      (stars.material as THREE.Material).dispose();
       if (stems) {
         stems.geometry.dispose();
         (stems.material as THREE.Material).dispose();
