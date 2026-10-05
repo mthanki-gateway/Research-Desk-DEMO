@@ -285,18 +285,18 @@ class TestModes:
         """
         howler = live.MODES["howler"]["system"]
         for craft in (
-            "ASK ONE QUESTION THAT EARNS ITS PLACE",
-            "MINE THE ANSWER BEFORE YOU ASK AGAIN",
-            "DO NOT LEAD",
-            "QUOTE THEM",
+            "one question that earns its place",
+            "mines the answer before it asks again",
+            "It does not lead",
+            "Quote them",
         ):
             assert craft in " ".join(howler.split()), craft
 
     def test_howler_does_not_inherit_the_fixed_field_list(self):
         """Its fields come from a brief, so Interview's must not leak in.
 
-        The split is at "HOW TO GET THERE" -- the seam between WHAT is gathered
-        and HOW. One paragraph earlier and a conversation about procurement
+        The seam is `_CRAFT` -- HOW to interview is shared, WHAT is gathered
+        is each mode's own section. One paragraph earlier and a conversation about procurement
         budgets asks how many years of professional experience they have.
         """
         howler = " ".join(live.MODES["howler"]["system"].split())
@@ -394,9 +394,9 @@ class TestInterviewPrompt:
         several sides gets a paragraph instead. What still does not work is two
         UNRELATED questions in a breath -- that reliably loses the first.
         """
-        text = _flat("interview")
-        assert "ASK ONE QUESTION THAT EARNS ITS PLACE" in text
-        assert "UNRELATED questions in a breath" in text
+        text = _flat("interview").lower()
+        assert "one question that earns its place" in text
+        assert "two unrelated questions in one breath" in text
 
     def test_it_mines_the_answer_before_asking_again(self):
         """A compound question is answered with more than it asked for.
@@ -404,15 +404,15 @@ class TestInterviewPrompt:
         Taking one fact out of an answer and moving on is how an interviewer
         ends up asking about something it was just told.
         """
-        assert "MINE THE ANSWER BEFORE YOU ASK AGAIN" in _flat("interview")
+        assert "mines the answer before it asks again" in _flat("interview")
 
     def test_it_is_told_to_follow_up_on_vague_answers(self):
         """"It's going well" is a deflection, not an answer."""
-        assert "FOLLOW UP ON VAGUE" in _flat("interview")
+        assert "follows up on vague answers" in _flat("interview")
 
     def test_it_is_told_not_to_lead(self):
         """A leading question buys agreement, which is not information."""
-        assert "DO NOT LEAD" in _flat("interview")
+        assert "It does not lead" in _flat("interview")
 
     def test_it_is_told_the_participant_does_the_talking(self):
         assert "most of the talking" in _flat("interview")
