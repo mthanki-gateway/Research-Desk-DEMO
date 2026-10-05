@@ -482,3 +482,27 @@ class GraphRelation(Base):
     source_key: Mapped[str] = mapped_column(String(256))
     target_key: Mapped[str] = mapped_column(String(256))
     predicate: Mapped[str] = mapped_column(String(128))
+
+
+class GraphHydration(Base):
+    """What the web says about one entity, written on request and kept.
+
+    Keyed by owner and the entity's merge KEY, not by a GraphEntity row: those
+    are per document and are replaced whenever a document is re-extracted, and
+    a hydration somebody paid a search and a model call for must survive that.
+    It is the same entity on the next read because the key is the same.
+
+    `sources` is the list of pages the text was written from, in citation
+    order -- the paragraphs carry [n] markers that point into it.
+    """
+
+    __tablename__ = "graph_hydrations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    key: Mapped[str] = mapped_column(String(256), index=True)
+    name: Mapped[str] = mapped_column(String(256))
+    paragraphs: Mapped[list] = mapped_column(JSONB, default=list)
+    facts: Mapped[list] = mapped_column(JSONB, default=list)
+    sources: Mapped[list] = mapped_column(JSONB, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

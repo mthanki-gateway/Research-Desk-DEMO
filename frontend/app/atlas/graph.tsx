@@ -6,7 +6,10 @@ import {
   buildGraph,
   getChunk,
   getGraph,
+  getHydration,
+  hydrateEntity,
   type Chunk,
+  type Hydration,
   type GraphEdge,
   type GraphNode,
   type KnowledgeGraph,
@@ -244,6 +247,10 @@ function Scene({
   // opened behind the graph where nobody could see it.
   const [passage, setPassage] = useState<Chunk | "loading" | null>(null);
   const [passageError, setPassageError] = useState<string | null>(null);
+  // The selected entity's saved web profile. undefined = not looked up yet.
+  const [hydration, setHydration] = useState<Hydration | null | undefined>(undefined);
+  const [hydrating, setHydrating] = useState(false);
+  const [hydrateError, setHydrateError] = useState<string | null>(null);
   const openPassage = useCallback(async (id: string) => {
     setPassage("loading");
     setPassageError(null);
@@ -717,8 +724,32 @@ function Scene({
 
   useEffect(() => {
     setPassage(null);
-    if (selected !== null) api.current.flyToNode(selected);
-  }, [selected]);
+    setHydration(undefined);
+    setHydrateError(null);
+    if (selected === null) return;
+    api.current.flyToNode(selected);
+    // A saved profile shows up the moment the entity is opened; nothing is
+    // generated without a click.
+    let live = true;
+    getHydration(nodes[selected].id)
+      .then((h) => live && setHydration(h))
+      .catch(() => live && setHydration(null));
+    return () => {
+      live = false;
+    };
+  }, [selected, nodes]);
+
+  const hydrate = useCallback(async (key: string) => {
+    setHydrating(true);
+    setHydrateError(null);
+    try {
+      setHydration(await hydrateEntity(key));
+    } catch (e) {
+      setHydrateError(e instanceof Error ? e.message : "Could not hydrate");
+    } finally {
+      setHydrating(false);
+    }
+  }, []);
 
   useEffect(() => {
     api.current.flyToType(typeFocus);
@@ -945,7 +976,68 @@ function Scene({
                 )}
               </div>
             ) : (
-            <ul className="min-h-0 flex-1 space-y-1.5 overflow-y-auto px-4 pb-4">
+            <div className="min-h-0 flex-1 overflow-y-auto">
+            <div className="px-4 pb-3">
+              {hydration ? (
+                <div className="space-y-2.5 rounded-[var(--md-shape-sm)] p-3" style={{ background: ink.chip }}>
+                  <p className="text-[11px] uppercase tracking-wide" style={{ color: ink.faint }}>
+                    From the web
+                  </p>
+                  {hydration.paragraphs.map((para, k) => (
+                    <p key={k} className="text-xs leading-relaxed">{para}</p>
+                  ))}
+                  {hydration.facts.length > 0 && (
+                    <>
+                      <p className="pt-1 text-[11px] uppercase tracking-wide" style={{ color: ink.faint }}>
+                        Interesting facts
+                      </p>
+                      <ul className="list-disc space-y-1 pl-4">
+                        {hydration.facts.map((f, k) => (
+                          <li key={k} className="text-xs leading-relaxed">{f}</li>
+                        ))}
+                      </ul>
+                    </>
+                  )}
+                  {hydration.sources.length > 0 && (
+                    <ol className="space-y-0.5 pt-1 text-[11px]" style={{ color: ink.faint }}>
+                      {hydration.sources.map((src, k) => (
+                        <li key={k} className="truncate">
+                          [{k + 1}]{" "}
+                          <a href={src.url} target="_blank" rel="noreferrer" className="underline" style={{ color: ink.text }}>
+                            {src.title}
+                          </a>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => void hydrate(chosen.id)}
+                    disabled={hydrating}
+                    className="text-[11px] underline"
+                    style={{ color: ink.faint }}
+                  >
+                    {hydrating ? "Refreshing…" : "Refresh from the web"}
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => void hydrate(chosen.id)}
+                  disabled={hydrating || hydration === undefined}
+                  className="flex w-full items-center justify-center gap-2 rounded-[var(--md-shape-sm)] px-3 py-2 text-xs font-medium"
+                  style={chip(true)}
+                  title="Search the web for this entity and save a short profile"
+                >
+                  {hydrating && <IconSpinner />}
+                  {hydrating ? "Reading the web…" : "Hydrate from web knowledge"}
+                </button>
+              )}
+              {hydrateError && (
+                <p className="mt-1.5 text-xs" style={{ color: ink.faint }}>{hydrateError}</p>
+              )}
+            </div>
+            <ul className="space-y-1.5 px-4 pb-4">
               {passageError && (
                 <li className="text-xs" style={{ color: ink.faint }}>{passageError}</li>
               )}
@@ -986,6 +1078,7 @@ function Scene({
                 );
               })}
             </ul>
+            </div>
             )}
           </div>
         )}

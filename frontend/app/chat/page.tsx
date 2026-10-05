@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { type ChatSession, createSession, deleteSession, listSessions } from "@/lib/api";
 import { useApp } from "../providers";
 import { Button, Checkbox, ConfirmButton, Ripplable } from "../md";
@@ -10,6 +10,7 @@ import {
   IconClose,
   IconLibrary,
   IconPlus,
+  IconSearch,
   IconSpinner,
   IconTrash,
 } from "../icons";
@@ -63,6 +64,11 @@ export default function ChatIndex() {
   const [selecting, setSelecting] = useState(false);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState(false);
+  // Filters the loaded page by title. Client-side on purpose: it is the page
+  // the person is looking at, and a server round trip per keystroke would make
+  // typing feel slower than reading.
+  const [query, setQuery] = useState("");
+  const groups = useMemo(() => groupByDay(page, query), [page, query]);
 
   const toggle = (id: string) =>
     setPicked((prev) => {
@@ -220,58 +226,99 @@ export default function ChatIndex() {
         </div>
       </header>
 
-      <ul className="space-y-3">
-        {sessions.map((s) => (
-          <li key={s.id}>
-            <Ripplable
-              as="div"
-              className="md-card md-card-outlined md-card-interactive flex items-center gap-4 p-4"
-              // In selection mode the WHOLE ROW toggles rather than only the
-              // checkbox. A 20px target inside a 72px row that is otherwise
-              // clickable is the classic way to make people miss and open the
-              // chat they were trying to delete.
-              onClick={() =>
-                selecting ? toggle(s.id) : router.push(`/chat/${s.id}`)
-              }
-              role={selecting ? "checkbox" : "link"}
-              aria-checked={selecting ? picked.has(s.id) : undefined}
-              tabIndex={0}
-            >
-              {/* Presentational only -- it is aria-hidden and has no handler.
-                  The ROW carries role="checkbox" and aria-checked, so a screen
-                  reader announces one control rather than a checkbox sitting
-                  inside a separate clickable thing. */}
-              {selecting && <Checkbox on={picked.has(s.id)} />}
-              <span
-                className="grid h-10 w-10 shrink-0 place-items-center rounded-[var(--md-shape-full)]"
-                style={{
-                  background: "var(--md-primary-container)",
-                  color: "var(--md-on-primary-container)",
-                }}
-              >
-                <IconChat className="h-5 w-5" />
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className="md-title-small block truncate">{s.title}</span>
-                <span
-                  className="md-body-small mt-0.5 block"
-                  style={{ color: "var(--md-on-surface-variant)" }}
+      <label
+        className="flex items-center gap-3 rounded-[var(--md-shape-full)] px-4 py-2.5"
+        style={{ background: "var(--md-surface-container-high)", color: "var(--md-on-surface-variant)" }}
+      >
+        <IconSearch className="h-4 w-4 shrink-0" />
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search conversations"
+          aria-label="Search conversations"
+          className="md-body-medium min-w-0 flex-1 bg-transparent outline-none"
+          style={{ color: "var(--md-on-surface)" }}
+        />
+        {query && (
+          <button type="button" onClick={() => setQuery("")} aria-label="Clear search" className="md-label-medium">
+            Clear
+          </button>
+        )}
+      </label>
+
+      {groups.length === 0 && (
+        <p className="md-body-medium py-6 text-center" style={{ color: "var(--md-on-surface-variant)" }}>
+          No conversation on this page matches “{query}”.
+        </p>
+      )}
+
+      {groups.map((group) => (
+        <section key={group.label} className="space-y-1.5">
+          <h2
+            className="md-label-large px-2 pt-2"
+            style={{ color: "var(--md-on-surface-variant)" }}
+          >
+            {group.label}
+          </h2>
+          {/* One surface per group with rows inside it, rather than a card per
+              conversation: a stack of identical bordered cards is the heaviest
+              way to draw a list, and the eye has to step over every border. */}
+          <ul
+            className="overflow-hidden rounded-[var(--md-shape-lg)]"
+            style={{ background: "var(--md-surface-container-low)" }}
+          >
+            {group.items.map(({ s, i }) => (
+              <li key={s.id}>
+                <Ripplable
+                  as="div"
+                  className="md-chat-row group flex items-center gap-4 px-4 py-3"
+                  // In selection mode the WHOLE ROW toggles rather than only
+                  // the checkbox: a 20px target inside an otherwise clickable
+                  // row is how people open the chat they meant to delete.
+                  onClick={() => (selecting ? toggle(s.id) : router.push(`/chat/${s.id}`))}
+                  role={selecting ? "checkbox" : "link"}
+                  aria-checked={selecting ? picked.has(s.id) : undefined}
+                  tabIndex={0}
                 >
-                  {s.n_messages} messages ·{" "}
-                  {new Date(s.updated_at).toLocaleDateString(undefined, {
-                    day: "numeric",
-                    month: "short",
-                  })}
-                  {s.document_ids.length > 0 &&
-                    ` · ${s.document_ids.length} doc${
-                      s.document_ids.length === 1 ? "" : "s"
-                    } in scope`}
-                </span>
-              </span>
-            </Ripplable>
-          </li>
-        ))}
-      </ul>
+                  {selecting && <Checkbox on={picked.has(s.id)} />}
+                  {/* Morphs into a shape on row hover -- the same effect as the
+                      icon buttons, varied by row so a list is not a column of
+                      identical blobs. */}
+                  <span className={`md-morph-tile md-morph-${i % 4}`}>
+                    <IconChat className="h-5 w-5" />
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="md-title-small block truncate">{s.title}</span>
+                    <span
+                      className="md-body-small mt-0.5 block truncate"
+                      style={{ color: "var(--md-on-surface-variant)" }}
+                    >
+                      {s.n_messages} message{s.n_messages === 1 ? "" : "s"}
+                      {s.document_ids.length > 0 &&
+                        ` · ${s.document_ids.length} doc${s.document_ids.length === 1 ? "" : "s"} in scope`}
+                    </span>
+                  </span>
+                  <span
+                    className="md-label-medium shrink-0 tabular-nums"
+                    style={{ color: "var(--md-on-surface-variant)" }}
+                  >
+                    {relativeTime(s.updated_at)}
+                  </span>
+                  {!selecting && (
+                    <span
+                      aria-hidden
+                      className="shrink-0 -translate-x-1 opacity-0 transition-all duration-200 group-hover:translate-x-0 group-hover:opacity-100"
+                      style={{ color: "var(--md-on-surface-variant)" }}
+                    >
+                      →
+                    </span>
+                  )}
+                </Ripplable>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ))}
 
       {/* Only when there is more than one page. A pager over eight rows is
           furniture. */}
@@ -369,4 +416,42 @@ function Empty({
       <div className="mt-6 flex justify-center">{action}</div>
     </div>
   );
+}
+
+type Group = { label: string; items: { s: ChatSession; i: number }[] };
+
+/** Today / Yesterday / This week / This month / Earlier, newest first. */
+function groupByDay(sessions: ChatSession[], query: string): Group[] {
+  const q = query.trim().toLowerCase();
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const day = 86_400_000;
+  const order = ["Today", "Yesterday", "This week", "This month", "Earlier"];
+  const buckets = new Map<string, Group["items"]>();
+  sessions.forEach((s, i) => {
+    if (q && !s.title.toLowerCase().includes(q)) return;
+    const t = new Date(s.updated_at).getTime();
+    const label =
+      t >= start ? "Today"
+      : t >= start - day ? "Yesterday"
+      : t >= start - 6 * day ? "This week"
+      : t >= start - 30 * day ? "This month"
+      : "Earlier";
+    if (!buckets.has(label)) buckets.set(label, []);
+    buckets.get(label)!.push({ s, i });
+  });
+  return order.filter((l) => buckets.has(l)).map((label) => ({ label, items: buckets.get(label)! }));
+}
+
+/** "14:05" today, "Mon" this week, "28 Sept" otherwise. */
+function relativeTime(iso: string): string {
+  const d = new Date(iso);
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) {
+    return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  }
+  if (now.getTime() - d.getTime() < 6 * 86_400_000) {
+    return d.toLocaleDateString(undefined, { weekday: "short" });
+  }
+  return d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
 }

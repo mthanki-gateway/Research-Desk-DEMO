@@ -14,7 +14,7 @@ from sqlalchemy import select
 from app.auth import User, current_user, forbid_if_not_owner
 from app.db.models import ChatSession, Message, Role
 from app.db.session import SessionLocal
-from app.services import atlas, graph
+from app.services import atlas, graph, hydrate
 
 log = structlog.get_logger()
 
@@ -36,6 +36,23 @@ async def get_graph(user: User = Depends(current_user)) -> dict:
 async def build_graph(user: User = Depends(current_user)) -> dict:
     """Queue extraction for every document that has no graph yet."""
     return {"queued": await graph.backfill(user.owner_id)}
+
+
+@router.get("/graph/entity/{key}/hydration")
+async def get_hydration(key: str, user: User = Depends(current_user)) -> dict:
+    """The saved web profile of an entity, or null if it was never hydrated."""
+    return {"hydration": await hydrate.get(user.owner_id, key)}
+
+
+@router.post("/graph/entity/{key}/hydrate")
+async def hydrate_entity(key: str, user: User = Depends(current_user)) -> dict:
+    """Search the web for this entity, write a profile, save it."""
+    try:
+        return {"hydration": await hydrate.hydrate(user.owner_id, key)}
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except hydrate.HydrationUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.get("/atlas/ray/{message_id}")

@@ -1399,3 +1399,133 @@ textarea:focus-visible {
   animation: md-ripple var(--md-ripple-duration) linear forwards;
   z-index: 0;
 }
+
+
+/* ===========================================================================
+   Shape-morph hover, Material 3 Expressive style.
+
+   On hover an icon button grows a soft tonal SHAPE behind its glyph -- a
+   cookie, a pentagon, a clover -- instead of the flat circular state layer.
+   Neighbouring buttons in a toolbar get different shapes and colours, so a
+   row of four reads as four distinct things rather than one repeated blob.
+
+   Every shape is a polygon of the SAME 48 points (generated, not drawn), which
+   is what lets the browser interpolate clip-path between them: a circle at
+   rest morphs smoothly into the hover shape. Different point counts would
+   snap rather than morph.
+
+   On ::after, because .md-state already owns ::before for its state layer,
+   and the glyph sits above both via .md-state > * { z-index: 1 }.
+   =========================================================================== */
+@layer components {
+  :root {
+    --md-shape-circle: polygon(100.00% 50.00%,99.57% 56.53%,98.30% 62.94%,96.19% 69.13%,93.30% 75.00%,89.67% 80.44%,85.36% 85.36%,80.44% 89.67%,75.00% 93.30%,69.13% 96.19%,62.94% 98.30%,56.53% 99.57%,50.00% 100.00%,43.47% 99.57%,37.06% 98.30%,30.87% 96.19%,25.00% 93.30%,19.56% 89.67%,14.64% 85.36%,10.33% 80.44%,6.70% 75.00%,3.81% 69.13%,1.70% 62.94%,0.43% 56.53%,0.00% 50.00%,0.43% 43.47%,1.70% 37.06%,3.81% 30.87%,6.70% 25.00%,10.33% 19.56%,14.64% 14.64%,19.56% 10.33%,25.00% 6.70%,30.87% 3.81%,37.06% 1.70%,43.47% 0.43%,50.00% 0.00%,56.53% 0.43%,62.94% 1.70%,69.13% 3.81%,75.00% 6.70%,80.44% 10.33%,85.36% 14.64%,89.67% 19.56%,93.30% 25.00%,96.19% 30.87%,98.30% 37.06%,99.57% 43.47%);
+    --md-shape-cookie: polygon(100.00% 50.00%,97.17% 56.21%,91.84% 61.21%,89.23% 66.25%,89.91% 73.04%,89.43% 80.26%,84.54% 84.54%,77.14% 85.37%,71.08% 86.52%,67.06% 91.19%,62.64% 97.19%,56.49% 99.28%,50.00% 96.08%,44.46% 92.10%,38.79% 91.84%,31.79% 93.96%,25.00% 93.30%,21.03% 87.75%,19.37% 80.63%,16.31% 75.85%,10.09% 73.04%,4.08% 69.02%,2.81% 62.64%,5.80% 55.82%,7.83% 50.00%,5.80% 44.18%,2.81% 37.36%,4.08% 30.98%,10.09% 26.96%,16.31% 24.15%,19.37% 19.37%,21.03% 12.25%,25.00% 6.70%,31.79% 6.04%,38.79% 8.16%,44.46% 7.90%,50.00% 3.92%,56.49% 0.72%,62.64% 2.81%,67.06% 8.81%,71.08% 13.48%,77.14% 14.63%,84.54% 15.46%,89.43% 19.74%,89.91% 26.96%,89.23% 33.75%,91.84% 38.79%,97.17% 43.79%);
+    --md-shape-pentagon: polygon(95.05% 50.00%,91.67% 55.49%,88.89% 60.42%,87.39% 65.49%,86.86% 71.28%,86.25% 77.82%,84.33% 84.33%,80.41% 89.63%,74.67% 92.73%,67.96% 93.37%,61.33% 92.27%,55.37% 90.76%,50.00% 90.09%,44.63% 90.76%,38.67% 92.27%,32.04% 93.37%,25.33% 92.73%,19.59% 89.63%,15.67% 84.33%,13.75% 77.82%,13.14% 71.28%,12.61% 65.49%,11.11% 60.42%,8.33% 55.49%,4.95% 50.00%,2.35% 43.73%,1.87% 37.10%,4.15% 31.01%,8.84% 26.24%,14.78% 22.97%,20.63% 20.63%,25.57% 18.16%,29.62% 14.71%,33.49% 10.14%,38.01% 5.25%,43.61% 1.44%,50.00% 0.00%,56.39% 1.44%,61.99% 5.25%,66.51% 10.14%,70.38% 14.71%,74.43% 18.16%,79.37% 20.63%,85.22% 22.97%,91.16% 26.24%,95.85% 31.01%,98.13% 37.10%,97.65% 43.73%);
+    --md-shape-clover: polygon(86.21% 50.00%,86.81% 54.85%,88.30% 60.26%,89.82% 66.49%,90.31% 73.28%,88.93% 79.88%,85.36% 85.36%,79.88% 88.93%,73.28% 90.31%,66.49% 89.82%,60.26% 88.30%,54.85% 86.81%,50.00% 86.21%,45.15% 86.81%,39.74% 88.30%,33.51% 89.82%,26.72% 90.31%,20.12% 88.93%,14.64% 85.36%,11.07% 79.88%,9.69% 73.28%,10.18% 66.49%,11.70% 60.26%,13.19% 54.85%,13.79% 50.00%,13.19% 45.15%,11.70% 39.74%,10.18% 33.51%,9.69% 26.72%,11.07% 20.12%,14.64% 14.64%,20.12% 11.07%,26.72% 9.69%,33.51% 10.18%,39.74% 11.70%,45.15% 13.19%,50.00% 13.79%,54.85% 13.19%,60.26% 11.70%,66.49% 10.18%,73.28% 9.69%,79.88% 11.07%,85.36% 14.64%,88.93% 20.12%,90.31% 26.72%,89.82% 33.51%,88.30% 39.74%,86.81% 45.15%);
+    --md-shape-burst: polygon(100.00% 50.00%,96.33% 56.10%,91.98% 61.25%,93.17% 67.88%,93.30% 75.00%,87.07% 78.45%,80.73% 80.73%,78.45% 87.07%,75.00% 93.30%,67.88% 93.17%,61.25% 91.98%,56.10% 96.33%,50.00% 100.00%,43.90% 96.33%,38.75% 91.98%,32.12% 93.17%,25.00% 93.30%,21.55% 87.07%,19.27% 80.73%,12.93% 78.45%,6.70% 75.00%,6.83% 67.88%,8.02% 61.25%,3.67% 56.10%,0.00% 50.00%,3.67% 43.90%,8.02% 38.75%,6.83% 32.12%,6.70% 25.00%,12.93% 21.55%,19.27% 19.27%,21.55% 12.93%,25.00% 6.70%,32.12% 6.83%,38.75% 8.02%,43.90% 3.67%,50.00% 0.00%,56.10% 3.67%,61.25% 8.02%,67.88% 6.83%,75.00% 6.70%,78.45% 12.93%,80.73% 19.27%,87.07% 21.55%,93.30% 25.00%,93.17% 32.12%,91.98% 38.75%,96.33% 43.90%);
+  }
+
+  .md-icon-btn {
+    --morph-bg: var(--md-tertiary-container);
+    --morph-fg: var(--md-on-tertiary-container);
+    --morph-shape: var(--md-shape-pentagon);
+  }
+  .md-icon-btn:nth-of-type(4n + 1) {
+    --morph-bg: var(--md-secondary-container);
+    --morph-fg: var(--md-on-secondary-container);
+    --morph-shape: var(--md-shape-clover);
+  }
+  .md-icon-btn:nth-of-type(4n + 2) {
+    --morph-bg: var(--md-error-container);
+    --morph-fg: var(--md-on-error-container);
+    --morph-shape: var(--md-shape-cookie);
+  }
+  .md-icon-btn:nth-of-type(4n + 3) {
+    --morph-bg: var(--md-primary-container);
+    --morph-fg: var(--md-on-primary-container);
+    --morph-shape: var(--md-shape-burst);
+  }
+
+  .md-icon-btn::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background: var(--morph-bg);
+    clip-path: var(--md-shape-circle);
+    transform: scale(0.4) rotate(-30deg);
+    opacity: 0;
+    transition:
+      clip-path 420ms cubic-bezier(0.34, 1.56, 0.64, 1),
+      transform 420ms cubic-bezier(0.34, 1.56, 0.64, 1),
+      opacity 160ms ease-out;
+  }
+  .md-icon-btn:hover:not(:disabled)::after,
+  .md-icon-btn:focus-visible:not(:disabled)::after {
+    clip-path: var(--morph-shape);
+    transform: scale(1) rotate(0deg);
+    opacity: 1;
+  }
+  .md-icon-btn:hover:not(:disabled),
+  .md-icon-btn:focus-visible:not(:disabled) {
+    color: var(--morph-fg);
+  }
+  /* The flat state layer would sit on top of the shape as a grey wash. */
+  .md-icon-btn:hover:not(:disabled)::before { opacity: 0; }
+  .md-icon-btn > svg { transition: transform 300ms cubic-bezier(0.34, 1.56, 0.64, 1); }
+  .md-icon-btn:hover:not(:disabled) > svg { transform: scale(1.08); }
+  /* Filled and error variants already have a colour of their own. */
+  .md-icon-btn-filled::after,
+  .md-icon-btn-error::after { display: none; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .md-icon-btn::after,
+    .md-icon-btn > svg { transition: opacity 120ms linear; transform: none !important; }
+  }
+}
+
+/* Chat list rows and the tile that morphs on row hover. Same 48-point shapes
+   as the icon buttons above, so the motion is one language across the app. */
+@layer components {
+  .md-chat-row {
+    --md-state-color: var(--md-on-surface);
+    transition: background-color var(--md-dur-short) var(--md-ease-standard);
+  }
+  .md-chat-row + .md-chat-row,
+  li + li > .md-chat-row {
+    border-top: 1px solid color-mix(in srgb, var(--md-outline-variant) 55%, transparent);
+  }
+  .md-morph-tile {
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    flex-shrink: 0;
+    background: var(--md-primary-container);
+    color: var(--md-on-primary-container);
+    clip-path: var(--md-shape-circle);
+    transition:
+      clip-path 420ms cubic-bezier(0.34, 1.56, 0.64, 1),
+      transform 420ms cubic-bezier(0.34, 1.56, 0.64, 1),
+      background-color 200ms ease-out,
+      color 200ms ease-out;
+  }
+  .md-morph-0 { --tile-shape: var(--md-shape-cookie); --tile-bg: var(--md-tertiary-container); --tile-fg: var(--md-on-tertiary-container); }
+  .md-morph-1 { --tile-shape: var(--md-shape-pentagon); --tile-bg: var(--md-secondary-container); --tile-fg: var(--md-on-secondary-container); }
+  .md-morph-2 { --tile-shape: var(--md-shape-clover); --tile-bg: var(--md-error-container); --tile-fg: var(--md-on-error-container); }
+  .md-morph-3 { --tile-shape: var(--md-shape-burst); --tile-bg: var(--md-primary-container); --tile-fg: var(--md-on-primary-container); }
+  .group:hover .md-morph-tile,
+  .group:focus-visible .md-morph-tile {
+    clip-path: var(--tile-shape);
+    background: var(--tile-bg);
+    color: var(--tile-fg);
+    transform: rotate(18deg) scale(1.06);
+  }
+  .group:hover .md-morph-tile > svg { transform: rotate(-18deg); }
+  .md-morph-tile > svg { transition: transform 420ms cubic-bezier(0.34, 1.56, 0.64, 1); }
+  @media (prefers-reduced-motion: reduce) {
+    .md-morph-tile, .md-morph-tile > svg { transition: none; transform: none !important; }
+  }
+}

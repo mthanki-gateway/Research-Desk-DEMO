@@ -1105,6 +1105,31 @@ export async function buildGraph(): Promise<{ queued: number }> {
   return res.json();
 }
 
+/** A web-sourced profile of one entity, saved once written. */
+export type Hydration = {
+  key: string;
+  name: string;
+  /** Three paragraphs, with [n] markers into `sources`. */
+  paragraphs: string[];
+  facts: string[];
+  sources: { title: string; url: string }[];
+  created_at: string | null;
+};
+
+export async function getHydration(key: string): Promise<Hydration | null> {
+  const res = await authedFetch(`/corpus/graph/entity/${encodeURIComponent(key)}/hydration`);
+  if (!res.ok) throw new Error(await detail(res));
+  return (await res.json()).hydration;
+}
+
+export async function hydrateEntity(key: string): Promise<Hydration> {
+  const res = await authedFetch(`/corpus/graph/entity/${encodeURIComponent(key)}/hydrate`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return (await res.json()).hydration;
+}
+
 export async function getQueryRay(messageId: string): Promise<QueryRay> {
   const res = await authedFetch(`/corpus/atlas/ray/${messageId}`);
   if (!res.ok) throw new Error(await detail(res));
