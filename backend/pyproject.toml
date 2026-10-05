@@ -64,6 +64,11 @@ storage = ["boto3>=1.35"]
 # unless EMOTION_ANALYSIS is set, and the model does not fit Render's free
 # tier anyway. See `services/emotion.py`.
 emotion = ["torch>=2.4", "transformers>=4.44"]
+# Zero-shot encoders for Model Lab > Local: GLiNER (entities) and GLiClass
+# (intent routing, independent per-label scoring). Run on CPU in-process. In
+# the DEV image only, like `eval` -- torch is far too large for prod.
+# transformers <5: gliclass loads under 5.x with a model-type mismatch warning.
+local-nlp = ["torch>=2.4", "transformers>=4.44,<5","gliner>=0.2.13", "gliclass>=0.1.11"]
 # NVIDIA's hosted NeMo speech models (Parakeet, Canary, Nemotron streaming).
 #
 # A gRPC CLIENT, and that is not a preference. Those functions are reachable
@@ -104,6 +109,16 @@ eval = [
     # optional tidiness, it is what makes the extra importable at all.
     "langchain-community<0.4",
 ]
+
+# CPU-only torch. The default PyPI wheel on Linux bundles CUDA -- several
+# gigabytes of GPU libraries for a container that has no GPU.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
 
 [tool.ruff]
 line-length = 100

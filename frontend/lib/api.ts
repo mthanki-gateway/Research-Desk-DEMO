@@ -914,6 +914,71 @@ export async function nvidiaFunctions(): Promise<NvidiaFunction[]> {
   return (await res.json()).functions;
 }
 
+// --- Local encoders: GLiNER + GLiClass on the API's own CPU ----------------
+
+export type LocalStatus = {
+  installed: boolean;
+  /** Weights already in memory. False means the next call includes a load. */
+  loaded: { gliner: boolean; gliclass: boolean };
+  gliner_model: string;
+  gliclass_model: string;
+};
+
+export type LocalEntity = {
+  text: string;
+  label: string;
+  score: number;
+  start: number;
+  end: number;
+};
+
+export type LocalEntities = {
+  entities: LocalEntity[];
+  elapsed_ms: number;
+  model: string;
+};
+
+export type LocalScores = {
+  /** Every label, highest first, each an independent 0..1 -- they do not
+   *  sum to 1. Never filtered server-side. */
+  scores: { label: string; score: number }[];
+  elapsed_ms: number;
+  model: string;
+};
+
+export async function localStatus(): Promise<LocalStatus> {
+  const res = await authedFetch("/playground/local/status");
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function localEntities(body: {
+  text: string;
+  labels: string[];
+  threshold: number;
+}): Promise<LocalEntities> {
+  const res = await authedFetch("/playground/local/entities", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function localClassify(body: {
+  text: string;
+  labels: string[];
+}): Promise<LocalScores> {
+  const res = await authedFetch("/playground/local/classify", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
 // --- Corpus atlas: the embedding space as geometry -------------------------
 
 export type AtlasPoint = {
@@ -940,8 +1005,11 @@ export type AtlasPoint = {
 
 export type Atlas = {
   points: AtlasPoint[];
-  /** Row-major cosine similarity, same order as `points`. */
-  similarity: number[][];
+  /** Row-major n×n cosine similarity, same order as `points`, quantised to
+   *  bytes (score = byte / 255). Bytes rather than nested arrays because at
+   *  the 2,000-chunk cap the arrays were four million JSON numbers -- enough
+   *  to take the server down building them. Null on a query ray. */
+  similarity: Uint8Array | null;
   /** Share of variance each of the three axes accounts for. */
   explained_variance: number[];
   n_documents: number;
@@ -951,7 +1019,18 @@ export type Atlas = {
 export async function getAtlas(): Promise<Atlas> {
   const res = await authedFetch("/corpus/atlas");
   if (!res.ok) throw new Error(await detail(res));
-  return res.json();
+  const body = await res.json();
+  return {
+    ...body,
+    similarity: body.similarity ? decodeBase64(body.similarity) : null,
+  };
+}
+
+function decodeBase64(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
 }
 
 /** One retrieved chunk, as a line from the query to a point in `points`. */

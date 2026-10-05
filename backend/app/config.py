@@ -800,6 +800,13 @@ class Settings(BaseSettings):
     groq_model: str = "openai/gpt-oss-120b"
     groq_timeout_seconds: float = 120.0
 
+    # ---- local encoders (Model Lab > Local) -------------------------------
+    # Run in-process on CPU. See `services/local_nlp.py`. Small variants on
+    # purpose (~200-600MB), fast enough on a laptop that the demo is the
+    # latency, not a wait.
+    gliner_model: str = "urchade/gliner_small-v2.1"
+    gliclass_model: str = "knowledgator/gliclass-base-v3.0"
+
     @property
     def groq_enabled(self) -> bool:
         return bool(self.groq_api_key)

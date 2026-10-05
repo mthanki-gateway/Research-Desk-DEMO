@@ -56,3 +56,20 @@ class TranscriptionOut(BaseModel):
     no_speech_prob: float | None = None
     avg_logprob: float | None = None
     model: str
+
+
+# Labels are capped because each one is encoded alongside the text: forty
+# labels is forty times the work, and past a dozen the demo stops being
+# readable anyway.
+Labels = list[str]
+
+
+class EntitiesRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=5_000)
+    labels: Labels = Field(min_length=1, max_length=25)
+    threshold: float = Field(0.4, ge=0.0, le=1.0)
+
+
+class ClassifyRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=5_000)
+    labels: Labels = Field(min_length=1, max_length=25)

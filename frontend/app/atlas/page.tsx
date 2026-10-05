@@ -184,7 +184,7 @@ export default function AtlasPage() {
           </p>
           <Heatmap
             points={atlas.points}
-            similarity={atlas.similarity}
+            similarity={atlas.similarity ?? new Uint8Array(0)}
             selected={selected}
             onSelect={setSelected}
           />

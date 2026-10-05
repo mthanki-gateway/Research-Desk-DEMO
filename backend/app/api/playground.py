@@ -16,13 +16,15 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from app.auth import User, current_user
 from app.config import get_settings
 from app.schemas.playground import (
+    ClassifyRequest,
+    EntitiesRequest,
     CompletionOut,
     CompletionRequest,
     ModelsOut,
     PlaygroundStatus,
     TranscriptionOut,
 )
-from app.services import groq_client, nvidia_client
+from app.services import groq_client, local_nlp, nvidia_client
 
 log = structlog.get_logger()
 
@@ -217,3 +219,40 @@ async def nvidia_functions(user: User = Depends(current_user)) -> dict:
         "functions": functions,
         "n_speech": sum(1 for f in functions if f["speech"]),
     }
+
+
+# --------------------------------------------------------------------------
+# Local encoders: GLiNER and GLiClass, on this machine's CPU.
+#
+# No key, no upstream, so failure here is "the extra is not installed" (503,
+# with how to fix it) rather than the 502 an upstream outage gets above.
+# --------------------------------------------------------------------------
+
+
+@router.get("/local/status")
+async def local_status(_: User = Depends(current_user)) -> dict:
+    settings = get_settings()
+    return {
+        "installed": local_nlp.installed(),
+        # Whether weights are already in memory, so the UI can warn that the
+        # FIRST call includes a download and load and is not the real latency.
+        "loaded": local_nlp.loaded(),
+        "gliner_model": settings.gliner_model,
+        "gliclass_model": settings.gliclass_model,
+    }
+
+
+@router.post("/local/entities")
+async def local_entities(req: EntitiesRequest, _: User = Depends(current_user)) -> dict:
+    try:
+        return await local_nlp.entities(req.text, req.labels, req.threshold)
+    except local_nlp.LocalModelUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/local/classify")
+async def local_classify(req: ClassifyRequest, _: User = Depends(current_user)) -> dict:
+    try:
+        return await local_nlp.classify(req.text, req.labels)
+    except local_nlp.LocalModelUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc

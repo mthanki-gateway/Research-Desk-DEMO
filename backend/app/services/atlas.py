@@ -31,6 +31,8 @@ picture actually accounts for, rather than implying a faithful map.
 
 from __future__ import annotations
 
+import asyncio
+import base64
 from dataclasses import dataclass
 from typing import Any
 
@@ -45,6 +47,11 @@ log = structlog.get_logger()
 # Above this, neither view is useful and both get expensive: the matrix is
 # O(n^2) and a scatter plot of ten thousand points is a solid block.
 MAX_POINTS = 2_000
+
+# One build at a time. The server runs a single worker, and two concurrent
+# builds of a full corpus double the peak memory for no benefit -- a second
+# reader is better served waiting a second than taking the process down.
+_BUILD_LOCK = asyncio.Lock()
 
 
 @dataclass(frozen=True)
@@ -123,36 +130,71 @@ def _similarity(vectors: np.ndarray) -> np.ndarray:
     return unit @ unit.T
 
 
-async def build(owner_id: str | None) -> dict[str, Any]:
-    """Project the corpus and cross-multiply it. One pass over the vectors."""
-    raw = await get_vector_store().all_vectors(owner_id, limit=MAX_POINTS)
-    if not raw:
-        return {
-            "points": [],
-            "similarity": [],
-            "explained_variance": [],
-            "n_documents": 0,
-            "truncated": False,
-        }
+def _encode_matrix(matrix: np.ndarray) -> str:
+    """The matrix as base64 of row-major uint8, cosine 0..1 mapped to 0..255.
 
-    # Sorted by document then position, so the similarity matrix has its
-    # documents in contiguous blocks. Without this the matrix is a random
-    # permutation of itself and the block structure -- the thing worth seeing
-    # -- is invisible.
+    WHY NOT A LIST OF LISTS. That is what this used to return, and it is what
+    took the server down on a large corpus: 2,000 chunks is four million boxed
+    Python floats (~150MB) rounded one at a time ON THE EVENT LOOP, then ~25MB
+    of JSON -- and the single worker answers nothing else meanwhile. As bytes
+    it is 4MB, built in one numpy call. A step of 1/255 is finer than the
+    colour ramp can show; negatives clamp to 0, which the ramp's floor renders
+    as "unrelated" anyway.
+    """
+    q = np.clip(np.rint(matrix * 255.0), 0, 255).astype(np.uint8)
+    return base64.b64encode(q.tobytes()).decode("ascii")
+
+
+async def _load(owner_id: str | None) -> list[tuple[list[float], dict]]:
+    """Every vector, sorted by document then position.
+
+    Sorted so the similarity matrix has its documents in contiguous blocks.
+    Without this the matrix is a random permutation of itself and the block
+    structure -- the thing worth seeing -- is invisible.
+    """
+    raw = await get_vector_store().all_vectors(owner_id, limit=MAX_POINTS)
     raw.sort(
         key=lambda pair: (
             str(pair[1].get("filename") or ""),
             int(pair[1].get("chunk_index") or 0),
         )
     )
+    return raw
 
+
+def _compute(
+    raw: list[tuple[list[float], dict]], with_matrix: bool
+) -> tuple[list[dict[str, Any]], list[float], Basis, str | None]:
+    """The CPU half of a build. Synchronous, so it can run off the event loop."""
     vectors = np.asarray([v for v, _ in raw], dtype=np.float32)
-    coords, explained, _ = _project(vectors)
+    coords, explained, basis = _project(vectors)
+
+    # Nearest OTHER chunk for every chunk, in one vectorised pass. Excluding
+    # the diagonal is the whole trick: a chunk's similarity to itself is 1.0
+    # and would win every time.
     matrix = _similarity(vectors)
+    n = matrix.shape[0]
+    nearest_idx = nearest_score = None
+    if n >= 2:
+        np.fill_diagonal(matrix, -1.0)
+        nearest_idx = matrix.argmax(axis=1)
+        nearest_score = matrix[np.arange(n), nearest_idx]
+        np.fill_diagonal(matrix, 1.0)
+    encoded = _encode_matrix(matrix) if with_matrix else None
+    del matrix
 
     points = []
     for i, (_, payload) in enumerate(raw):
         text = str(payload.get("text") or "")
+        nearest = None
+        if nearest_idx is not None:
+            other = raw[int(nearest_idx[i])][1]
+            nearest = {
+                "filename": str(other.get("filename") or "unknown"),
+                "heading": other.get("heading"),
+                "chunk_index": int(other.get("chunk_index") or 0),
+                "score": round(float(nearest_score[i]), 3),
+            }
         points.append(
             {
                 "chunk_id": str(payload.get("chunk_id") or ""),
@@ -163,58 +205,54 @@ async def build(owner_id: str | None) -> dict[str, Any]:
                 "n_chars": int(payload.get("n_chars") or len(text)),
                 # Enough to recognise the chunk on hover.
                 "preview": text[:160],
-                # The WHOLE passage, for the expanded reading card.
-                #
-                # Sent up front rather than fetched on click, because the card
-                # lives inside the fullscreen canvas: a request at click time
-                # would need its own loading state over a WebGL surface, and
-                # the saving is small. Chunks are ~500 characters, so a
-                # 200-chunk corpus is about 100KB -- less than one photograph.
+                # The WHOLE passage, for the expanded reading card. Sent up
+                # front because the card lives inside the fullscreen canvas,
+                # where a click-time request would need its own loading state
+                # over a WebGL surface. ~500 chars a chunk: 2,000 is ~1MB.
                 "text": text,
                 "x": float(coords[i][0]),
                 "y": float(coords[i][1]),
                 "z": float(coords[i][2]),
-                # Nearest OTHER chunk, precomputed. The UI wants it per point
-                # and computing it there means shipping the whole matrix to
-                # find one number.
-                "nearest": _nearest(matrix, i, raw),
+                "nearest": nearest,
             }
         )
+    return points, explained, basis, encoded
 
-    log.info(
-        "atlas_built",
-        n=len(points),
-        explained=round(sum(explained), 3),
-    )
+
+async def _build(
+    owner_id: str | None, with_matrix: bool
+) -> tuple[dict[str, Any], Basis | None]:
+    async with _BUILD_LOCK:
+        raw = await _load(owner_id)
+        if not raw:
+            return {
+                "points": [],
+                "similarity": None,
+                "explained_variance": [],
+                "n_documents": 0,
+                "truncated": False,
+            }, None
+        # Off the event loop: the single worker must keep answering /health
+        # and every other request while a large corpus is cross-multiplied.
+        points, explained, basis, encoded = await asyncio.to_thread(
+            _compute, raw, with_matrix
+        )
+    log.info("atlas_built", n=len(points), explained=round(sum(explained), 3))
     return {
         "points": points,
-        # Rounded to 3dp: the matrix is n^2 floats and full precision triples
-        # the payload for a value rendered as a colour.
-        "similarity": [[round(float(x), 3) for x in row] for row in matrix],
+        # base64 uint8, row-major, n x n -- see _encode_matrix. None on the
+        # ray endpoint, whose view never draws it.
+        "similarity": encoded,
         "explained_variance": explained,
         "n_documents": len({p["filename"] for p in points}),
         "truncated": len(raw) >= MAX_POINTS,
-    }
+    }, basis
 
 
-def _nearest(matrix: np.ndarray, i: int, raw: list) -> dict[str, Any] | None:
-    """The most similar chunk to `i`, excluding itself.
-
-    Excluding the diagonal is the whole trick: a chunk's similarity to itself
-    is 1.0 and would win every time.
-    """
-    if matrix.shape[0] < 2:
-        return None
-    row = matrix[i].copy()
-    row[i] = -1.0
-    j = int(np.argmax(row))
-    payload = raw[j][1]
-    return {
-        "filename": str(payload.get("filename") or "unknown"),
-        "heading": payload.get("heading"),
-        "chunk_index": int(payload.get("chunk_index") or 0),
-        "score": round(float(row[j]), 3),
-    }
+async def build(owner_id: str | None) -> dict[str, Any]:
+    """Project the corpus and cross-multiply it. One pass over the vectors."""
+    atlas, _ = await _build(owner_id, with_matrix=True)
+    return atlas
 
 
 async def build_ray(
@@ -241,24 +279,13 @@ async def build_ray(
 
     One embedding call, to place the query. Nothing else is recomputed.
     """
-    atlas = await build(owner_id)
+    # One fetch, one fit. This used to call build() and then fetch and refit
+    # every vector a second time for the basis -- and serialise a similarity
+    # matrix the ray view never draws.
+    atlas, basis = await _build(owner_id, with_matrix=False)
     points = atlas["points"]
-    if not points:
+    if not points or basis is None:
         return {**atlas, "query": None, "rays": [], "question": question}
-
-    # Refit the basis on the same vectors `build` used. Recomputing rather than
-    # threading it out of `build` keeps that function's return value a plain
-    # serialisable dict; the SVD is the cheap half of this endpoint next to the
-    # embedding round trip.
-    raw = await get_vector_store().all_vectors(owner_id, limit=MAX_POINTS)
-    raw.sort(
-        key=lambda pair: (
-            str(pair[1].get("filename") or ""),
-            int(pair[1].get("chunk_index") or 0),
-        )
-    )
-    vectors = np.asarray([v for v, _ in raw], dtype=np.float32)
-    _, _, basis = _project(vectors)
 
     embedded = await get_embeddings().embed_query(question)
     position = project_into(basis, np.asarray(embedded, dtype=np.float32))

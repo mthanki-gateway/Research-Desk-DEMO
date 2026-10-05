@@ -19,7 +19,9 @@ import type { AtlasPoint } from "@/lib/api";
  *
  * CANVAS, NOT DIVS. At 39 chunks a CSS grid would be 1,521 elements and fine;
  * at the 2,000-chunk cap it is four million, which no browser will lay out.
- * One canvas draws either in the same code.
+ * One canvas draws either in the same code -- and not as four million
+ * fillRects: the matrix goes once into an n×n ImageData, one pixel per cell,
+ * and is scaled up with a single unsmoothed drawImage.
  */
 
 /**
@@ -39,7 +41,8 @@ export default function Heatmap({
   onSelect,
 }: {
   points: AtlasPoint[];
-  similarity: number[][];
+  /** Row-major n×n; byte / 255 is the cosine. */
+  similarity: Uint8Array;
   selected: number | null;
   onSelect: (index: number | null) => void;
 }) {
@@ -70,18 +73,30 @@ export default function Heatmap({
     ctx.scale(dpr, dpr);
     const cell = size / n;
 
-    for (let i = 0; i < n; i++) {
-      for (let j = 0; j < n; j++) {
-        const v = similarity[i]?.[j] ?? 0;
-        const t = Math.max(0, Math.min(1, (v - FLOOR) / (1 - FLOOR)));
-        // Single hue, varying lightness. A rainbow ramp would imply
-        // categories where there is only magnitude, and is unreadable to the
-        // ~8% of men with a colour deficiency.
-        const light = 97 - t * 72;
-        ctx.fillStyle = `hsl(258 55% ${light}%)`;
-        ctx.fillRect(j * cell, i * cell, Math.ceil(cell), Math.ceil(cell));
-      }
+    // The ramp as a 256-entry lookup, so the per-cell work is one index.
+    const lut = new Uint8ClampedArray(256 * 3);
+    for (let q = 0; q < 256; q++) {
+      const t = Math.max(0, Math.min(1, (q / 255 - FLOOR) / (1 - FLOOR)));
+      // Single hue, varying lightness. A rainbow ramp would imply categories
+      // where there is only magnitude, and is unreadable to the ~8% of men
+      // with a colour deficiency.
+      lut.set(hslToRgb(258, 0.55, (97 - t * 72) / 100), q * 3);
     }
+    const image = new ImageData(n, n);
+    const px = image.data;
+    for (let k = 0; k < n * n; k++) {
+      const q = (similarity[k] ?? 0) * 3;
+      px[k * 4] = lut[q];
+      px[k * 4 + 1] = lut[q + 1];
+      px[k * 4 + 2] = lut[q + 2];
+      px[k * 4 + 3] = 255;
+    }
+    const off = document.createElement("canvas");
+    off.width = n;
+    off.height = n;
+    off.getContext("2d")?.putImageData(image, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(off, 0, 0, size, size);
 
     // Document boundaries. Without them the blocks are visible but unlabelled,
     // and "which file is that bright square" is the first question anyone asks.
@@ -107,7 +122,8 @@ export default function Heatmap({
 
   const a = at ? points[at.i] : null;
   const b = at ? points[at.j] : null;
-  const score = at ? similarity[at.i]?.[at.j] : null;
+  const byte = at ? similarity[at.i * n + at.j] : undefined;
+  const score = byte !== undefined ? byte / 255 : null;
 
   const cellFrom = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -146,7 +162,7 @@ export default function Heatmap({
             color: "var(--md-inverse-on-surface)",
           }}
         >
-          <p className="md-label-large">{score.toFixed(3)}</p>
+          <p className="md-label-large">{score.toFixed(2)}</p>
           <p className="md-body-small mt-1 break-words">
             {a.filename} · chunk {a.chunk_index}
           </p>
@@ -157,4 +173,12 @@ export default function Heatmap({
       )}
     </div>
   );
+}
+
+function hslToRgb(h: number, s: number, l: number): [number, number, number] {
+  const k = (m: number) => (m + h / 30) % 12;
+  const a = s * Math.min(l, 1 - l);
+  const f = (m: number) =>
+    l - a * Math.max(-1, Math.min(k(m) - 3, Math.min(9 - k(m), 1)));
+  return [Math.round(f(0) * 255), Math.round(f(8) * 255), Math.round(f(4) * 255)];
 }

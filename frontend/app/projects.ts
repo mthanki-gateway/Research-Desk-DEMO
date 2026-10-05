@@ -3,6 +3,7 @@ import {
   IconChat,
   IconAtlas,
   IconChip,
+  IconGrid,
   IconHowler,
   IconInterview,
   IconParley,
@@ -70,10 +71,11 @@ export const PROJECTS: Project[] = [
     blurb: "Call open models directly — text and speech — and watch what they cost.",
     Icon: IconChip,
     home: "/playground",
-    owns: ["/playground", "/transcribe"],
+    owns: ["/playground", "/transcribe", "/local"],
     nav: [
       { href: "/playground", label: "Playground", Icon: IconChip },
       { href: "/transcribe", label: "Transcribe", Icon: IconMic },
+      { href: "/local", label: "Local", Icon: IconGrid },
     ],
   },
   {
