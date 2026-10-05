@@ -4,12 +4,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import {
   buildGraph,
+  getChunk,
   getGraph,
+  type Chunk,
   type GraphEdge,
   type GraphNode,
   type KnowledgeGraph,
 } from "@/lib/api";
-import { useApp } from "../providers";
 import { Button } from "../md";
 import { IconSpinner } from "../icons";
 import { GROUND, INK, backdropTexture, type PlotTheme } from "./scatter";
@@ -60,6 +61,17 @@ const TYPES = Object.keys(TYPE_COLOURS.dark);
 /** World radius the layout is fitted to, and the default camera distance. */
 const FIT = 3.2;
 const HOME_RADIUS = 8.5;
+/**
+ * The scatter's point sizes and fog, exactly -- so a node and a chunk are the
+ * same kind of object on screen. Sizes are before the 1/depth divide and the
+ * clamp in the shader.
+ */
+const BASE_SIZE = 70;
+const HOVER_SIZE = 115;
+const SELECTED_SIZE = 165;
+const FOG_NEAR = 7;
+const FOG_FAR = 34;
+
 /** Labels drawn at once. Past this they overlap into a wall of text. */
 const MAX_LABELS = 28;
 
@@ -226,8 +238,22 @@ function Scene({
   theme: PlotTheme;
   onThemeChange: (t: PlotTheme) => void;
 }) {
-  const { showChunk } = useApp();
   const host = useRef<HTMLDivElement | null>(null);
+  // The passage behind a relation, shown INSIDE the graph's own panel. The
+  // app's chunk side bar lives outside this element, so in fullscreen it
+  // opened behind the graph where nobody could see it.
+  const [passage, setPassage] = useState<Chunk | "loading" | null>(null);
+  const [passageError, setPassageError] = useState<string | null>(null);
+  const openPassage = useCallback(async (id: string) => {
+    setPassage("loading");
+    setPassageError(null);
+    try {
+      setPassage(await getChunk(id));
+    } catch (e) {
+      setPassage(null);
+      setPassageError(e instanceof Error ? e.message : "Could not load the passage");
+    }
+  }, []);
   const labelLayer = useRef<HTMLDivElement | null>(null);
   const [hover, setHover] = useState<{ i: number; x: number; y: number } | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
@@ -265,6 +291,8 @@ function Scene({
   selectRef.current = setSelected;
   const labelsRef = useRef(labels);
   labelsRef.current = labels;
+  const bigRef = useRef(big);
+  bigRef.current = big;
 
   useEffect(() => {
     const el = host.current;
@@ -294,10 +322,8 @@ function Scene({
     nodes.forEach((nd, i) => {
       c.set(colours[nd.type] ?? colours.other);
       colourAttr.set([c.r, c.g, c.b], i * 3);
-      // Area, not radius, by connections -- a hub with forty edges should
-      // read as bigger, not as a disc that swallows its neighbours.
-      base[i] = 55 + Math.sqrt(nd.degree) * 26;
-      sizes[i] = base[i];
+      base[i] = BASE_SIZE;
+      sizes[i] = BASE_SIZE;
     });
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
@@ -305,50 +331,53 @@ function Scene({
     geometry.setAttribute("size", new THREE.BufferAttribute(sizes, 1));
     geometry.setAttribute("alpha", new THREE.BufferAttribute(alphas, 1));
 
-    // The scatter's shader, plus a ring for entities that appear in more than
-    // one document -- the connections nothing else in the app shows.
-    const ring = new Float32Array(n);
-    nodes.forEach((nd, i) => (ring[i] = nd.documents.length > 1 ? 1 : 0));
-    geometry.setAttribute("ring", new THREE.BufferAttribute(ring, 1));
+    // The scatter's shader, verbatim: soft light-source falloff, depth-scaled
+    // size clamped to 6..90px, and fog towards the backdrop's edge colour.
+    const ground = new THREE.Color(GROUND[theme]);
     const material = new THREE.ShaderMaterial({
       transparent: true,
       depthWrite: false,
       vertexColors: true,
       uniforms: {
-        uScale: { value: renderer.getPixelRatio() },
+        uFogColor: { value: ground },
+        uFogNear: { value: FOG_NEAR },
+        uFogFar: { value: FOG_FAR },
         uGlow: { value: theme === "dark" ? 1 : 0 },
+        uScale: { value: renderer.getPixelRatio() },
       },
       vertexShader: [
         "attribute float size;",
         "attribute float alpha;",
-        "attribute float ring;",
         "varying vec3 vColor;",
         "varying float vAlpha;",
-        "varying float vRing;",
+        "varying float vFog;",
+        "uniform float uFogNear;",
+        "uniform float uFogFar;",
         "uniform float uScale;",
         "void main() {",
-        "  vColor = color; vAlpha = alpha; vRing = ring;",
+        "  vColor = color;",
+        "  vAlpha = alpha;",
         "  vec4 mv = modelViewMatrix * vec4(position, 1.0);",
-        "  gl_PointSize = clamp(size / -mv.z, 6.0, 80.0) * uScale;",
+        "  gl_PointSize = clamp(size / -mv.z, 6.0, 90.0) * uScale;",
+        "  vFog = smoothstep(uFogNear, uFogFar, -mv.z);",
         "  gl_Position = projectionMatrix * mv;",
         "}",
       ].join("\n"),
       fragmentShader: [
+        "uniform vec3 uFogColor;",
         "uniform float uGlow;",
         "varying vec3 vColor;",
         "varying float vAlpha;",
-        "varying float vRing;",
+        "varying float vFog;",
         "void main() {",
-        "  float r = length(gl_PointCoord - vec2(0.5));",
+        "  vec2 d = gl_PointCoord - vec2(0.5);",
+        "  float r = length(d);",
         "  if (r > 0.5) discard;",
-        "  float core = 1.0 - smoothstep(0.0, 0.34, r);",
-        "  float band = vRing * (smoothstep(0.38, 0.42, r) - smoothstep(0.46, 0.5, r));",
+        "  float falloff = 1.0 - smoothstep(0.0, 0.5, r);",
         "  vec3 lift = mix(vec3(0.0), vec3(1.0), uGlow);",
-        "  vec3 col = mix(vColor, lift, pow(core, 6.0) * 0.45);",
-        "  col = mix(col, lift, band * 0.85);",
-        "  float a = max(core, band) * vAlpha;",
-        "  if (a < 0.02) discard;",
-        "  gl_FragColor = vec4(col, a);",
+        "  vec3 col = mix(vColor, lift, pow(falloff, 6.0) * 0.5);",
+        "  col = mix(col, uFogColor, vFog * 0.85);",
+        "  gl_FragColor = vec4(col, vAlpha * (0.25 + 0.75 * falloff));",
         "}",
       ].join("\n"),
     });
@@ -503,6 +532,34 @@ function Scene({
       wantRadius = Math.max(0.6, Math.min(30, wantRadius * Math.exp(e.deltaY * 0.0012)));
     };
     const onContext = (e: Event) => e.preventDefault();
+
+    // WASD flight, EXPANDED ONLY. In the page it would steal keys from
+    // scrolling and from every text field; fullscreen is where you explore.
+    // W/S along the view, A/D sideways, E/Q up and down, Shift for speed.
+    const keys = new Set<string>();
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!bigRef.current) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+      const k = e.key.toLowerCase();
+      if ("wasdqe".includes(k) && k.length === 1) {
+        keys.add(k);
+        e.preventDefault();
+      }
+      if (e.key === "Shift") keys.add("shift");
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      keys.delete(e.key.toLowerCase());
+      if (e.key === "Shift") keys.delete("shift");
+    };
+    const onBlur = () => keys.clear();
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
+    const fwd = new THREE.Vector3();
+    const side = new THREE.Vector3();
+    const upv = new THREE.Vector3(0, 1, 0);
+
     view.addEventListener("pointerdown", onDown);
     view.addEventListener("pointermove", onMove);
     view.addEventListener("pointerup", onUp);
@@ -512,7 +569,10 @@ function Scene({
 
     // ---- imperative API -------------------------------------------------
     api.current.emphasise = (sel, hov, type, onlyBridges) => {
-      const focus = sel ?? hov;
+      // HOVER NEVER DIMS. It only grows the dot under the cursor, as in the
+      // scatter; fading the whole graph every time the mouse crossed a node
+      // made it flicker as you moved. Only a click, a type or Bridges fades.
+      const focus = sel;
       const near = focus !== null ? new Set([focus, ...neighbours[focus]]) : null;
       const sizeAttr = geometry.getAttribute("size") as THREE.BufferAttribute;
       const alphaAttr = geometry.getAttribute("alpha") as THREE.BufferAttribute;
@@ -522,7 +582,7 @@ function Scene({
         else if (type) on = nodes[i].type === type;
         else if (onlyBridges) on = nodes[i].documents.length > 1;
         alphas[i] = on ? 1 : 0.1;
-        sizes[i] = base[i] * (i === sel ? 1.7 : i === hov ? 1.35 : 1);
+        sizes[i] = i === sel ? SELECTED_SIZE : i === hov ? HOVER_SIZE : base[i];
       }
       sizeAttr.needsUpdate = true;
       alphaAttr.needsUpdate = true;
@@ -587,6 +647,18 @@ function Scene({
     let frame = 0;
     const loop = () => {
       frame = requestAnimationFrame(loop);
+      if (keys.size && bigRef.current) {
+        // Scaled by distance, like pan, so flight feels the same at any zoom.
+        const step = radius * 0.012 * (keys.has("shift") ? 3 : 1);
+        camera.getWorldDirection(fwd);
+        side.crossVectors(fwd, upv).normalize();
+        if (keys.has("w")) wantTarget.addScaledVector(fwd, step);
+        if (keys.has("s")) wantTarget.addScaledVector(fwd, -step);
+        if (keys.has("d")) wantTarget.addScaledVector(side, step);
+        if (keys.has("a")) wantTarget.addScaledVector(side, -step);
+        if (keys.has("e")) wantTarget.addScaledVector(upv, step);
+        if (keys.has("q")) wantTarget.addScaledVector(upv, -step);
+      }
       const k = 0.11;
       yaw += (wantYaw - yaw) * k;
       pitch += (wantPitch - pitch) * k;
@@ -623,6 +695,9 @@ function Scene({
       view.removeEventListener("pointerleave", onLeave);
       view.removeEventListener("wheel", onWheel);
       view.removeEventListener("contextmenu", onContext);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
       geometry.dispose();
       material.dispose();
       edgeGeometry.dispose();
@@ -641,6 +716,7 @@ function Scene({
   }, [selected, hover, typeFocus, bridges, theme]);
 
   useEffect(() => {
+    setPassage(null);
     if (selected !== null) api.current.flyToNode(selected);
   }, [selected]);
 
@@ -657,12 +733,13 @@ function Scene({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if (selected !== null) setSelected(null);
+      if (passage) setPassage(null);
+      else if (selected !== null) setSelected(null);
       else if (expanded) setExpanded(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [expanded, selected]);
+  }, [expanded, selected, passage]);
   const toggleBig = useCallback(async () => {
     if (document.fullscreenElement) {
       await document.exitFullscreen().catch(() => {});
@@ -713,10 +790,8 @@ function Scene({
         </summary>
         <div className="mt-2 space-y-1.5">
           <p>
-            Each dot is an entity your documents name, coloured by type and sized by how
-            many relationships it has. Each line is a relationship a document states, such
-            as &ldquo;Acme acquired Beta&rdquo;. A white ring marks an entity that appears in
-            more than one document, which is where documents connect.
+            Each dot is an entity your documents name, coloured by type. Each line is a relationship a document states, such
+            as &ldquo;Acme acquired Beta&rdquo;. Bridges shows only the entities that appear in more than one document, which is where documents connect.
           </p>
           <p>
             Drag to orbit, shift-drag or right-drag to pan, and scroll to zoom. Hover a dot
@@ -724,7 +799,9 @@ function Scene({
             the documents say about it. Click a relationship in that list to open the
             passage it came from. Click a type in the legend to show only that type, or use
             Bridges to show only cross-document entities. Search jumps to an entity by
-            name. Esc clears the selection; Reset brings the whole graph back.
+            name. In Expand, fly with W/A/S/D, rise and sink with E/Q, and hold Shift to
+            go faster. Esc closes a passage, then the selection; Reset brings the whole
+            graph back.
           </p>
         </div>
       </details>
@@ -822,7 +899,7 @@ function Scene({
 
         <p className="pointer-events-none absolute bottom-3 left-3 z-10 text-xs" style={{ color: ink.faint }}>
           drag to orbit · shift-drag or right-drag to pan · scroll to zoom · click an entity
-          {big ? " · Esc to exit" : ""}
+          {big ? " · WASD to fly, E/Q up/down, Shift faster · Esc to exit" : ""}
           {bridges && " · showing entities found in more than one document"}
         </p>
 
@@ -848,7 +925,30 @@ function Scene({
                 Close
               </button>
             </div>
+            {passage ? (
+              <div className="flex min-h-0 flex-1 flex-col px-4 pb-4">
+                <button type="button" onClick={() => setPassage(null)} className="mb-2 self-start rounded-[var(--md-shape-sm)] px-2 py-1 text-xs" style={chip(false)}>
+                  ← Back to relations
+                </button>
+                {passage === "loading" ? (
+                  <p className="text-xs" style={{ color: ink.faint }}>Loading the passage…</p>
+                ) : (
+                  <>
+                    <p className="text-xs" style={{ color: ink.faint }}>
+                      {passage.filename} · {passage.heading ?? "no heading"} · chunk {passage.chunk_index}
+                      {passage.page ? ` · page ${passage.page}` : ""}
+                    </p>
+                    <div className="mt-2 min-h-0 flex-1 overflow-y-auto">
+                      <p className="whitespace-pre-wrap text-sm leading-relaxed">{passage.text}</p>
+                    </div>
+                  </>
+                )}
+              </div>
+            ) : (
             <ul className="min-h-0 flex-1 space-y-1.5 overflow-y-auto px-4 pb-4">
+              {passageError && (
+                <li className="text-xs" style={{ color: ink.faint }}>{passageError}</li>
+              )}
               {relations.length === 0 && (
                 <li className="text-xs" style={{ color: ink.faint }}>
                   Named in the documents, but no relationship to another entity was stated.
@@ -865,7 +965,7 @@ function Scene({
                       <div className="mt-1.5 flex flex-wrap items-center gap-2" style={{ color: ink.faint }}>
                         <span className="min-w-0 flex-1 truncate">{r.filename}</span>
                         {r.chunk_id && (
-                          <button type="button" className="underline" style={{ color: ink.text }} onClick={() => void showChunk(r.chunk_id!)}>
+                          <button type="button" className="underline" style={{ color: ink.text }} onClick={() => void openPassage(r.chunk_id!)}>
                             Open passage
                           </button>
                         )}
@@ -886,6 +986,7 @@ function Scene({
                 );
               })}
             </ul>
+            )}
           </div>
         )}
 
