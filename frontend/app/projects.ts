@@ -45,7 +45,9 @@ export type Project = {
   home: string;
   /** Every route this app owns, used to match the current project. */
   owns: string[];
-  nav: { href: string; label: string; Icon: typeof IconChat }[];
+  /** `feature` names the key-gated feature this item needs (lib/keys.ts);
+   *  without that key it is greyed out and points at Settings. */
+  nav: { href: string; label: string; Icon: typeof IconChat; feature?: string }[];
 };
 
 export const PROJECTS: Project[] = [
@@ -73,8 +75,8 @@ export const PROJECTS: Project[] = [
     home: "/playground",
     owns: ["/playground", "/transcribe", "/local"],
     nav: [
-      { href: "/playground", label: "Playground", Icon: IconChip },
-      { href: "/transcribe", label: "Transcribe", Icon: IconMic },
+      { href: "/playground", label: "Playground", Icon: IconChip, feature: "playground" },
+      { href: "/transcribe", label: "Transcribe", Icon: IconMic, feature: "transcribe" },
       { href: "/local", label: "Local", Icon: IconGrid },
     ],
   },

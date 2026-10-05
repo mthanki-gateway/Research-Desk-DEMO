@@ -972,6 +972,18 @@ class Settings(BaseSettings):
     # Only needed for legacy projects still on a shared HS256 secret. Projects
     # created after 2025-05-01 use asymmetric keys and need nothing here.
     supabase_jwt_secret: str = ""
+
+    # Encrypts the API keys people save in Settings (services/keys.py). Falls
+    # back to SUPABASE_JWT_SECRET so a dev stack works without one more
+    # variable; set it explicitly in production, because rotating the JWT
+    # secret would otherwise make every stored key unreadable.
+    key_encryption_secret: str = ""
+
+    # Bring-your-own-keys. Off: a feature works with the person's key OR the
+    # server's, and the server's keys are the fallback. On: the server's keys
+    # stop counting, and a feature whose key the person has not added is
+    # unavailable -- the setting for when clients pay for their own usage.
+    require_user_keys: bool = False
     supabase_jwt_audience: str = "authenticated"
 
     # One-time migration switch for POST /auth/claim, which assigns rows with

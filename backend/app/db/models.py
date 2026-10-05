@@ -506,3 +506,25 @@ class GraphHydration(Base):
     facts: Mapped[list] = mapped_column(JSONB, default=list)
     sources: Mapped[list] = mapped_column(JSONB, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class UserApiKey(Base):
+    """A provider key the person brought, encrypted at rest.
+
+    One row per owner and provider. The plaintext never comes back out of the
+    API -- only `last4`, so the settings page can show which key is in place
+    without being a way to read it.
+    """
+
+    __tablename__ = "provider_keys"
+    # Not "user_api_keys": a table by that name with a different shape
+    # already exists in some local databases, created outside this repo.
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    provider: Mapped[str] = mapped_column(String(32), index=True)
+    ciphertext: Mapped[str] = mapped_column(Text)
+    last4: Mapped[str] = mapped_column(String(8))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )

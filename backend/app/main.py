@@ -13,6 +13,7 @@ from app.agent.checkpointer import close_checkpointer, init_checkpointer
 from app.agent.graph import build_graph, set_graph
 from app.api import (
     atlas,
+    settings as settings_api,
     chat,
     documents,
     evaluation,
@@ -254,6 +255,7 @@ app.include_router(evaluation.router)
 app.include_router(profile.router)
 app.include_router(playground.router)
 app.include_router(atlas.router)
+app.include_router(settings_api.router)
 app.include_router(voice.router)
 app.include_router(live.router)
 app.include_router(howler.router)

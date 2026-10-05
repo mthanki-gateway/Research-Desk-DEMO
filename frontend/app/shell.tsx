@@ -1,13 +1,15 @@
 "use client";
 
 import Link from "next/link";
+import SettingsMenu from "./settings-menu";
+import { useFeatures } from "@/lib/keys";
 import { usePathname, useRouter } from "next/navigation";
 import { Fragment, Suspense, useEffect, useState } from "react";
 import { createSession } from "@/lib/api";
 import { useApp } from "./providers";
 import CommandPalette from "./command-palette";
 import ChunkPanel from "./chunk-panel";
-import { PROJECTS, SHARED_NAV, projectFor } from "./projects";
+import { PROJECTS, projectFor } from "./projects";
 import ParleyNav from "./parleyNav";
 // Rail widths live with the rail, so the margin reserved here and the rail
 // itself can never disagree about how wide it is.
@@ -65,6 +67,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
   } = useApp();
   const pathname = usePathname();
   const router = useRouter();
+  const features = useFeatures();
   const [open, setOpen] = useState(false);
   const [palette, setPalette] = useState(false);
   const [switcher, setSwitcher] = useState(false);
@@ -300,7 +303,11 @@ export default function Shell({ children }: { children: React.ReactNode }) {
             when there IS room it takes it and this stays its natural
             height. */}
         <nav className="md-nav-group scroll-thin min-h-0 space-y-1 overflow-y-auto pr-1">
-          {project.nav.map(({ href, label, Icon }) => {
+          {project.nav.map(({ href, label, Icon, feature }) => {
+            // GREYED OUT, not hidden, when the key it needs is missing: a
+            // feature that vanishes cannot tell anyone it exists. It still
+            // links somewhere useful -- to the key that unlocks it.
+            const locked = !!(feature && features && features[feature] === false);
             // LONGEST MATCH WINS, not merely "starts with".
             //
             // Parley owns both /parley and /parley/interview, and a plain
@@ -324,10 +331,13 @@ export default function Shell({ children }: { children: React.ReactNode }) {
               <Fragment key={href}>
               <Ripplable
                 as={Link}
-                href={href}
+                href={locked ? "/settings#keys" : href}
                 prefetch
                 className="md-nav-item"
                 data-active={active}
+                aria-disabled={locked || undefined}
+                title={locked ? `Add an API key in Settings to use ${label}` : undefined}
+                style={locked ? { opacity: 0.45 } : undefined}
               >
                 {/* The icon gets its own container so it can carry the hover
                     treatment independently of the row. See .md-nav-icon. */}
@@ -499,21 +509,10 @@ export default function Shell({ children }: { children: React.ReactNode }) {
         <div className="md-nav-group space-y-1">
           {/* Shared across every app rather than owned by one, which is why it
               lives here with the account row instead of in `project.nav`. */}
-          {SHARED_NAV.map(({ href, label, Icon }) => (
-            <Ripplable
-              key={href}
-              as={Link}
-              href={href}
-              prefetch
-              className="md-nav-item"
-              data-active={pathname.startsWith(href)}
-            >
-              <span className="md-nav-icon">
-                <Icon className="h-6 w-6" />
-              </span>
-              {label}
-            </Ripplable>
-          ))}
+          {/* Settings, with Profile inside its menu alongside API keys and
+              feature access -- one entry for "things about me and my account"
+              rather than a row each. */}
+          <SettingsMenu />
 
           {account && (
             <div

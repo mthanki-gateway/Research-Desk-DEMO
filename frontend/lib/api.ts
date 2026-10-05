@@ -18,7 +18,7 @@ export const browserBase =
  * With auth disabled `getAccessToken()` returns null and no header is sent,
  * which is precisely what the backend's anonymous mode expects.
  */
-async function authedFetch(
+export async function authedFetch(
   path: string,
   init: RequestInit = {},
 ): Promise<Response> {
@@ -250,7 +250,7 @@ export async function getHealth(): Promise<Health | { error: string }> {
 }
 
 /** Pull the API's error detail out, rather than showing a bare status code. */
-async function detail(res: Response): Promise<string> {
+export async function detail(res: Response): Promise<string> {
   try {
     const body = await res.json();
     if (typeof body?.detail === "string") return body.detail;
