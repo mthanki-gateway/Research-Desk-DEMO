@@ -1640,6 +1640,23 @@ export function ProfileCard({
         </span>
       </div>
 
+      {/* The live model only talks now; the profile is written afterwards
+          from a proper transcription of the recording. Without this an empty
+          card during the call reads as the interview not working. */}
+      {profile.source !== "transcript" && (
+        <p
+          className="md-body-small mb-3 rounded-[var(--md-shape-sm)] p-2.5"
+          style={{
+            background: "var(--md-surface-container-high)",
+            color: "var(--md-on-surface-variant)",
+          }}
+        >
+          {profile.ended
+            ? "Transcribing the recording and writing the profile — this appears in a minute or two. Refresh to see it."
+            : "The conversation is recorded. Once it ends, it is transcribed and the profile is written from what was actually said."}
+        </p>
+      )}
+
       {typeof profile.summary === "string" && profile.summary && (
         <p
           className="md-body-medium mb-3 italic"

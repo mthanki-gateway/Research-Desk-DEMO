@@ -528,7 +528,19 @@ async def live_socket(
             # `closed` is set by the downlink when `end_interview` comes back,
             # so a participant-initiated close can wait for the model's
             # account rather than polling for it.
-            turn_state: dict[str, Any] = {"turns": 0, "closed": asyncio.Event()}
+            turn_state: dict[str, Any] = {
+                "turns": 0,
+                "closed": asyncio.Event(),
+                # THE RECORDING. Interviews keep the participant's own audio,
+                # turn by turn, because the live model is only the voice now:
+                # it mishears names and tools, so the profile is written
+                # afterwards from a proper transcription of these clips, and
+                # emotion analysis reads the same audio. Speak mode keeps
+                # nothing -- it answers questions, there is nothing to analyse.
+                "record": chosen_mode in ("interview", "howler"),
+                "pcm": bytearray(),
+                "clip": None,
+            }
 
             uplink = asyncio.create_task(_uplink(ws, session, turn_state, chat.id))
             downlink = asyncio.create_task(
@@ -593,6 +605,8 @@ async def _uplink(ws: WebSocket, session, turn_state: dict, chat_id=None) -> Non
 
         chunk = message.get("bytes")
         if chunk:
+            if turn_state.get("record"):
+                turn_state["pcm"].extend(chunk)
             await session.send_realtime_input(
                 audio=types.Blob(
                     data=chunk, mime_type=f"audio/pcm;rate={live.INPUT_RATE}"
@@ -641,8 +655,14 @@ async def _uplink(ws: WebSocket, session, turn_state: dict, chat_id=None) -> Non
         # constantly while speaking. These two markers are now the only things
         # that open and close a turn.
         if kind == "start":
+            turn_state["pcm"] = bytearray()
             await session.send_realtime_input(activity_start=types.ActivityStart())
         elif kind == "end":
+            # The button marks the participant's turn exactly, so the clip is
+            # exactly what they said -- no voice-activity guessing involved.
+            if turn_state.get("record") and turn_state["pcm"]:
+                turn_state["clip"] = bytes(turn_state["pcm"])
+            turn_state["pcm"] = bytearray()
             turn_state["turns"] += 1
             await session.send_realtime_input(activity_end=types.ActivityEnd())
 
@@ -760,6 +780,7 @@ async def _downlink(
                             "".join(said).strip(),
                             sources,
                             tools,
+                            clip=turn_state.get("clip"),
                         )
                     )
                     # THE COMPLETED EXCHANGE, AS ONE EVENT.

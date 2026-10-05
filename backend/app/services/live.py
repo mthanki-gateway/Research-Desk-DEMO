@@ -162,8 +162,15 @@ def _declarations(
     if mode_of(mode) in ("interview", "howler"):
         # Howler passes the schema generated from its brief; Interview passes
         # nothing and gets the built-in one.
-        declared.append(profile.declaration(fields))
-        declared.append(profile.end_declaration())
+        #
+        # ONLY THE END TOOL NOW. The live model used to fill the profile as it
+        # went with record_profile, and it filled it from what it HEARD --
+        # which, for a native audio model, means misheard names, tools and
+        # numbers written straight into the record. It is the voice of the
+        # interview and nothing else: the profile is written after the call
+        # from a proper transcription (services/interview_pass.py), where the
+        # transcript is the decision maker.
+        declared.append(END_ONLY)
 
     out = []
     for spec in declared:
@@ -213,8 +220,38 @@ def _declarations(
     return out
 
 
+# Ending is the one thing left to the live model, because only it knows the
+# conversation has reached its natural close. No summary, no demeanour, no
+# moments: those were judgements made from a lossy hearing, and they are now
+# made from the transcript and the audio instead.
+END_ONLY = {
+    "name": profile.END_TOOL,
+    "description": (
+        "End the interview. Call this only after you have covered the topics, "
+        "told the person you have what you need, asked whether there is "
+        "anything they would like to add, and heard their answer. After this "
+        "the microphone will not reopen."
+    ),
+    "parameters": {"type": "object", "properties": {}, "required": []},
+}
+
+
+def _topics(fields: list[dict] | None) -> str:
+    """The field list as plain topics for the interviewer to cover."""
+    rows = []
+    for f in profile._fields(fields):
+        label = f.get("label") or f["name"]
+        need = "" if f.get("required", True) else " (welcome, not required)"
+        rows.append(f"- {label}: {f.get('description', '')}{need}")
+    return "\n".join(rows) or "(no topics listed)"
+
+
 def _system(
-    mode: str, brief: str, participant: str, vocabulary: list[str] | None = None
+    mode: str,
+    brief: str,
+    participant: str,
+    vocabulary: list[str] | None = None,
+    fields: list[dict] | None = None,
 ) -> str:
     """The system prompt for this mode, with Howler's slots filled.
 
@@ -224,7 +261,7 @@ def _system(
     """
     text = MODES[mode_of(mode)]["system"]
     if mode_of(mode) != "howler":
-        return text
+        return text.replace("{topics}", _topics(None))
     terms = ", ".join(vocabulary or [])
     return (
         text.replace("{brief}", brief.strip() or "(no brief given)")
@@ -233,6 +270,7 @@ def _system(
             participant.strip() or "(nothing known about them yet)",
         )
         .replace("{vocabulary}", terms or "(none listed)")
+        .replace("{topics}", _topics(fields))
     )
 
 
@@ -265,7 +303,7 @@ def config(
         tools=[types.Tool(function_declarations=_declarations(mode, fields))],
         system_instruction=types.Content(
             parts=[
-                types.Part(text=_system(mode, brief, participant, vocabulary) + reach)
+                types.Part(text=_system(mode, brief, participant, vocabulary, fields) + reach)
             ]
         ),
         # Both transcripts are requested purely so the SCREEN can show what was
@@ -590,8 +628,13 @@ async def save_turn(
     answer: str,
     sources: list[dict],
     tools: list[str],
+    clip: bytes | None = None,
 ) -> None:
     """Append one spoken exchange. Never raises.
+
+    `clip` is the participant's raw 16kHz PCM for this turn, interviews only.
+    It is stored as WAV and its key goes on the user row, where the post-call
+    transcription and emotion passes find it.
 
     A failure to write the transcript must not end the call -- the
     conversation is happening in the socket, and losing a row is a smaller harm
@@ -601,18 +644,23 @@ async def save_turn(
     from app.db.models import ChatSession, Message, Role
     from app.db.session import SessionLocal
 
-    if not question and not answer:
+    if not question and not answer and not clip:
         return
 
     try:
         async with SessionLocal() as db:
+            meta: dict = {"spoken": True}
+            if clip:
+                key = await _store_clip(db, session_id, clip)
+                if key:
+                    meta["audio_key"] = key
             db.add(
                 Message(
                     session_id=session_id,
                     role=Role.user,
                     content=question or "(nothing intelligible)",
                     sources=[],
-                    agent_meta={"spoken": True},
+                    agent_meta=meta,
                 )
             )
             db.add(
@@ -910,8 +958,53 @@ async def name_from_context(db, chat) -> None:
             chat.title = title[:120]
 
 
+def _wav(pcm: bytes, rate: int = INPUT_RATE) -> bytes:
+    """Raw 16-bit mono PCM wrapped in a WAV header."""
+    import io
+    import wave
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(pcm)
+    return buf.getvalue()
+
+
+async def _store_clip(db, session_id: uuid.UUID, clip: bytes) -> str | None:
+    """Store one participant turn as WAV. Returns its key, or None. Never raises.
+
+    The turn number is the count of user rows so far, so keys sort in the
+    order they were spoken.
+    """
+    from sqlalchemy import func, select
+
+    from app.db.models import ChatSession, Message, Role
+    from app.services.storage import get_storage, media_key_for
+
+    try:
+        chat = await db.get(ChatSession, session_id)
+        n = (
+            await db.execute(
+                select(func.count())
+                .select_from(Message)
+                .where(Message.session_id == session_id, Message.role == Role.user)
+            )
+        ).scalar_one()
+        key = media_key_for(chat.owner_id if chat else None, session_id, int(n) + 1, "wav")
+        await get_storage().put(key, _wav(clip), "audio/wav")
+        return key
+    except Exception as exc:  # noqa: BLE001 - never interrupt a live call
+        log.warning("live_clip_store_failed", error=str(exc)[:200])
+        return None
+
+
 async def _queue_analysis(session_id: uuid.UUID, owner_id: str | None) -> None:
-    """Queue the emotion pass for a finished interview. Never raises.
+    """Queue the post-call pass for a finished interview. Never raises.
+
+    The TRANSCRIPT job, which transcribes the recording properly, writes the
+    profile from it, and then queues the emotion pass on the same audio.
 
     ENQUEUED WHETHER OR NOT ANYTHING CAN RUN IT YET. The job is the record that
     this interview is waiting for analysis, so a deployment too small for the
@@ -920,7 +1013,7 @@ async def _queue_analysis(session_id: uuid.UUID, owner_id: str | None) -> None:
     lose every interview held before that.
     """
     from app.services import jobs
-    from app.services.analysis import KIND, SUBJECT
+    from app.services.interview_pass import KIND, SUBJECT
 
     await jobs.enqueue(
         KIND,

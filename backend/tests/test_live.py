@@ -60,11 +60,24 @@ class TestToolsAreShared:
         """Worth being able to place a company or a technology they mention."""
         assert "search_web" in {d.name for d in live._declarations("interview")}
 
-    def test_only_the_interview_can_record_a_profile(self):
-        assert "record_profile" in {
-            d.name for d in live._declarations("interview")
-        }
-        assert "record_profile" not in {d.name for d in live._declarations("speak")}
+    def test_the_live_model_records_nothing(self):
+        """It is the voice of the interview, not its note-taker.
+
+        The profile is written after the call from a proper transcription
+        (interview_pass.py), because the live model mishears names, tools and
+        numbers -- and when it held record_profile, those went straight into
+        the record. It keeps only the tool that says the conversation is over.
+        """
+        for mode in ("interview", "howler"):
+            names = {d.name for d in live._declarations(mode)}
+            assert "record_profile" not in names
+            assert "end_interview" in names
+        assert "end_interview" not in {d.name for d in live._declarations("speak")}
+
+    def test_ending_carries_no_judgements(self):
+        """No summary, demeanour or moments from a lossy hearing."""
+        end = next(d for d in live._declarations("interview") if d.name == "end_interview")
+        assert not (end.parameters and end.parameters.properties)
 
     def test_a_tool_with_no_arguments_declares_no_schema(self):
         """An empty OBJECT schema is REJECTED by the API.
@@ -288,7 +301,7 @@ class TestModes:
             "one question that earns its place",
             "mines the answer before it asks again",
             "It does not lead",
-            "Quote them",
+            "asks the person to spell it",
         ):
             assert craft in " ".join(howler.split()), craft
 
@@ -324,18 +337,17 @@ class TestModes:
             {"name": "budget", "label": "Budget", "description": "x",
              "type": "STRING", "required": True},
         ]
-        names = {
-            d.name
-            for d in live._declarations("howler", fields)
-        }
-        assert "record_profile" in names
-        record = next(
-            d for d in live._declarations("howler", fields) if d.name == "record_profile"
-        )
-        properties = set(record.parameters.properties or {})
-        assert "budget" in properties
+        # The live model is told the TOPICS from its own schema, in its prompt;
+        # the profile itself is extracted from the transcript afterwards with
+        # the same schema.
+        text = live._system("howler", "a brief", "", None, fields)
+        assert "Budget" in text
         # Interview's fields must not appear in a Howler session.
-        assert "years_experience" not in properties
+        assert "years of professional experience" not in text
+        from app.services import interview_pass
+
+        properties = set(interview_pass._schema(fields)["properties"])
+        assert "budget" in properties and "years_experience" not in properties
 
     def test_they_are_stored_separately(self):
         """Interviews must not appear in the Speak list, or the reverse.
