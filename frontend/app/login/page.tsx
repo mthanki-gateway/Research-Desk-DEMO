@@ -64,9 +64,10 @@ export default function Login() {
     if (!supabase) return;
     setBusy("google");
     setError(null);
+    const redirectUrl = process.env.NEXT_PUBLIC_OAUTH_REDIRECT_URL || `${window.location.origin}/auth/callback`;
     const { error: err } = await supabase.auth.signInWithOAuth({
       provider: "google",
-      options: { redirectTo: `${window.location.origin}/auth/callback` },
+      options: { redirectTo: redirectUrl },
     });
     if (err) {
       setError(err.message);
@@ -81,9 +82,10 @@ export default function Login() {
     if (!supabase || !email.trim()) return;
     setBusy("email");
     setError(null);
+    const redirectUrl = process.env.NEXT_PUBLIC_OAUTH_REDIRECT_URL || `${window.location.origin}/auth/callback`;
     const { error: err } = await supabase.auth.signInWithOtp({
       email: email.trim(),
-      options: { emailRedirectTo: `${window.location.origin}/auth/callback` },
+      options: { emailRedirectTo: redirectUrl },
     });
     if (err) setError(err.message);
     else setSent(true);

@@ -132,14 +132,21 @@ class TestTheRetryReachesTheWeb:
         assert calls["documents"]
         assert calls["web"] == []
 
-    async def test_a_scoped_question_stays_scoped(self, monkeypatch):
-        """"Search only THESE documents" must not quietly reach the internet."""
+    async def test_selected_documents_do_not_wall_off_the_web(self, monkeypatch):
+        """Selecting documents means "use these", not "use nothing else".
+
+        This used to assert the opposite, and it was the cause of the turn
+        that kept failing: "of the plants in the book, which is biggest" with
+        the book selected re-searched the book on every retry, because the
+        sizes were never in it. The selection scopes the DOCUMENT search; the
+        gap the critic raised can only be filled by a different source.
+        """
         calls = await self._run(
             monkeypatch,
             seen={"chunk-1"},
             document_ids=["6f1a5b3c-0000-4000-8000-000000000000"],
         )
-        assert calls["web"] == []
+        assert calls["web"] != []
 
     async def test_an_unconfigured_web_is_not_called(self, monkeypatch):
         calls = await self._run(monkeypatch, seen={"chunk-1"}, web_enabled=False)

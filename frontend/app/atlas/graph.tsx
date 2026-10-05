@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import * as THREE from "three";
 import {
   buildGraph,
   getGraph,
@@ -11,47 +12,63 @@ import {
 import { useApp } from "../providers";
 import { Button } from "../md";
 import { IconSpinner } from "../icons";
+import { GROUND, INK, backdropTexture, type PlotTheme } from "./scatter";
 
 /**
- * Who and what the corpus mentions, and what it SAYS connects them.
+ * Who and what the corpus mentions, and what it SAYS connects them -- as a
+ * space you fly through, built the same way as the scatter above it.
  *
  * The scatter shows passages that are near each other in meaning; this shows
- * claims. Every edge is a sentence in a document, and clicking it opens that
- * passage -- an edge that cannot be checked would be the model's opinion
- * dressed as the corpus's.
+ * claims. Every edge is a sentence in a document, and the reading panel opens
+ * it -- an edge that cannot be checked would be the model's opinion dressed as
+ * the corpus's.
  *
- * A 2D force layout on a canvas, written here rather than imported: it is a
- * hundred lines, it needs no image rebuild, and at the 250-node cap the
- * simulation is a few milliseconds a frame. It settles and then STOPS -- a
- * layout that keeps jiggling is the most distracting thing a graph can do.
+ * SAME CONTROLS AS THE SCATTER, deliberately: drag to orbit, shift- or
+ * right-drag to pan, scroll to zoom, eased fly-to, Reset, Expand, Light/Dark.
+ * Two views on one page that steer differently is two things to learn.
+ *
+ * LAYOUT IS COMPUTED ONCE, UP FRONT, then frozen. A 3D force simulation runs
+ * a few hundred iterations before the first frame (tens of milliseconds at the
+ * 250-node cap) and the result is scaled to fit the camera. A layout that keeps
+ * settling on screen is the most distracting thing a graph can do, and a moving
+ * node cannot be clicked.
  */
 
-const TYPE_COLOURS: Record<string, string> = {
-  person: "#f2a7c3",
-  organization: "#8fb8ff",
-  place: "#9be0b4",
-  product: "#ffd27a",
-  concept: "#c8b6ff",
-  event: "#ffab91",
-  other: "#b8bfd6",
+/** Entity-type colours, one set per ground -- same reasoning as PALETTES. */
+const TYPE_COLOURS: Record<PlotTheme, Record<string, string>> = {
+  dark: {
+    person: "#ff8ae2",
+    organization: "#4fd1ff",
+    place: "#34e3a4",
+    product: "#ffc247",
+    concept: "#a78bfa",
+    event: "#ffa06b",
+    other: "#b8bfd6",
+  },
+  light: {
+    person: "#b52f93",
+    organization: "#0369a1",
+    place: "#00855a",
+    product: "#a86400",
+    concept: "#5b3fd6",
+    event: "#c2410c",
+    other: "#5a6178",
+  },
 };
+const TYPES = Object.keys(TYPE_COLOURS.dark);
 
-type Sim = GraphNode & { x: number; y: number; vx: number; vy: number };
+/** World radius the layout is fitted to, and the default camera distance. */
+const FIT = 3.2;
+const HOME_RADIUS = 8.5;
+/** Labels drawn at once. Past this they overlap into a wall of text. */
+const MAX_LABELS = 28;
 
-export default function GraphView() {
+type Props = { theme: PlotTheme; onThemeChange: (t: PlotTheme) => void };
+
+export default function GraphView({ theme, onThemeChange }: Props) {
   const [data, setData] = useState<KnowledgeGraph | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [queuing, setQueuing] = useState(false);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [hovered, setHovered] = useState<string | null>(null);
-  const canvas = useRef<HTMLCanvasElement | null>(null);
-  const sim = useRef<Sim[]>([]);
-  const view = useRef({ scale: 1, x: 0, y: 0 });
-  const { showChunk } = useApp();
-  // Read by the draw loop. Refs, not effect dependencies: a dependency would
-  // restart the simulation on every hover and throw the settled layout away.
-  const focusRef = useRef<string | null>(null);
-  focusRef.current = selected ?? hovered;
 
   const load = useCallback(async () => {
     try {
@@ -66,162 +83,12 @@ export default function GraphView() {
     void load();
   }, [load]);
 
-  // Poll only while extraction is actually running, and slowly: a job is a
-  // few seconds per document, and nothing here needs to be live.
+  // Poll only while extraction is actually running, and slowly.
   useEffect(() => {
     if (!data?.pending) return;
     const t = setTimeout(() => void load(), 4000);
     return () => clearTimeout(t);
   }, [data, load]);
-
-  const byId = useMemo(() => {
-    const m = new Map<string, number>();
-    data?.nodes.forEach((n, i) => m.set(n.id, i));
-    return m;
-  }, [data]);
-
-  // ---- layout ---------------------------------------------------------
-  useEffect(() => {
-    const el = canvas.current;
-    if (!el || !data || data.nodes.length === 0) return;
-    const ctx = el.getContext("2d");
-    if (!ctx) return;
-
-    // Deterministic start on a spiral, so the same graph settles into the
-    // same picture on every visit instead of a new random one.
-    sim.current = data.nodes.map((n, i) => {
-      const a = i * 2.39996;
-      const r = 12 * Math.sqrt(i + 1);
-      return { ...n, x: Math.cos(a) * r, y: Math.sin(a) * r, vx: 0, vy: 0 };
-    });
-    const nodes = sim.current;
-    const links = data.edges
-      .map((e) => [byId.get(e.source), byId.get(e.target)] as const)
-      .filter((l): l is readonly [number, number] => l[0] !== undefined && l[1] !== undefined);
-
-    let alpha = 1;
-    let frame = 0;
-    const dpr = Math.min(window.devicePixelRatio, 2);
-
-    const stars = Array.from({ length: 160 }, (_, i) => {
-      const h = Math.sin(i * 12.9898) * 43758.5453;
-      const f = h - Math.floor(h);
-      const g = Math.sin(i * 78.233) * 12345.678;
-      return { x: f, y: g - Math.floor(g), b: 0.15 + (i % 7) / 30 };
-    });
-
-    const step = () => {
-      // Repulsion between every pair: O(n^2), fine at 250 nodes.
-      for (let i = 0; i < nodes.length; i++) {
-        for (let j = i + 1; j < nodes.length; j++) {
-          const a = nodes[i], b = nodes[j];
-          let dx = a.x - b.x, dy = a.y - b.y;
-          const d2 = dx * dx + dy * dy || 0.01;
-          const f = (900 / d2) * alpha;
-          dx *= f; dy *= f;
-          a.vx += dx; a.vy += dy; b.vx -= dx; b.vy -= dy;
-        }
-      }
-      for (const [i, j] of links) {
-        const a = nodes[i], b = nodes[j];
-        const dx = b.x - a.x, dy = b.y - a.y;
-        const d = Math.sqrt(dx * dx + dy * dy) || 1;
-        const f = ((d - 70) / d) * 0.04 * alpha;
-        a.vx += dx * f; a.vy += dy * f; b.vx -= dx * f; b.vy -= dy * f;
-      }
-      for (const n of nodes) {
-        // Gentle pull to the centre so disconnected islands do not drift off.
-        n.vx -= n.x * 0.004 * alpha;
-        n.vy -= n.y * 0.004 * alpha;
-        n.x += n.vx; n.y += n.vy;
-        n.vx *= 0.6; n.vy *= 0.6;
-      }
-      alpha *= 0.985;
-    };
-
-    const draw = () => {
-      const w = el.clientWidth, h = el.clientHeight;
-      if (el.width !== w * dpr) { el.width = w * dpr; el.height = h * dpr; }
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.fillStyle = "#0b0d16";
-      ctx.fillRect(0, 0, w, h);
-      for (const s of stars) {
-        ctx.fillStyle = `rgba(220,228,255,${s.b})`;
-        ctx.fillRect(s.x * w, s.y * h, 1, 1);
-      }
-      const v = view.current;
-      ctx.translate(w / 2 + v.x, h / 2 + v.y);
-      ctx.scale(v.scale, v.scale);
-
-      const focus = focusRef.current;
-      const near = new Set<number>();
-      if (focus !== null) {
-        const fi = byId.get(focus);
-        if (fi !== undefined) {
-          near.add(fi);
-          for (const [i, j] of links) {
-            if (i === fi) near.add(j);
-            if (j === fi) near.add(i);
-          }
-        }
-      }
-      const dim = (i: number) => focus !== null && !near.has(i);
-
-      ctx.lineWidth = 1 / v.scale;
-      for (const [i, j] of links) {
-        const a = nodes[i], b = nodes[j];
-        ctx.strokeStyle = dim(i) || dim(j) ? "rgba(160,170,210,0.06)" : "rgba(160,170,210,0.35)";
-        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
-      }
-      nodes.forEach((n, i) => {
-        const r = 3 + Math.sqrt(n.degree) * 2;
-        ctx.globalAlpha = dim(i) ? 0.2 : 1;
-        ctx.fillStyle = TYPE_COLOURS[n.type] ?? TYPE_COLOURS.other;
-        ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2); ctx.fill();
-        if (n.documents.length > 1) {
-          // A ring for entities that bridge documents -- the connections
-          // nothing else in the app shows.
-          ctx.strokeStyle = "rgba(255,255,255,0.8)";
-          ctx.lineWidth = 1.2 / v.scale;
-          ctx.beginPath(); ctx.arc(n.x, n.y, r + 2.5, 0, Math.PI * 2); ctx.stroke();
-        }
-        // Labels only where they can be read: well-connected nodes, and
-        // everything near the focus. Labelling all 250 is a wall of text.
-        if (!dim(i) && (n.degree >= 3 || near.has(i))) {
-          ctx.fillStyle = "rgba(230,234,250,0.9)";
-          ctx.font = `${11 / v.scale}px system-ui, sans-serif`;
-          ctx.fillText(n.name, n.x + r + 3, n.y + 3);
-        }
-        ctx.globalAlpha = 1;
-      });
-    };
-
-    const loop = () => {
-      if (alpha > 0.02) step();
-      draw();
-      frame = requestAnimationFrame(loop);
-    };
-    loop();
-    return () => cancelAnimationFrame(frame);
-  }, [data, byId]);
-
-  // ---- interaction ----------------------------------------------------
-  const nodeAt = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const el = e.currentTarget;
-    const rect = el.getBoundingClientRect();
-    const v = view.current;
-    const x = (e.clientX - rect.left - rect.width / 2 - v.x) / v.scale;
-    const y = (e.clientY - rect.top - rect.height / 2 - v.y) / v.scale;
-    let best: string | null = null;
-    let bestD = 14 / v.scale;
-    for (const n of sim.current) {
-      const d = Math.hypot(n.x - x, n.y - y);
-      if (d < bestD) { bestD = d; best = n.id; }
-    }
-    return best;
-  };
-
-  const drag = useRef<{ x: number; y: number; moved: boolean } | null>(null);
 
   async function backfill() {
     setQueuing(true);
@@ -238,14 +105,9 @@ export default function GraphView() {
   if (error) {
     return <p className="md-body-medium" style={{ color: "var(--md-error)" }}>{error}</p>;
   }
-  if (!data) return <div className="md-skeleton h-[26rem]" aria-hidden />;
+  if (!data) return <div className="md-skeleton h-[30rem]" aria-hidden />;
 
   const missing = data.n_documents - data.n_documents_with_graph;
-  const node = selected ? data.nodes[byId.get(selected) ?? -1] : undefined;
-  const relations: GraphEdge[] = selected
-    ? data.edges.filter((e) => e.source === selected || e.target === selected)
-    : [];
-  const nameOf = (id: string) => data.nodes[byId.get(id) ?? -1]?.name ?? id;
 
   return (
     <div className="space-y-3">
@@ -257,7 +119,7 @@ export default function GraphView() {
           {data.pending > 0 && ` Extracting ${data.pending} more…`}
         </p>
         {missing > 0 && data.pending === 0 && (
-          <Button variant="tonal" onClick={() => void backfill()} disabled={queuing}>
+          <Button variant="outlined" onClick={() => void backfill()} disabled={queuing}>
             {queuing && <IconSpinner />}
             Build graph for {missing} document{missing === 1 ? "" : "s"}
           </Button>
@@ -267,7 +129,7 @@ export default function GraphView() {
       {data.nodes.length === 0 ? (
         <div
           className="flex h-[20rem] items-center justify-center rounded-[var(--md-shape-lg)]"
-          style={{ background: "#0b0d16", color: "rgba(230,234,250,0.75)" }}
+          style={{ background: GROUND[theme], color: INK[theme].faint }}
         >
           <p className="md-body-medium max-w-sm text-center">
             {data.pending > 0
@@ -276,86 +138,780 @@ export default function GraphView() {
           </p>
         </div>
       ) : (
-        <div className="grid gap-4 md:grid-cols-[1fr_18rem]">
-          <canvas
-            ref={canvas}
-            className="h-[30rem] w-full rounded-[var(--md-shape-lg)]"
-            style={{ cursor: hovered ? "pointer" : "grab" }}
-            aria-label="Knowledge graph. Click an entity to see its relations."
-            onMouseMove={(e) => {
-              const d = drag.current;
-              if (d) {
-                view.current.x += e.clientX - d.x;
-                view.current.y += e.clientY - d.y;
-                d.moved ||= Math.abs(e.clientX - d.x) + Math.abs(e.clientY - d.y) > 2;
-                d.x = e.clientX; d.y = e.clientY;
-                return;
-              }
-              setHovered(nodeAt(e));
-            }}
-            onMouseDown={(e) => { drag.current = { x: e.clientX, y: e.clientY, moved: false }; }}
-            onMouseUp={(e) => {
-              const moved = drag.current?.moved;
-              drag.current = null;
-              if (!moved) setSelected(nodeAt(e));
-            }}
-            onMouseLeave={() => { drag.current = null; setHovered(null); }}
-            onWheel={(e) => {
-              const v = view.current;
-              v.scale = Math.min(4, Math.max(0.3, v.scale * (e.deltaY < 0 ? 1.1 : 0.9)));
-            }}
-          />
-          <aside className="space-y-3">
-            {!node ? (
-              <>
-                <p className="md-body-small" style={{ color: "var(--md-on-surface-variant)" }}>
-                  Click an entity to see what your documents say about it. A ring marks
-                  an entity that appears in more than one document.
-                </p>
-                <ul className="md-label-small flex flex-wrap gap-2">
-                  {Object.entries(TYPE_COLOURS).map(([t, c]) => (
-                    <li key={t} className="flex items-center gap-1.5">
-                      <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: c }} />
-                      {t}
-                    </li>
-                  ))}
-                </ul>
-              </>
-            ) : (
-              <>
-                <div>
-                  <p className="md-title-small">{node.name}</p>
-                  <p className="md-body-small" style={{ color: "var(--md-on-surface-variant)" }}>
-                    {node.type} · {node.mentions} mention{node.mentions === 1 ? "" : "s"} ·{" "}
-                    {node.documents.join(", ")}
-                  </p>
-                </div>
-                <ul className="space-y-1.5">
-                  {relations.map((r, i) => (
-                    <li key={i}>
-                      <button
-                        type="button"
-                        disabled={!r.chunk_id}
-                        onClick={() => r.chunk_id && void showChunk(r.chunk_id)}
-                        className="md-state md-body-small w-full rounded-[var(--md-shape-sm)] px-2 py-1.5 text-left"
-                        style={{ background: "var(--md-surface-container-high)" }}
-                        title="Open the passage that says this"
-                      >
-                        <strong>{nameOf(r.source)}</strong> {r.predicate}{" "}
-                        <strong>{nameOf(r.target)}</strong>
-                        <span className="block opacity-70">{r.filename}</span>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-                <Button variant="text" onClick={() => setSelected(null)}>
-                  Clear
-                </Button>
-              </>
-            )}
-          </aside>
-        </div>
+        <Scene data={data} theme={theme} onThemeChange={onThemeChange} />
       )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+
+/** Positions for every node, fitted into a sphere of radius FIT. */
+function layout(nodes: GraphNode[], edges: GraphEdge[]): Float32Array {
+  const n = nodes.length;
+  const index = new Map(nodes.map((nd, i) => [nd.id, i]));
+  const links = edges
+    .map((e) => [index.get(e.source), index.get(e.target)] as const)
+    .filter((l): l is readonly [number, number] => l[0] !== undefined && l[1] !== undefined);
+
+  // Deterministic start on a Fibonacci sphere, so the same graph settles into
+  // the same shape on every visit.
+  const p = new Float32Array(n * 3);
+  const v = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    const y = 1 - (2 * (i + 0.5)) / n;
+    const r = Math.sqrt(1 - y * y);
+    const a = i * 2.39996;
+    p[i * 3] = Math.cos(a) * r * 10;
+    p[i * 3 + 1] = y * 10;
+    p[i * 3 + 2] = Math.sin(a) * r * 10;
+  }
+
+  const ITER = 320;
+  for (let it = 0; it < ITER; it++) {
+    const alpha = 1 - it / ITER;
+    // Repulsion, every pair. O(n^2) is fine at 250 nodes.
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const dx = p[i * 3] - p[j * 3];
+        const dy = p[i * 3 + 1] - p[j * 3 + 1];
+        const dz = p[i * 3 + 2] - p[j * 3 + 2];
+        const d2 = dx * dx + dy * dy + dz * dz + 0.01;
+        const f = (4 / d2) * alpha;
+        v[i * 3] += dx * f; v[i * 3 + 1] += dy * f; v[i * 3 + 2] += dz * f;
+        v[j * 3] -= dx * f; v[j * 3 + 1] -= dy * f; v[j * 3 + 2] -= dz * f;
+      }
+    }
+    // Springs along edges.
+    for (const [i, j] of links) {
+      const dx = p[j * 3] - p[i * 3];
+      const dy = p[j * 3 + 1] - p[i * 3 + 1];
+      const dz = p[j * 3 + 2] - p[i * 3 + 2];
+      const d = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
+      const f = ((d - 1.6) / d) * 0.08 * alpha;
+      v[i * 3] += dx * f; v[i * 3 + 1] += dy * f; v[i * 3 + 2] += dz * f;
+      v[j * 3] -= dx * f; v[j * 3 + 1] -= dy * f; v[j * 3 + 2] -= dz * f;
+    }
+    // Gravity to the centre, so disconnected islands do not drift away --
+    // this is what kept the earlier 2D version from fitting on screen.
+    for (let i = 0; i < n * 3; i++) {
+      v[i] -= p[i] * 0.02 * alpha;
+      p[i] += v[i];
+      v[i] *= 0.55;
+    }
+  }
+
+  // Fit: centre on the mean, scale so the 95th-percentile node sits at FIT.
+  // A percentile rather than the max, so one far outlier cannot shrink the
+  // whole graph to a dot.
+  const c = [0, 0, 0];
+  for (let i = 0; i < n; i++) for (let k = 0; k < 3; k++) c[k] += p[i * 3 + k] / n;
+  const radii: number[] = [];
+  for (let i = 0; i < n; i++) {
+    for (let k = 0; k < 3; k++) p[i * 3 + k] -= c[k];
+    radii.push(Math.hypot(p[i * 3], p[i * 3 + 1], p[i * 3 + 2]));
+  }
+  radii.sort((a, b) => a - b);
+  const r95 = radii[Math.floor(radii.length * 0.95)] || 1;
+  for (let i = 0; i < n * 3; i++) p[i] *= FIT / r95;
+  return p;
+}
+
+function Scene({
+  data,
+  theme,
+  onThemeChange,
+}: {
+  data: KnowledgeGraph;
+  theme: PlotTheme;
+  onThemeChange: (t: PlotTheme) => void;
+}) {
+  const { showChunk } = useApp();
+  const host = useRef<HTMLDivElement | null>(null);
+  const labelLayer = useRef<HTMLDivElement | null>(null);
+  const [hover, setHover] = useState<{ i: number; x: number; y: number } | null>(null);
+  const [selected, setSelected] = useState<number | null>(null);
+  const [typeFocus, setTypeFocus] = useState<string | null>(null);
+  const [labels, setLabels] = useState(true);
+  const [bridges, setBridges] = useState(false);
+  const [query, setQuery] = useState("");
+  const [expanded, setExpanded] = useState(false);
+  const [nativeFull, setNativeFull] = useState(false);
+  const big = expanded || nativeFull;
+
+  const { nodes, edges } = data;
+  const index = useMemo(() => new Map(nodes.map((n, i) => [n.id, i])), [nodes]);
+  const positions = useMemo(() => layout(nodes, edges), [nodes, edges]);
+  const neighbours = useMemo(() => {
+    const out = nodes.map(() => new Set<number>());
+    for (const e of edges) {
+      const a = index.get(e.source), b = index.get(e.target);
+      if (a === undefined || b === undefined) continue;
+      out[a].add(b);
+      out[b].add(a);
+    }
+    return out;
+  }, [nodes, edges, index]);
+
+  const api = useRef<{
+    emphasise: (sel: number | null, hov: number | null, type: string | null, bridges: boolean) => void;
+    flyToNode: (i: number) => void;
+    flyToType: (t: string | null) => void;
+    reset: () => void;
+    setLabels: (on: boolean) => void;
+  }>({ emphasise: () => {}, flyToNode: () => {}, flyToType: () => {}, reset: () => {}, setLabels: () => {} });
+
+  const selectRef = useRef(setSelected);
+  selectRef.current = setSelected;
+  const labelsRef = useRef(labels);
+  labelsRef.current = labels;
+
+  useEffect(() => {
+    const el = host.current;
+    const layer = labelLayer.current;
+    if (!el || !layer || nodes.length === 0) return;
+    const n = nodes.length;
+    const colours = TYPE_COLOURS[theme];
+    const ink = INK[theme];
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    const view = renderer.domElement;
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(el.clientWidth, el.clientHeight);
+    el.insertBefore(view, el.firstChild);
+
+    const scene = new THREE.Scene();
+    const backdrop = backdropTexture(theme);
+    scene.background = backdrop;
+    const camera = new THREE.PerspectiveCamera(50, el.clientWidth / Math.max(1, el.clientHeight), 0.01, 120);
+
+    // ---- nodes ----------------------------------------------------------
+    const colourAttr = new Float32Array(n * 3);
+    const sizes = new Float32Array(n);
+    const alphas = new Float32Array(n).fill(1);
+    const base = new Float32Array(n);
+    const c = new THREE.Color();
+    nodes.forEach((nd, i) => {
+      c.set(colours[nd.type] ?? colours.other);
+      colourAttr.set([c.r, c.g, c.b], i * 3);
+      // Area, not radius, by connections -- a hub with forty edges should
+      // read as bigger, not as a disc that swallows its neighbours.
+      base[i] = 55 + Math.sqrt(nd.degree) * 26;
+      sizes[i] = base[i];
+    });
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute("color", new THREE.BufferAttribute(colourAttr, 3));
+    geometry.setAttribute("size", new THREE.BufferAttribute(sizes, 1));
+    geometry.setAttribute("alpha", new THREE.BufferAttribute(alphas, 1));
+
+    // The scatter's shader, plus a ring for entities that appear in more than
+    // one document -- the connections nothing else in the app shows.
+    const ring = new Float32Array(n);
+    nodes.forEach((nd, i) => (ring[i] = nd.documents.length > 1 ? 1 : 0));
+    geometry.setAttribute("ring", new THREE.BufferAttribute(ring, 1));
+    const material = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      vertexColors: true,
+      uniforms: {
+        uScale: { value: renderer.getPixelRatio() },
+        uGlow: { value: theme === "dark" ? 1 : 0 },
+      },
+      vertexShader: [
+        "attribute float size;",
+        "attribute float alpha;",
+        "attribute float ring;",
+        "varying vec3 vColor;",
+        "varying float vAlpha;",
+        "varying float vRing;",
+        "uniform float uScale;",
+        "void main() {",
+        "  vColor = color; vAlpha = alpha; vRing = ring;",
+        "  vec4 mv = modelViewMatrix * vec4(position, 1.0);",
+        "  gl_PointSize = clamp(size / -mv.z, 6.0, 80.0) * uScale;",
+        "  gl_Position = projectionMatrix * mv;",
+        "}",
+      ].join("\n"),
+      fragmentShader: [
+        "uniform float uGlow;",
+        "varying vec3 vColor;",
+        "varying float vAlpha;",
+        "varying float vRing;",
+        "void main() {",
+        "  float r = length(gl_PointCoord - vec2(0.5));",
+        "  if (r > 0.5) discard;",
+        "  float core = 1.0 - smoothstep(0.0, 0.34, r);",
+        "  float band = vRing * (smoothstep(0.38, 0.42, r) - smoothstep(0.46, 0.5, r));",
+        "  vec3 lift = mix(vec3(0.0), vec3(1.0), uGlow);",
+        "  vec3 col = mix(vColor, lift, pow(core, 6.0) * 0.45);",
+        "  col = mix(col, lift, band * 0.85);",
+        "  float a = max(core, band) * vAlpha;",
+        "  if (a < 0.02) discard;",
+        "  gl_FragColor = vec4(col, a);",
+        "}",
+      ].join("\n"),
+    });
+    const cloud = new THREE.Points(geometry, material);
+    cloud.renderOrder = 2;
+    scene.add(cloud);
+
+    // ---- edges ----------------------------------------------------------
+    const pairs = edges
+      .map((e) => [index.get(e.source), index.get(e.target)] as const)
+      .filter((l): l is readonly [number, number] => l[0] !== undefined && l[1] !== undefined);
+    const edgePos = new Float32Array(pairs.length * 6);
+    const edgeCol = new Float32Array(pairs.length * 6);
+    const edgeInk = new THREE.Color(theme === "dark" ? 0x9aa3c8 : 0x4a5275);
+    pairs.forEach(([a, b], k) => {
+      edgePos.set(positions.subarray(a * 3, a * 3 + 3), k * 6);
+      edgePos.set(positions.subarray(b * 3, b * 3 + 3), k * 6 + 3);
+    });
+    const edgeGeometry = new THREE.BufferGeometry();
+    edgeGeometry.setAttribute("position", new THREE.BufferAttribute(edgePos, 3));
+    edgeGeometry.setAttribute("color", new THREE.BufferAttribute(edgeCol, 3));
+    const edgeMaterial = new THREE.LineBasicMaterial({
+      vertexColors: true,
+      transparent: true,
+      opacity: theme === "dark" ? 0.55 : 0.5,
+      depthWrite: false,
+    });
+    const lines = new THREE.LineSegments(edgeGeometry, edgeMaterial);
+    lines.renderOrder = 1;
+    scene.add(lines);
+
+    // ---- stars ----------------------------------------------------------
+    // The same quiet field as the scatter: far outside the graph, fixed pixel
+    // size, mostly dim, drifting too slowly to notice.
+    let seed = 20261005;
+    const rand = () => ((seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296);
+    const STARS = 1400;
+    const starPos = new Float32Array(STARS * 3);
+    const starCol = new Float32Array(STARS * 3);
+    const starInk = new THREE.Color(theme === "dark" ? 0xdfe6ff : 0x5a6290);
+    for (let i = 0; i < STARS; i++) {
+      const r = 60 + rand() * 25, th = rand() * Math.PI * 2, u = rand() * 2 - 1, w = Math.sqrt(1 - u * u);
+      starPos.set([r * w * Math.cos(th), r * u, r * w * Math.sin(th)], i * 3);
+      const b = 0.25 + Math.pow(rand(), 3) * 0.75;
+      starCol.set([starInk.r * b, starInk.g * b, starInk.b * b], i * 3);
+    }
+    const starGeometry = new THREE.BufferGeometry();
+    starGeometry.setAttribute("position", new THREE.BufferAttribute(starPos, 3));
+    starGeometry.setAttribute("color", new THREE.BufferAttribute(starCol, 3));
+    const stars = new THREE.Points(
+      starGeometry,
+      new THREE.PointsMaterial({
+        size: 1.4,
+        sizeAttenuation: false,
+        vertexColors: true,
+        transparent: true,
+        opacity: theme === "dark" ? 0.75 : 0.3,
+        depthWrite: false,
+      }),
+    );
+    stars.renderOrder = -1;
+    scene.add(stars);
+
+    // ---- labels ---------------------------------------------------------
+    // HTML, positioned each frame, rather than sprites: crisp at any zoom,
+    // real text, and the same font as the rest of the page. Only a few are
+    // shown at once (see `emphasise`).
+    const labelEls: HTMLDivElement[] = nodes.map((nd) => {
+      const d = document.createElement("div");
+      d.textContent = nd.name;
+      d.style.cssText =
+        `position:absolute;left:0;top:0;white-space:nowrap;font-size:11px;` +
+        `pointer-events:none;color:${ink.text};text-shadow:0 0 4px ${GROUND[theme]},0 0 2px ${GROUND[theme]};` +
+        `display:none;will-change:transform;`;
+      layer.appendChild(d);
+      return d;
+    });
+    let shown = new Set<number>();
+    const byDegree = nodes.map((_, i) => i).sort((a, b) => nodes[b].degree - nodes[a].degree);
+
+    // ---- camera ---------------------------------------------------------
+    // Current and desired values eased together each frame, exactly as in the
+    // scatter: input moves the desired value and the camera chases it.
+    const target = new THREE.Vector3();
+    const wantTarget = new THREE.Vector3();
+    let yaw = 0.8, pitch = 0.35, radius = HOME_RADIUS;
+    let wantYaw = yaw, wantPitch = pitch, wantRadius = radius;
+    const place = () => {
+      camera.position.set(
+        target.x + radius * Math.cos(pitch) * Math.sin(yaw),
+        target.y + radius * Math.sin(pitch),
+        target.z + radius * Math.cos(pitch) * Math.cos(yaw),
+      );
+      camera.lookAt(target);
+    };
+
+    // ---- interaction ----------------------------------------------------
+    let dragging = false, panning = false, moved = false, lastX = 0, lastY = 0;
+    const pointer = new THREE.Vector2();
+    const ray = new THREE.Raycaster();
+    const pickAt = (x: number, y: number): number | null => {
+      const rect = view.getBoundingClientRect();
+      pointer.set(((x - rect.left) / rect.width) * 2 - 1, -((y - rect.top) / rect.height) * 2 + 1);
+      ray.params.Points = { threshold: 0.03 * radius };
+      ray.setFromCamera(pointer, camera);
+      const hits = ray.intersectObject(cloud).filter((h) => alphas[h.index ?? 0] > 0.5);
+      return hits.length ? hits[0].index ?? null : null;
+    };
+    const onDown = (e: PointerEvent) => {
+      dragging = true;
+      panning = e.shiftKey || e.button === 1 || e.button === 2;
+      moved = false;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      view.setPointerCapture(e.pointerId);
+    };
+    const onMove = (e: PointerEvent) => {
+      if (!dragging) {
+        const i = pickAt(e.clientX, e.clientY);
+        const rect = view.getBoundingClientRect();
+        setHover(i === null ? null : { i, x: e.clientX - rect.left, y: e.clientY - rect.top });
+        return;
+      }
+      const dx = e.clientX - lastX, dy = e.clientY - lastY;
+      if (Math.abs(dx) + Math.abs(dy) > 3) moved = true;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      if (panning) {
+        const right = new THREE.Vector3(), up = new THREE.Vector3();
+        camera.matrixWorld.extractBasis(right, up, new THREE.Vector3());
+        const k = radius * 0.0016;
+        wantTarget.addScaledVector(right, -dx * k);
+        wantTarget.addScaledVector(up, dy * k);
+      } else {
+        wantYaw -= dx * 0.005;
+        wantPitch = Math.max(-1.45, Math.min(1.45, wantPitch + dy * 0.005));
+      }
+    };
+    const onUp = (e: PointerEvent) => {
+      dragging = false;
+      panning = false;
+      view.releasePointerCapture(e.pointerId);
+      if (moved) return;
+      selectRef.current(pickAt(e.clientX, e.clientY));
+    };
+    const onLeave = () => setHover(null);
+    // passive:false is what makes scroll ZOOM instead of scrolling the page --
+    // the earlier 2D version listened through React, whose wheel handler is
+    // passive, so preventDefault was ignored and the page moved instead.
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      wantRadius = Math.max(0.6, Math.min(30, wantRadius * Math.exp(e.deltaY * 0.0012)));
+    };
+    const onContext = (e: Event) => e.preventDefault();
+    view.addEventListener("pointerdown", onDown);
+    view.addEventListener("pointermove", onMove);
+    view.addEventListener("pointerup", onUp);
+    view.addEventListener("pointerleave", onLeave);
+    view.addEventListener("wheel", onWheel, { passive: false });
+    view.addEventListener("contextmenu", onContext);
+
+    // ---- imperative API -------------------------------------------------
+    api.current.emphasise = (sel, hov, type, onlyBridges) => {
+      const focus = sel ?? hov;
+      const near = focus !== null ? new Set([focus, ...neighbours[focus]]) : null;
+      const sizeAttr = geometry.getAttribute("size") as THREE.BufferAttribute;
+      const alphaAttr = geometry.getAttribute("alpha") as THREE.BufferAttribute;
+      for (let i = 0; i < n; i++) {
+        let on = true;
+        if (near) on = near.has(i);
+        else if (type) on = nodes[i].type === type;
+        else if (onlyBridges) on = nodes[i].documents.length > 1;
+        alphas[i] = on ? 1 : 0.1;
+        sizes[i] = base[i] * (i === sel ? 1.7 : i === hov ? 1.35 : 1);
+      }
+      sizeAttr.needsUpdate = true;
+      alphaAttr.needsUpdate = true;
+      // Edges: bright if both ends are lit, faint otherwise.
+      pairs.forEach(([a, b], k) => {
+        const lit = alphas[a] > 0.5 && alphas[b] > 0.5;
+        const touchesFocus = focus !== null && (a === focus || b === focus);
+        const s = touchesFocus ? 1.25 : lit ? 0.8 : 0.08;
+        for (const end of [0, 3]) {
+          edgeCol[k * 6 + end] = edgeInk.r * s;
+          edgeCol[k * 6 + end + 1] = edgeInk.g * s;
+          edgeCol[k * 6 + end + 2] = edgeInk.b * s;
+        }
+      });
+      (edgeGeometry.getAttribute("color") as THREE.BufferAttribute).needsUpdate = true;
+      // Labels: the focus and its neighbours when there is one; otherwise the
+      // best-connected lit nodes.
+      const pool = near ? [...near] : byDegree.filter((i) => alphas[i] > 0.5);
+      shown = new Set(pool.slice(0, MAX_LABELS));
+    };
+
+    api.current.flyToNode = (i) => {
+      wantTarget.set(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
+      wantRadius = Math.min(wantRadius, 4.2);
+    };
+    api.current.flyToType = (t) => {
+      if (!t) {
+        wantTarget.set(0, 0, 0);
+        wantRadius = HOME_RADIUS;
+        return;
+      }
+      const m = new THREE.Vector3();
+      let k = 0;
+      nodes.forEach((nd, i) => {
+        if (nd.type !== t) return;
+        m.x += positions[i * 3]; m.y += positions[i * 3 + 1]; m.z += positions[i * 3 + 2];
+        k++;
+      });
+      if (k) wantTarget.copy(m.divideScalar(k));
+      wantRadius = 6;
+    };
+    api.current.reset = () => {
+      wantTarget.set(0, 0, 0);
+      wantYaw = 0.8;
+      wantPitch = 0.35;
+      wantRadius = HOME_RADIUS;
+    };
+    api.current.setLabels = () => {};
+    api.current.emphasise(null, null, null, false);
+
+    // ---- loop -----------------------------------------------------------
+    const onResize = () => {
+      if (!el.clientWidth) return;
+      camera.aspect = el.clientWidth / Math.max(1, el.clientHeight);
+      camera.updateProjectionMatrix();
+      renderer.setSize(el.clientWidth, el.clientHeight);
+    };
+    const observer = new ResizeObserver(onResize);
+    observer.observe(el);
+
+    const v = new THREE.Vector3();
+    let frame = 0;
+    const loop = () => {
+      frame = requestAnimationFrame(loop);
+      const k = 0.11;
+      yaw += (wantYaw - yaw) * k;
+      pitch += (wantPitch - pitch) * k;
+      radius += (wantRadius - radius) * k;
+      target.lerp(wantTarget, k);
+      place();
+      stars.rotation.y += 0.00004;
+      renderer.render(scene, camera);
+
+      const w = el.clientWidth, h = el.clientHeight;
+      for (let i = 0; i < n; i++) {
+        const d = labelEls[i];
+        if (!labelsRef.current || !shown.has(i)) {
+          if (d.style.display !== "none") d.style.display = "none";
+          continue;
+        }
+        v.set(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]).project(camera);
+        if (v.z > 1 || v.z < -1) {
+          d.style.display = "none";
+          continue;
+        }
+        d.style.display = "block";
+        d.style.transform = `translate(${((v.x + 1) / 2) * w + 9}px, ${((1 - v.y) / 2) * h - 7}px)`;
+      }
+    };
+    loop();
+
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+      view.removeEventListener("pointerdown", onDown);
+      view.removeEventListener("pointermove", onMove);
+      view.removeEventListener("pointerup", onUp);
+      view.removeEventListener("pointerleave", onLeave);
+      view.removeEventListener("wheel", onWheel);
+      view.removeEventListener("contextmenu", onContext);
+      geometry.dispose();
+      material.dispose();
+      edgeGeometry.dispose();
+      edgeMaterial.dispose();
+      starGeometry.dispose();
+      (stars.material as THREE.Material).dispose();
+      backdrop.dispose();
+      renderer.dispose();
+      labelEls.forEach((d) => d.remove());
+      view.remove();
+    };
+  }, [nodes, edges, positions, neighbours, index, theme]);
+
+  useEffect(() => {
+    api.current.emphasise(selected, hover?.i ?? null, typeFocus, bridges);
+  }, [selected, hover, typeFocus, bridges, theme]);
+
+  useEffect(() => {
+    if (selected !== null) api.current.flyToNode(selected);
+  }, [selected]);
+
+  useEffect(() => {
+    api.current.flyToType(typeFocus);
+  }, [typeFocus]);
+
+  // Fullscreen with a CSS fallback, as in the scatter.
+  useEffect(() => {
+    const onChange = () => setNativeFull(document.fullscreenElement === host.current);
+    document.addEventListener("fullscreenchange", onChange);
+    return () => document.removeEventListener("fullscreenchange", onChange);
+  }, []);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (selected !== null) setSelected(null);
+      else if (expanded) setExpanded(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [expanded, selected]);
+  const toggleBig = useCallback(async () => {
+    if (document.fullscreenElement) {
+      await document.exitFullscreen().catch(() => {});
+      return;
+    }
+    if (expanded) {
+      setExpanded(false);
+      return;
+    }
+    try {
+      await host.current?.requestFullscreen();
+    } catch {
+      setExpanded(true);
+    }
+  }, [expanded]);
+
+  const ink = INK[theme];
+  const colours = TYPE_COLOURS[theme];
+  const panel = theme === "dark" ? "rgba(16,18,26,0.94)" : "rgba(255,255,255,0.95)";
+  const hovered = hover ? nodes[hover.i] : null;
+  const chosen = selected !== null ? nodes[selected] : null;
+  const relations = chosen
+    ? edges.filter((e) => e.source === chosen.id || e.target === chosen.id)
+    : [];
+  const nameOf = (id: string) => nodes[index.get(id) ?? -1]?.name ?? id;
+  const typeCounts = useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const nd of nodes) m[nd.type] = (m[nd.type] ?? 0) + 1;
+    return m;
+  }, [nodes]);
+  const matches = query.trim()
+    ? nodes
+        .map((nd, i) => ({ nd, i }))
+        .filter(({ nd }) => nd.name.toLowerCase().includes(query.trim().toLowerCase()))
+        .slice(0, 8)
+    : [];
+
+  const chip = (on: boolean) => ({
+    background: on ? ink.on : ink.chip,
+    color: on ? ink.onText : ink.text,
+  });
+
+  return (
+    <div className="space-y-3">
+      <details className="md-body-small" style={{ color: "var(--md-on-surface-variant)" }}>
+        <summary className="md-label-large" style={{ color: "var(--md-on-surface)" }}>
+          How to use the graph
+        </summary>
+        <div className="mt-2 space-y-1.5">
+          <p>
+            Each dot is an entity your documents name, coloured by type and sized by how
+            many relationships it has. Each line is a relationship a document states, such
+            as &ldquo;Acme acquired Beta&rdquo;. A white ring marks an entity that appears in
+            more than one document, which is where documents connect.
+          </p>
+          <p>
+            Drag to orbit, shift-drag or right-drag to pan, and scroll to zoom. Hover a dot
+            for its details; click it to fly there, light up its neighbours and list what
+            the documents say about it. Click a relationship in that list to open the
+            passage it came from. Click a type in the legend to show only that type, or use
+            Bridges to show only cross-document entities. Search jumps to an entity by
+            name. Esc clears the selection; Reset brings the whole graph back.
+          </p>
+        </div>
+      </details>
+
+      <div
+        ref={host}
+        className={
+          big
+            ? "fixed inset-0 z-[60] w-full touch-none overflow-hidden"
+            : "relative h-[34rem] w-full touch-none overflow-hidden rounded-[var(--md-shape-lg)]"
+        }
+        style={{ background: GROUND[theme], cursor: hovered ? "pointer" : "grab" }}
+      >
+        <div ref={labelLayer} className="pointer-events-none absolute inset-0 z-[5] overflow-hidden" />
+
+        {/* Top-left: search and legend. */}
+        <div className="pointer-events-none absolute left-3 top-3 z-10 flex w-56 flex-col gap-2">
+          <div className="pointer-events-auto relative">
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Find an entity…"
+              aria-label="Find an entity"
+              className="w-full rounded-[var(--md-shape-sm)] px-2.5 py-1.5 text-xs outline-none"
+              style={{ background: panel, color: ink.text, border: `1px solid ${ink.chip}` }}
+            />
+            {matches.length > 0 && (
+              <ul
+                className="absolute left-0 right-0 top-full mt-1 overflow-hidden rounded-[var(--md-shape-sm)]"
+                style={{ background: panel, border: `1px solid ${ink.chip}` }}
+              >
+                {matches.map(({ nd, i }) => (
+                  <li key={nd.id}>
+                    <button
+                      type="button"
+                      className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs"
+                      style={{ color: ink.text }}
+                      onClick={() => {
+                        setTypeFocus(null);
+                        setSelected(i);
+                        setQuery("");
+                      }}
+                    >
+                      <span className="inline-block h-2 w-2 shrink-0 rounded-full" style={{ background: colours[nd.type] ?? colours.other }} />
+                      <span className="min-w-0 flex-1 truncate">{nd.name}</span>
+                      <span style={{ opacity: 0.55 }}>{nd.degree}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <div className="pointer-events-auto flex flex-col gap-0.5 rounded-[var(--md-shape-md)] p-1.5" style={{ background: panel }}>
+            {TYPES.filter((t) => typeCounts[t]).map((t) => {
+              const on = typeFocus === t;
+              return (
+                <button
+                  key={t}
+                  type="button"
+                  aria-pressed={on}
+                  onClick={() => {
+                    setSelected(null);
+                    setTypeFocus(on ? null : t);
+                  }}
+                  className="flex items-center gap-2 rounded-[var(--md-shape-sm)] px-2 py-1 text-left text-xs"
+                  style={{ background: on ? ink.chip : "transparent", color: ink.text }}
+                >
+                  <span className="inline-block h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: colours[t] }} />
+                  <span className="flex-1">{t}</span>
+                  <span style={{ opacity: 0.55 }}>{typeCounts[t]}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Top-right: the scatter's controls, in the same order. */}
+        <div className="pointer-events-none absolute right-3 top-3 z-10 flex gap-2">
+          <button type="button" className="pointer-events-auto rounded-[var(--md-shape-sm)] px-2.5 py-1.5 text-xs" style={chip(false)} onClick={() => onThemeChange(theme === "dark" ? "light" : "dark")}>
+            {theme === "dark" ? "Light" : "Dark"}
+          </button>
+          <button type="button" className="pointer-events-auto rounded-[var(--md-shape-sm)] px-2.5 py-1.5 text-xs" style={chip(labels)} onClick={() => setLabels((v) => !v)} title="Show names next to the best-connected entities">
+            Labels
+          </button>
+          <button type="button" className="pointer-events-auto rounded-[var(--md-shape-sm)] px-2.5 py-1.5 text-xs" style={chip(bridges)} onClick={() => { setSelected(null); setTypeFocus(null); setBridges((v) => !v); }} title="Show only entities that appear in more than one document">
+            Bridges
+          </button>
+          <button type="button" className="pointer-events-auto rounded-[var(--md-shape-sm)] px-2.5 py-1.5 text-xs" style={chip(false)} onClick={() => { setSelected(null); setTypeFocus(null); setBridges(false); api.current.reset(); }}>
+            Reset view
+          </button>
+          <button type="button" className="pointer-events-auto rounded-[var(--md-shape-sm)] px-2.5 py-1.5 text-xs" style={chip(false)} onClick={() => void toggleBig()}>
+            {big ? "Exit" : "Expand"}
+          </button>
+        </div>
+
+        <p className="pointer-events-none absolute bottom-3 left-3 z-10 text-xs" style={{ color: ink.faint }}>
+          drag to orbit · shift-drag or right-drag to pan · scroll to zoom · click an entity
+          {big ? " · Esc to exit" : ""}
+          {bridges && " · showing entities found in more than one document"}
+        </p>
+
+        {/* The reading panel: everything the documents say about the
+            selected entity, each statement one click from its passage. */}
+        {chosen && (
+          <div
+            className="absolute bottom-10 right-3 top-14 z-10 flex w-[22rem] max-w-[45%] flex-col rounded-[var(--md-shape-md)]"
+            style={{ background: panel, color: ink.text }}
+          >
+            <div className="flex items-start gap-2 p-4 pb-2">
+              <div className="min-w-0 flex-1">
+                <p className="break-words text-sm font-medium">{chosen.name}</p>
+                <p className="mt-0.5 text-xs" style={{ color: ink.faint }}>
+                  {chosen.type} · {chosen.mentions} mention{chosen.mentions === 1 ? "" : "s"} ·{" "}
+                  {chosen.degree} relation{chosen.degree === 1 ? "" : "s"}
+                </p>
+                <p className="mt-1 break-words text-xs" style={{ color: ink.faint }}>
+                  in {chosen.documents.join(", ")}
+                </p>
+              </div>
+              <button type="button" onClick={() => setSelected(null)} className="rounded-[var(--md-shape-sm)] px-2 py-1 text-xs" style={chip(false)}>
+                Close
+              </button>
+            </div>
+            <ul className="min-h-0 flex-1 space-y-1.5 overflow-y-auto px-4 pb-4">
+              {relations.length === 0 && (
+                <li className="text-xs" style={{ color: ink.faint }}>
+                  Named in the documents, but no relationship to another entity was stated.
+                </li>
+              )}
+              {relations.map((r, k) => {
+                const other = r.source === chosen.id ? r.target : r.source;
+                return (
+                  <li key={k}>
+                    <div className="rounded-[var(--md-shape-sm)] p-2 text-xs" style={{ background: ink.chip }}>
+                      <p className="leading-snug">
+                        <strong>{nameOf(r.source)}</strong> {r.predicate} <strong>{nameOf(r.target)}</strong>
+                      </p>
+                      <div className="mt-1.5 flex flex-wrap items-center gap-2" style={{ color: ink.faint }}>
+                        <span className="min-w-0 flex-1 truncate">{r.filename}</span>
+                        {r.chunk_id && (
+                          <button type="button" className="underline" style={{ color: ink.text }} onClick={() => void showChunk(r.chunk_id!)}>
+                            Open passage
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="underline"
+                          style={{ color: ink.text }}
+                          onClick={() => {
+                            const j = index.get(other);
+                            if (j !== undefined) setSelected(j);
+                          }}
+                        >
+                          Go to {nameOf(other)}
+                        </button>
+                      </div>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
+
+        {hovered && hover && hover.i !== selected && (
+          <div
+            className="pointer-events-none absolute z-20 w-[16rem] rounded-[var(--md-shape-md)] p-3"
+            style={{
+              left: Math.max(8, Math.min(hover.x + 16, (host.current?.clientWidth ?? 0) - 270)),
+              top: Math.min(hover.y + 16, (host.current?.clientHeight ?? 0) - 110),
+              background: panel,
+              color: ink.text,
+              border: `1px solid ${ink.chip}`,
+            }}
+          >
+            <p className="break-words text-xs font-medium">{hovered.name}</p>
+            <p className="mt-0.5 text-xs" style={{ color: ink.faint }}>
+              {hovered.type} · {hovered.degree} relation{hovered.degree === 1 ? "" : "s"} ·{" "}
+              {hovered.documents.length} document{hovered.documents.length === 1 ? "" : "s"}
+            </p>
+            <p className="mt-1 break-words text-xs" style={{ color: ink.faint }}>
+              {hovered.documents.slice(0, 3).join(", ")}
+              {hovered.documents.length > 3 ? "…" : ""}
+            </p>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

@@ -182,7 +182,7 @@ export default function AtlasPage() {
           the documents SAY connects the people, organisations and ideas in
           them. Every link is a sentence you can open.
         </p>
-        <GraphView />
+        <GraphView theme={plotTheme} onThemeChange={setPlotTheme} />
       </section>
 
       <section className="grid gap-6 md:grid-cols-[1fr_18rem]">

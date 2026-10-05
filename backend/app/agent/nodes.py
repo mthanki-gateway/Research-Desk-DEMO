@@ -84,7 +84,15 @@ search engine has no memory of the conversation.
 - If the question asks for only one thing, return it as a single sub-question, \
 rephrased for search.
 - Never invent requirements the question did not ask for.
-- At most 3 sub-questions."""
+- Write each as the passage you hope to find, in plain language: "how large \
+climbing vines such as wisteria grow", not a pile of keywords. Leave out \
+document titles and author names; they match every chunk and select nothing.
+- At most 3 sub-questions.
+
+A question that compares things the documents NAME on a property they may \
+not GIVE ("which of the plants in the book is biggest") needs the list first. \
+Plan the lookup that finds the items; the comparison is filled in afterwards, \
+from the web, once their names are known."""
 
 
 async def plan(state: ResearchState) -> dict:
@@ -602,7 +610,15 @@ async def retrieve_node(state: ResearchState) -> dict:
         # Retry only. On the first pass the ReAct loop already has `search_web`
         # as a tool and chooses for itself; duplicating it here would double
         # every web call on every turn.
-        if retry and not document_ids and websearch.enabled():
+        #
+        # NOT skipped when documents are selected. It used to be, and that is
+        # exactly the case that kept failing: "of the plants in the book, which
+        # is the biggest" with the book selected re-searched the book on every
+        # retry, because the sizes were never in it. Selecting documents means
+        # "use these", not "use nothing else" -- the scope narrows the DOCUMENT
+        # search, and the web is a different source the selection says nothing
+        # about.
+        if retry and websearch.enabled():
             try:
                 web_hits = await websearch.search_web(query, limit=top_k)
                 gathered.extend(web_hits)
@@ -1417,7 +1433,20 @@ failed rather than the information being absent. In that case set \
 sufficient=false and propose queries worded DIFFERENTLY from the ones already \
 tried -- different vocabulary, synonyms, a fuller sentence.
 
-Never repeat a query that has already been tried."""
+Never repeat a query that has already been tried.
+
+MULTI-STEP QUESTIONS. When the sources NAME the items the question is about \
+but do not give the property it compares them on -- the plants a book \
+covers but not their sizes, the competitors a report lists but not their \
+revenue -- that is missing_evidence, not unanswerable. Propose one query per \
+named item asking for that property, using the exact names from the sources \
+("Wisteria mature height", "Virginia creeper maximum size"). These are \
+answered from the web. Concluding "the documents do not say which is \
+biggest" when every item is named and each size is one search away is the \
+failure this rule exists to prevent.
+
+Write queries as a person would type them into a search engine, or as the \
+passage you hope to find -- never a string of keywords from the question."""
 
 
 async def critique(state: ResearchState) -> dict:

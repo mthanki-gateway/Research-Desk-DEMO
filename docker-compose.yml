@@ -142,6 +142,7 @@ services:
       # designed to be public; it is not a secret.
       NEXT_PUBLIC_SUPABASE_URL: ${SUPABASE_URL:-}
       NEXT_PUBLIC_SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
+      NEXT_PUBLIC_OAUTH_REDIRECT_URL: ${NEXT_PUBLIC_OAUTH_REDIRECT_URL:-}
     ports:
       - "3000:3000"
     volumes:

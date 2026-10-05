@@ -153,10 +153,12 @@ body {
 }
 
 body {
-  background: var(--md-surface-container-low);
+  background: var(--md-background);
   color: var(--md-on-surface);
   font-family: Roboto, system-ui, -apple-system, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
 }
 
 /* Darker than the container tone it used to be.
