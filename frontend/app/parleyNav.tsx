@@ -1,5 +1,6 @@
 "use client";
 
+import { createHowlerProject } from "@/lib/api";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -10,7 +11,7 @@ import {
 } from "@/lib/api";
 import { useApp } from "./providers";
 import { Ripplable } from "./md";
-import { IconChevron, IconEdit, IconMore, IconTrash } from "./icons";
+import { IconChevron, IconEdit, IconMore, IconPlus, IconSpinner, IconTrash } from "./icons";
 
 /**
  * Parley's conversations, in the drawer beneath "Speak".
@@ -35,8 +36,11 @@ const SECTION: Record<Mode, { label: string; empty: string; href: string }> = {
     href: "/parley",
   },
   howler: {
-    label: "Sessions",
-    empty: "No sessions yet",
+    // "Interviews taken", not "Sessions": these are the conversations people
+    // HAD through a link, and "Sessions" read as the place to start one --
+    // people clicked them looking for a way to begin.
+    label: "Interviews taken",
+    empty: "No one has taken an interview yet",
     href: "/parley/howler",
   },
   interview: {
@@ -62,6 +66,18 @@ export default function ParleyNav({
   // already see.
   const current = useSearchParams().get("c");
   const { parleyConversations, refreshParleyConversations } = useApp();
+  const [creating, setCreating] = useState(false);
+  // Howler's "start one" lives HERE as well as on the page. The page's button
+  // was the only way in, and people looking at this list never found it.
+  async function newHowler() {
+    setCreating(true);
+    try {
+      const made = await createHowlerProject();
+      router.push(`/parley/howler?p=${made.id}`);
+    } finally {
+      setCreating(false);
+    }
+  }
   const items = parleyConversations[mode];
   const section = SECTION[mode];
   const [open, setOpen] = useState(true);
@@ -167,6 +183,21 @@ export default function ParleyNav({
       className="ml-5 mb-3 mt-0.5 border-l pl-1"
       style={{ borderColor: "var(--md-nav-outline, rgba(0,0,0,0.10))" }}
     >
+      {mode === "howler" && (
+        <button
+          type="button"
+          onClick={() => void newHowler()}
+          disabled={creating}
+          className="md-state md-label-large mb-1 flex w-full items-center gap-2 rounded-[var(--md-shape-full)] px-2.5 py-1.5"
+          style={{
+            background: "var(--md-primary-container)",
+            color: "var(--md-on-primary-container)",
+          }}
+        >
+          {creating ? <IconSpinner className="h-4 w-4" /> : <IconPlus className="h-4 w-4" />}
+          New interview
+        </button>
+      )}
       <button
         type="button"
         onClick={toggle}

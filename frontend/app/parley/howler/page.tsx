@@ -175,19 +175,14 @@ function Projects() {
             className="md-body-medium mt-1"
             style={{ color: "var(--md-on-surface-variant)" }}
           >
-            Talk through what you want to find out. It works out the data points
-            with you, then gives you a link to send to whoever you are
-            interviewing.
+            Design an interview by talking through what you want to find out,
+            then send the link. Your designs are below; the interviews people
+            have taken are listed under Howler in the sidebar.
           </p>
         </div>
-        <Button
-          variant="tonal"
-          onClick={() => void start()}
-          disabled={busy}
-          className="shrink-0"
-        >
+        <Button onClick={() => void start()} disabled={busy} className="shrink-0">
           {busy ? <IconSpinner /> : <IconPlus />}
-          New
+          New interview
         </Button>
       </header>
 
@@ -216,7 +211,7 @@ function Projects() {
           <div className="mt-6 flex justify-center">
             <Button onClick={() => void start()} disabled={busy}>
               {busy ? <IconSpinner /> : <IconPlus />}
-              New project
+              New interview
             </Button>
           </div>
         </div>

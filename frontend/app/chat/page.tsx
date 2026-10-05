@@ -34,6 +34,11 @@ export default function ChatIndex() {
   const [size, setSize] = useState<number>(25);
   const [offset, setOffset] = useState(0);
   const [paging, setPaging] = useState(false);
+  // Whether THIS page's own list has arrived at least once. The drawer's
+  // `loading` finishes first, and in the gap `page` is still [] -- which
+  // rendered "Start your first conversation" to someone with twenty chats,
+  // for a second, on every visit.
+  const [fetched, setFetched] = useState(false);
 
   useEffect(() => {
     let live = true;
@@ -45,7 +50,11 @@ export default function ChatIndex() {
         setTotal(count);
       })
       .catch(() => {})
-      .finally(() => live && setPaging(false));
+      .finally(() => {
+        if (!live) return;
+        setPaging(false);
+        setFetched(true);
+      });
     return () => {
       live = false;
     };
@@ -122,7 +131,7 @@ export default function ChatIndex() {
     }
   }
 
-  if (loading) {
+  if (loading || !fetched) {
     return (
       <div className="mx-auto max-w-3xl space-y-3 px-6 py-9" aria-hidden>
         <div className="md-skeleton h-8 w-40" />
