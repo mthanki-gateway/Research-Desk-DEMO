@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { deleteKey, getKeys, saveKey, type KeyStatus, type ProviderKey } from "@/lib/keys";
 import { Button } from "../md";
@@ -28,69 +29,145 @@ const FEATURE_LABELS: Record<string, string> = {
   nvidia_speech: "NVIDIA speech",
 };
 
+/** The sections, in the page's own left-hand menu. */
+const SECTIONS = [
+  { id: "keys", label: "API keys", hint: "Your provider keys", tone: 0, Glyph: KeyGlyph },
+  { id: "features", label: "Feature access", hint: "What your keys unlock", tone: 1, Glyph: GridGlyph },
+  { id: "profile", label: "Profile", hint: "Preferences and account", tone: 2, Glyph: PersonGlyph },
+] as const;
+
 export default function SettingsPage() {
   const [status, setStatus] = useState<KeyStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // One section at a time. The menu on the left is the navigation and should
+  // change what you see, rather than scroll a long page.
+  const [section, setSection] = useState<string>("keys");
 
   useEffect(() => {
+    const h = window.location.hash.replace("#", "");
+    if (h === "features" || h === "keys") setSection(h);
     getKeys()
       .then(setStatus)
       .catch((e) => setError(e instanceof Error ? e.message : "Could not load settings"));
   }, []);
 
   return (
-    <div className="mx-auto max-w-3xl space-y-8 px-6 py-9">
-      <header>
+    <div className="mx-auto max-w-5xl px-6 py-9">
+      <header className="mb-6">
         <h1 className="md-headline-small">Settings</h1>
         <p className="md-body-medium mt-1" style={{ color: "var(--md-on-surface-variant)" }}>
-          Bring your own API keys. Keys are encrypted on the server and never shown
-          again in full; only the last four characters appear here.
+          Keys are encrypted on the server and never shown again in full; only the
+          last four characters appear here.
         </p>
       </header>
 
-      {error && (
-        <p className="md-body-medium" style={{ color: "var(--md-error)" }}>
-          {error}
-        </p>
-      )}
-      {!status && !error && <div className="md-skeleton h-64" aria-hidden />}
-
-      {status && (
-        <>
-          <section id="features" className="space-y-3">
-            <h2 className="md-title-medium">Feature access</h2>
-            <p className="md-body-small" style={{ color: "var(--md-on-surface-variant)" }}>
-              {status.require_user_keys
-                ? "Each feature needs its key added below."
-                : "Everything works today on the shared server keys. Adding your own moves usage onto your account; in a future release your own keys will be required."}
-            </p>
-            <div className="flex flex-wrap gap-2">
-              {Object.entries(status.features).map(([f, on]) => (
-                <span
-                  key={f}
-                  className="md-label-medium flex items-center gap-1.5 rounded-[var(--md-shape-full)] px-3 py-1.5"
-                  style={{
-                    background: on ? "var(--md-secondary-container)" : "var(--md-surface-container-high)",
-                    color: on ? "var(--md-on-secondary-container)" : "var(--md-on-surface-variant)",
-                    opacity: on ? 1 : 0.6,
-                  }}
-                >
-                  <span aria-hidden>{on ? "●" : "○"}</span>
-                  {FEATURE_LABELS[f] ?? f}
+      <div className="grid gap-8 md:grid-cols-[15rem_1fr]">
+        <nav aria-label="Settings sections" className="space-y-1 self-start md:sticky md:top-6">
+          {SECTIONS.map((sec) => {
+            const on = section === sec.id;
+            const inner = (
+              <>
+                <span className={`md-morph-tile md-morph-${sec.tone}`} aria-hidden>
+                  <sec.Glyph />
                 </span>
-              ))}
-            </div>
-          </section>
+                <span className="min-w-0 flex-1">
+                  <span className="md-label-large block">{sec.label}</span>
+                  <span className="md-body-small block truncate" style={{ color: "var(--md-on-surface-variant)" }}>
+                    {sec.hint}
+                  </span>
+                </span>
+              </>
+            );
+            const cls = "group md-state flex w-full items-center gap-3 rounded-[var(--md-shape-lg)] px-2.5 py-2 text-left";
+            const style = { background: on ? "var(--md-secondary-container)" : "transparent" };
+            return sec.id === "profile" ? (
+              <Link key={sec.id} href="/profile" className={cls} style={style}>
+                {inner}
+              </Link>
+            ) : (
+              <button
+                key={sec.id}
+                type="button"
+                className={cls}
+                style={style}
+                aria-current={on ? "page" : undefined}
+                onClick={() => {
+                  setSection(sec.id);
+                  history.replaceState(null, "", `#${sec.id}`);
+                }}
+              >
+                {inner}
+              </button>
+            );
+          })}
+        </nav>
 
-          <section id="keys" className="space-y-3">
-            <h2 className="md-title-medium">API keys</h2>
-            {status.providers.map((p, i) => (
-              <ProviderCard key={p.id} p={p} tone={i % 4} onChange={setStatus} />
-            ))}
-          </section>
-        </>
-      )}
+        <div className="min-w-0 space-y-4">
+          {error && (
+            <p className="md-body-medium" style={{ color: "var(--md-error)" }}>
+              {error}
+            </p>
+          )}
+          {!status && !error && <div className="md-skeleton h-64" aria-hidden />}
+
+          {status && section === "features" && (
+            <section className="space-y-3">
+              <h2 className="md-title-medium">Feature access</h2>
+              <p className="md-body-small" style={{ color: "var(--md-on-surface-variant)" }}>
+                {status.require_user_keys
+                  ? "Each feature needs its key added under API keys."
+                  : "Everything works today on the shared server keys. Adding your own moves usage onto your account; in a future release your own keys will be required."}
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {Object.entries(status.features).map(([f, on]) => (
+                  <span
+                    key={f}
+                    className="md-label-medium flex items-center gap-1.5 rounded-[var(--md-shape-full)] px-3 py-1.5"
+                    style={{
+                      background: on ? "var(--md-secondary-container)" : "var(--md-surface-container-high)",
+                      color: on ? "var(--md-on-secondary-container)" : "var(--md-on-surface-variant)",
+                      opacity: on ? 1 : 0.6,
+                    }}
+                  >
+                    <span aria-hidden>{on ? "●" : "○"}</span>
+                    {FEATURE_LABELS[f] ?? f}
+                  </span>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {status && section === "keys" && (
+            <section className="space-y-3">
+              <h2 className="md-title-medium">API keys</h2>
+              {status.providers.map((p, i) => (
+                <ProviderCard key={p.id} p={p} tone={i % 4} onChange={setStatus} />
+              ))}
+            </section>
+          )}
+        </div>
+      </div>
     </div>
+  );
+}
+
+function GridGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
+      <rect x="4" y="4" width="7" height="7" rx="1.5" />
+      <rect x="13" y="4" width="7" height="7" rx="1.5" />
+      <rect x="4" y="13" width="7" height="7" rx="1.5" />
+      <path d="M16.5 13.5v6M13.5 16.5h6" />
+    </svg>
+  );
+}
+
+function PersonGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
+      <circle cx="12" cy="8" r="4" />
+      <path d="M4 21a8 8 0 0 1 16 0" />
+    </svg>
   );
 }
 
