@@ -86,6 +86,10 @@ export default function LocalModels() {
   const [error, setError] = useState<string | null>(null);
   const [scores, setScores] = useState<LocalScores | null>(null);
   const [ents, setEnts] = useState<LocalEntities | null>(null);
+  // Where entities run. Browser by default: it works on the hosted site,
+  // where the API has no torch. Server is offered only when it can answer.
+  const [runtime, setRuntime] = useState<"browser" | "server">("browser");
+  const [progress, setProgress] = useState<{ loaded: number; total: number } | null>(null);
 
   useEffect(() => {
     localStatus()
@@ -114,9 +118,14 @@ export default function LocalModels() {
 
   // Whether the model for this case still has to load. The first call then
   // includes a download and a load, and its latency is not the model's.
+  const inBrowser = caseId === "entities" && runtime === "browser";
   const cold =
     status &&
+    !inBrowser &&
     (caseId === "entities" ? !status.loaded.gliner : !status.loaded.gliclass);
+  // Routing and JEV have no browser model (see lib/browser-nlp.ts), so they
+  // need the server's; entities in the browser need nothing from it.
+  const runnable = inBrowser || !!status?.installed;
 
   async function run() {
     if (busy || !text.trim() || labelList.length === 0) return;
@@ -125,6 +134,16 @@ export default function LocalModels() {
     setScores(null);
     setEnts(null);
     try {
+      if (inBrowser) {
+        const nlp = await import("@/lib/browser-nlp");
+        setEnts(
+          await nlp.entities(text, labelList, threshold, (p) =>
+            setProgress({ loaded: p.loaded, total: p.total }),
+          ),
+        );
+        setProgress(null);
+        return;
+      }
       if (caseId === "entities") {
         setEnts(await localEntities({ text, labels: labelList, threshold }));
       } else {
@@ -137,6 +156,7 @@ export default function LocalModels() {
       setError(e instanceof Error ? e.message : "Request failed");
     } finally {
       setBusy(false);
+      setProgress(null);
     }
   }
 
@@ -145,13 +165,13 @@ export default function LocalModels() {
       <header>
         <h1 className="md-headline-small">Local models</h1>
         <p className="md-body-medium mt-1" style={{ color: "var(--md-on-surface-variant)" }}>
-          GLiNER and GLiClass, running on this server&apos;s CPU. No API key, nothing
-          leaves the machine — a ~200MB encoder answering one narrow question in
-          milliseconds.
+          GLiNER and GLiClass — small encoders answering one narrow question in
+          milliseconds, with no API key. Entities run right here in your browser;
+          routing and JEV scoring run on the API&apos;s own CPU in the local stack.
         </p>
       </header>
 
-      {status && !status.installed && (
+      {status && !status.installed && !inBrowser && (
         <div
           className="md-card md-card-filled p-4"
           style={{
@@ -163,10 +183,11 @@ export default function LocalModels() {
             <>
               <p className="md-title-small">Runs in the local stack only</p>
               <p className="md-body-medium mt-1">
-                These models run on the API&apos;s own CPU, and the hosted API is
-                deliberately built without torch — it is over a gigabyte and does
-                not fit the free tier. Run the app locally with{" "}
-                <code>docker compose up</code> to try them.
+                Routing and JEV scoring use GLiClass on the API&apos;s own CPU, and
+                the hosted API is deliberately built without torch — it does not
+                fit the free tier, and GLiClass has no browser build yet. Run the
+                app locally with <code>docker compose up</code> to try them, or
+                use Entities, which runs in your browser.
               </p>
             </>
           ) : (
@@ -213,6 +234,25 @@ export default function LocalModels() {
         disabled={busy}
       />
       {caseId === "entities" && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="md-body-medium">Run on</span>
+          <Chip selected={runtime === "browser"} onClick={() => setRuntime("browser")}>
+            This browser
+          </Chip>
+          {status?.installed && (
+            <Chip selected={runtime === "server"} onClick={() => setRuntime("server")}>
+              Server
+            </Chip>
+          )}
+          {runtime === "browser" && (
+            <span className="md-body-small" style={{ color: "var(--md-on-surface-variant)" }}>
+              Downloads GLiNER (183MB) once, then it is cached. The text never leaves
+              this device.
+            </span>
+          )}
+        </div>
+      )}
+      {caseId === "entities" && (
         <label className="md-body-medium flex items-center gap-3">
           Threshold
           <input
@@ -231,11 +271,16 @@ export default function LocalModels() {
       <div className="flex items-center gap-3">
         <Button
           onClick={() => void run()}
-          disabled={busy || !text.trim() || labelList.length === 0 || !status?.installed}
+          disabled={busy || !text.trim() || labelList.length === 0 || !runnable}
         >
           {busy ? <IconSpinner /> : <IconGrid />}
-          {busy ? "Running…" : "Run"}
+          {busy ? (progress ? "Downloading…" : "Running…") : "Run"}
         </Button>
+        {progress && progress.total > 0 && (
+          <span className="md-body-small tabular-nums" style={{ color: "var(--md-on-surface-variant)" }}>
+            {Math.round(progress.loaded / 1e6)} / {Math.round(progress.total / 1e6)} MB
+          </span>
+        )}
         {cold && !busy && (
           <span className="md-body-small" style={{ color: "var(--md-on-surface-variant)" }}>
             First call downloads and loads the model — expect seconds, not milliseconds.
