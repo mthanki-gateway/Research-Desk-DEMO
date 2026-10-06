@@ -10,6 +10,7 @@ import {
   hydrateEntity,
   addTopic,
   exploreTopic,
+  discoverTopic,
   deleteTopic,
   type Chunk,
   type Hydration,
@@ -18,7 +19,7 @@ import {
   type KnowledgeGraph,
 } from "@/lib/api";
 import { Button } from "../md";
-import { IconSpinner } from "../icons";
+import { IconPlus, IconSpinner } from "../icons";
 import { GROUND, INK, backdropTexture, type PlotTheme } from "./scatter";
 
 /**
@@ -132,6 +133,24 @@ function bySource(data: KnowledgeGraph, source: Source): KnowledgeGraph {
   return { ...data, nodes: data.nodes.filter((n) => ids.has(n.id)), edges };
 }
 
+/**
+ * Only the nodes from the chosen documents (and the links between them).
+ * Topic nodes, which belong to no document, are hidden while a document
+ * filter is on: the point of it is "what does THIS file contain".
+ */
+function byDocuments(data: KnowledgeGraph, docs: Set<string>): KnowledgeGraph {
+  if (docs.size === 0) return data;
+  const nodes = data.nodes.filter((n) => n.documents.some((d) => docs.has(d)));
+  const ids = new Set(nodes.map((n) => n.id));
+  return {
+    ...data,
+    nodes,
+    edges: data.edges.filter(
+      (e) => ids.has(e.source) && ids.has(e.target) && (e.origin === "topic" || docs.has(e.filename)),
+    ),
+  };
+}
+
 function byCategory(data: KnowledgeGraph): KnowledgeGraph {
   const cats = new Map<string, number>();
   for (const n of data.nodes) cats.set(n.category || "Other", (cats.get(n.category || "Other") ?? 0) + 1);
@@ -187,6 +206,8 @@ export default function GraphView({ theme, onThemeChange }: Props) {
   // Categories view: the graph redrawn as category trees (see byCategory).
   const [categories, setCategories] = useState(false);
   const [source, setSource] = useState<Source>("all");
+  // Documents to restrict the graph to. Empty = no restriction.
+  const [docFilter, setDocFilter] = useState<Set<string>>(new Set());
   // A node to select once the graph reloads -- after adding or exploring, the
   // thing you just made is what you want to look at.
   const [focusKey, setFocusKey] = useState<string | null>(null);
@@ -272,7 +293,14 @@ export default function GraphView({ theme, onThemeChange }: Props) {
       ) : (
         <Scene
           key={`${categories ? "categories" : "entities"}-${source}`}
-          data={categories ? byCategory(bySource(data, source)) : bySource(data, source)}
+          data={
+            categories
+              ? byCategory(byDocuments(bySource(data, source), docFilter))
+              : byDocuments(bySource(data, source), docFilter)
+          }
+          allDocuments={[...new Set(data.nodes.flatMap((n) => n.documents))].sort()}
+          docFilter={docFilter}
+          onDocFilter={setDocFilter}
           source={source}
           onSource={setSource}
           onReload={async (key?: string) => {
@@ -377,7 +405,13 @@ function Scene({
   onReload,
   focusKey,
   onFocused,
+  allDocuments,
+  docFilter,
+  onDocFilter,
 }: {
+  allDocuments: string[];
+  docFilter: Set<string>;
+  onDocFilter: (s: Set<string>) => void;
   source: Source;
   onSource: (s: Source) => void;
   onReload: (key?: string) => Promise<void>;
@@ -414,7 +448,9 @@ function Scene({
   const [hover, setHover] = useState<{ i: number; x: number; y: number } | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
   const [newTopic, setNewTopic] = useState("");
-  const [topicBusy, setTopicBusy] = useState<"add" | "explore" | "remove" | null>(null);
+  const [docQuery, setDocQuery] = useState("");
+  const [docsOpen, setDocsOpen] = useState(false);
+  const [topicBusy, setTopicBusy] = useState<"add" | "explore" | "discover" | "remove" | null>(null);
   const [topicError, setTopicError] = useState<string | null>(null);
   // The reading panel's width, dragged from its left edge and remembered.
   const [panelWidth, setPanelWidth] = useState(352);
@@ -1123,8 +1159,15 @@ function Scene({
               className="min-w-0 flex-1 rounded-[var(--md-shape-sm)] px-2.5 py-1.5 text-xs outline-none"
               style={{ background: panel, color: ink.text, border: `1px solid ${ink.chip}` }}
             />
-            <button type="submit" disabled={!newTopic.trim() || !!topicBusy} className="rounded-[var(--md-shape-sm)] px-2 text-xs" style={chip(true)}>
-              {topicBusy === "add" ? "…" : "Add"}
+            <button
+              type="submit"
+              disabled={!newTopic.trim() || !!topicBusy}
+              aria-label="Add topic"
+              title="Add it, linked to related nodes"
+              className="grid h-8 w-8 shrink-0 place-items-center rounded-full disabled:opacity-50"
+              style={{ background: ink.on, color: ink.onText }}
+            >
+              {topicBusy === "add" ? <IconSpinner className="h-4 w-4" /> : <IconPlus className="h-4 w-4" />}
             </button>
           </form>
           {topicError && (
@@ -1189,6 +1232,71 @@ function Scene({
               );
             })}
           </div>
+          {allDocuments.length > 0 && (
+            <div className="pointer-events-auto rounded-[var(--md-shape-md)] p-1.5 text-xs" style={{ background: panel, color: ink.text }}>
+              <button
+                type="button"
+                onClick={() => setDocsOpen((v) => !v)}
+                className="flex w-full items-center gap-2 rounded-[var(--md-shape-sm)] px-2 py-1 text-left"
+                aria-expanded={docsOpen}
+              >
+                <span className="flex-1">Documents</span>
+                <span style={{ opacity: 0.55 }}>
+                  {docFilter.size ? `${docFilter.size} of ${allDocuments.length}` : "all"}
+                </span>
+                <span aria-hidden>{docsOpen ? "▾" : "▸"}</span>
+              </button>
+              {docsOpen && (
+                <div className="mt-1 space-y-1">
+                  <input
+                    value={docQuery}
+                    onChange={(e) => setDocQuery(e.target.value)}
+                    placeholder="Find a document…"
+                    aria-label="Find a document"
+                    className="w-full rounded-[var(--md-shape-sm)] px-2 py-1 outline-none"
+                    style={{ background: "transparent", color: ink.text, border: `1px solid ${ink.chip}` }}
+                  />
+                  <ul className="max-h-48 overflow-y-auto">
+                    {allDocuments
+                      .filter((d) => d.toLowerCase().includes(docQuery.trim().toLowerCase()))
+                      .map((d) => {
+                        const on = docFilter.has(d);
+                        return (
+                          <li key={d}>
+                            <button
+                              type="button"
+                              role="checkbox"
+                              aria-checked={on}
+                              onClick={() => {
+                                const next = new Set(docFilter);
+                                if (on) next.delete(d);
+                                else next.add(d);
+                                setSelected(null);
+                                onDocFilter(next);
+                              }}
+                              className="flex w-full items-center gap-2 rounded-[var(--md-shape-sm)] px-2 py-1 text-left"
+                              style={{ background: on ? ink.chip : "transparent" }}
+                              title={d}
+                            >
+                              <span
+                                className="grid h-3 w-3 shrink-0 place-items-center rounded-[3px]"
+                                style={{ border: `1px solid ${ink.faint}`, background: on ? ink.on : "transparent" }}
+                              />
+                              <span className="min-w-0 flex-1 truncate">{d}</span>
+                            </button>
+                          </li>
+                        );
+                      })}
+                  </ul>
+                  {docFilter.size > 0 && (
+                    <button type="button" className="w-full rounded-[var(--md-shape-sm)] px-2 py-1" style={chip(false)} onClick={() => onDocFilter(new Set())}>
+                      Show all documents
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Top-right: the scatter's controls, in the same order. */}
@@ -1259,7 +1367,7 @@ function Scene({
                 <button
                   type="button"
                   disabled={!!topicBusy}
-                  className="rounded-[var(--md-shape-sm)] px-2.5 py-1.5 text-xs font-medium"
+                  className="flex items-center gap-1.5 rounded-[var(--md-shape-sm)] px-2.5 py-1.5 text-xs font-medium"
                   style={chip(true)}
                   title="Pull in the concepts around this one as new connected topics"
                   onClick={async () => {
@@ -1275,7 +1383,30 @@ function Scene({
                     }
                   }}
                 >
+                  {topicBusy === "explore" && <IconSpinner className="h-3.5 w-3.5" />}
                   {topicBusy === "explore" ? "Exploring…" : "Explore related topics"}
+                </button>
+                <button
+                  type="button"
+                  disabled={!!topicBusy}
+                  className="flex items-center gap-1.5 rounded-[var(--md-shape-sm)] px-2.5 py-1.5 text-xs font-medium"
+                  style={chip(true)}
+                  title="Search the web and add what the results connect it to, each with a description and facts"
+                  onClick={async () => {
+                    setTopicBusy("discover");
+                    setTopicError(null);
+                    try {
+                      await discoverTopic(chosen.id);
+                      await onReload(chosen.id);
+                    } catch (err) {
+                      setTopicError(err instanceof Error ? err.message : "Could not discover");
+                    } finally {
+                      setTopicBusy(null);
+                    }
+                  }}
+                >
+                  {topicBusy === "discover" && <IconSpinner className="h-3.5 w-3.5" />}
+                  {topicBusy === "discover" ? "Searching the web…" : "Discover from the web"}
                 </button>
                 {chosen.origin === "topic" && (
                   <button

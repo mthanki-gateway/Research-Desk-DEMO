@@ -65,6 +65,18 @@ async def explore_topic(key: str, user: User = Depends(current_user)) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post("/graph/topics/{key}/discover")
+async def discover_topic(key: str, user: User = Depends(current_user)) -> dict:
+    """Search the web for this node and add what the results connect it to,
+    each with a description and facts saved for reading."""
+    try:
+        return await topics.discover(user.owner_id, key)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except topics.TopicError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.delete("/graph/topics/{key}", status_code=204)
 async def delete_topic(key: str, user: User = Depends(current_user)) -> None:
     await topics.remove_topic(user.owner_id, key)

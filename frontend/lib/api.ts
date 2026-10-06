@@ -1162,6 +1162,12 @@ export async function exploreTopic(key: string): Promise<{ key: string; added: n
   return res.json();
 }
 
+export async function discoverTopic(key: string): Promise<{ key: string; added: number }> {
+  const res = await authedFetch(`/corpus/graph/topics/${encodeURIComponent(key)}/discover`, { method: "POST" });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
 export async function deleteTopic(key: string): Promise<void> {
   const res = await authedFetch(`/corpus/graph/topics/${encodeURIComponent(key)}`, { method: "DELETE" });
   if (!res.ok) throw new Error(await detail(res));
