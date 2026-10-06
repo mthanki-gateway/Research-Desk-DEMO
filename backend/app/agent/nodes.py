@@ -579,18 +579,25 @@ async def retrieve_node(state: ResearchState) -> dict:
 
     gathered = []
     per_query = []
+    routes = state.get("query_routes") or {}
     for raw_query in queries:
         query = as_query(raw_query)
-        hits = await retrieve(
-            query,
-            top_k=top_k,
-            document_ids=document_ids,
-            owner_id=state.get("owner_id"),
-            multi_query=state.get("multi_query"),
-            exclude_chunk_ids=seen,
-        )
+        # Routed by the critic, which knows what kind of fact each gap is.
+        # A query about the world is not searched in the documents, and one
+        # about the documents is not searched on the web.
+        route = routes.get(raw_query, "")
+        hits = []
+        if route != "web":
+            hits = await retrieve(
+                query,
+                top_k=top_k,
+                document_ids=document_ids,
+                owner_id=state.get("owner_id"),
+                multi_query=state.get("multi_query"),
+                exclude_chunk_ids=seen,
+            )
         gathered.extend(hits)
-        entry = {"query": query, "n": len(hits)}
+        entry = {"query": query, "n": len(hits), "route": route or "both"}
 
         # THE WEB IS RETRIED TOO, and this is the fix for a whole class of
         # wrong answer.
@@ -618,7 +625,7 @@ async def retrieve_node(state: ResearchState) -> dict:
         # "use these", not "use nothing else" -- the scope narrows the DOCUMENT
         # search, and the web is a different source the selection says nothing
         # about.
-        if retry and websearch.enabled():
+        if (retry or route == "web") and route != "documents" and websearch.enabled():
             try:
                 web_hits = await websearch.search_web(query, limit=top_k)
                 gathered.extend(web_hits)
@@ -664,83 +671,63 @@ async def retrieve_node(state: ResearchState) -> dict:
 # One constant appended to both, rather than the text copied into each: a
 # rule improved in one place and not the other is how they drifted apart the
 # first time.
-ANSWER_RULES = """<reporting_the_work>
-The assistant opens with one short sentence saying what it did, then a blank \
-line, then the answer. The person cannot see the retrieval, so without this \
-they cannot tell a thin answer from a thin corpus: "I don't know" reads the \
-same whether nothing was searched or everything was.
+ANSWER_RULES = """<answer_first>
+The assistant opens with the answer itself. If the person asked which, \
+how much, when or whether, the first sentence says which, how much, when or \
+whether, plainly: "The Chinese Wisteria is the largest: mature vines reach \
+30 to 40 feet, sometimes over 60 [4]." Evidence and caveats come after the \
+answer, never instead of it. An answer that surveys what the sources mention \
+without committing to a conclusion the sources support is a failure, even \
+when every sentence is true.
 
-The "Search coverage" line below says what this turn actually did, and the \
-assistant reports that and nothing else. It is a record of work performed, \
-never a list of what was available. If it does not say the web was searched, \
-the web was not searched, and claiming otherwise would be a false statement \
-about the assistant's own behaviour.
+When the sources genuinely cannot settle it, the first sentence says that, \
+and says what would.
+</answer_first>
 
-Looking up collection metadata (how many documents exist, their names, their \
-sizes) is not a search, because nothing inside them was read. The assistant \
-says precisely what happened, for example:
+<the_work_is_already_shown>
+The person can see every search that ran, listed above the answer. So the \
+assistant does not open with a report of what it searched ("I searched your \
+documents and the web") and does not repeat one at the end; that line on \
+every reply is exactly the kind of repetition a careful writer avoids.
 
-    I checked your document list without searching inside the documents.
+It mentions where something came from only where that changes how the \
+answer should be read: "Your book lists the plants but gives no sizes, so \
+the heights below are from horticultural sources." The "Search coverage" \
+line below is the record of what actually ran; it never claims a search \
+that is not in it, and looking up the document list is not a search inside \
+the documents.
 
-    I searched your documents.
-
-    I searched your documents and the web.
-
-    I searched your documents and found nothing on this, so the answer below \
-is from the web.
-
-If a memory update is reported below, the assistant says so in that same \
-opening sentence, plainly and quoting what was stored:
-
-    I've remembered that you always want a table when comparing numbers, and \
-searched your documents and the web.
-
-It never claims a search it was not told about, never pads this into a \
-paragraph, and never repeats it at the end. If a later turn asks what was \
-searched, it answers from what the coverage line said rather than dismissing \
-its own earlier report as boilerplate.
-</reporting_the_work>
+If a memory update is reported below, it says so in one short clause, \
+quoting what was stored.
+</the_work_is_already_shown>
 
 <tone_and_formatting>
-The assistant writes in clear, well-organised prose and uses the minimum \
-formatting needed for clarity. Prose broken into paragraphs is the default \
-shape of an answer: one idea per paragraph, no more than about five sentences \
-before a break. When a question has several parts, it answers them in the \
-order asked, each in its own paragraph, rather than weaving them together.
+Clear, well-organised prose with the minimum formatting needed. Paragraphs \
+are separated by real blank lines; the assistant never types the characters \
+backslash-n, which appear on screen as written. One idea per paragraph, at \
+most about five sentences. A question with several parts gets its parts \
+answered in order, each in its own paragraph.
 
-Paragraphs must be separated by real line breaks, meaning an actual blank \
-line. The assistant never types the characters backslash-n, because they \
-appear on screen exactly as written ("records [5] .\\n\\nRegarding the \
-operations..."). An answer delivered as one unbroken block is wrong even when \
-every sentence in it is correct, because nobody reads it.
+A comparison across several items on the same dimensions is a table, not a \
+paragraph of figures:
 
-Lists, tables and headings are exceptions for content that genuinely has that \
-shape, not decoration. A short enumeration is usually better written inline \
-("x, y, and z") than as bullets, and a list of three fragments is harder to \
-read than the sentence it replaced. When the assistant does use a list, each \
-item goes on its own line starting with "- " or "1. ", and each item is a \
-full thought rather than a fragment; it never writes "(1) ... (2) ... (3)" \
-inside a sentence, and never puts list markers on one line ("intro: - first \
-- second"). A table is right when comparing several things across the same \
-dimensions, such as figures by period or documents against what each covers:
+    | Plant | Typical mature height |
+    | --- | --- |
+    | Chinese Wisteria | 30-40 ft [4] |
+    | English Ivy | 20-80 ft [9] |
 
-    | Metric | 2023 | 2024 |
-    | --- | --- | --- |
-    | Gross margin | 58.7% [1] | 62.1% [1] |
+Lists are for genuine enumerations, each item a full thought on its own \
+line; a short enumeration reads better inline. Headings only for genuinely \
+separate topics. Bold only for the one figure or term the person is \
+looking for.
 
-Headings are only for answers covering genuinely separate topics; two \
-paragraphs never need them. Bold is rare, kept for the one figure or term the \
-person is looking for, since bolding everything is the same as bolding \
-nothing.
+Citations: one marker per claim, two at most, at the end of the sentence, \
+list item or table cell it supports. A run like [9] [10] [11] tells the \
+reader nothing more than [9] does; pick the best source. A list of \
+citations at the end of the answer is never used.
 
-Citations go inside the text, at the end of the sentence, list item or table \
-cell they support. A block of citations at the end tells the person nothing \
-about which claim came from where.
-
-The assistant matches its length to the question. A simple question gets a \
-direct answer of a few sentences; structure is never permission to write \
-more. It does not open with flattery or filler such as "Great question", and \
-it does not close by summarising what it just said.
+Length matches the question. No opening flattery, no closing summary of \
+what was just said.
 </tone_and_formatting>"""
 
 
@@ -1385,8 +1372,23 @@ CRITIQUE_SCHEMA = {
         },
         "missing": {
             "type": "array",
-            "items": {"type": "string"},
-            "description": "Self-contained search queries that would fill the gaps.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "source": {
+                        "type": "string",
+                        "enum": ["documents", "web"],
+                        "description": (
+                            "Where the answer to THIS query lives. documents = "
+                            "something only the person's files could say; web "
+                            "= a fact about the world."
+                        ),
+                    },
+                },
+                "required": ["query", "source"],
+            },
+            "description": "Follow-up searches that would fill the gaps, each routed to one source.",
         },
     },
     "required": ["sufficient", "assessment"],
@@ -1446,7 +1448,23 @@ biggest" when every item is named and each size is one search away is the \
 failure this rule exists to prevent.
 
 Write queries as a person would type them into a search engine, or as the \
-passage you hope to find -- never a string of keywords from the question."""
+passage you hope to find -- never a string of keywords from the question.
+
+ROUTE EVERY QUERY TO ONE SOURCE, and word it for that source. Before \
+writing a query, decide what kind of fact the gap is:
+- a fact about the world -- a plant's mature height, a company's revenue, \
+a date in history -- goes to `web`, worded for a search engine \
+("Clematis Jackmanii mature height"). It is never sent to the documents: a \
+gardening book that lists Clematis without its height will not start \
+giving it because the query is reworded, and searching it again only \
+returns the same passages.
+- something only the person's files could say -- what the book recommends, \
+which plants a chapter covers, a figure from their report -- goes to \
+`documents`, worded as the passage you hope to find ("the chapter on \
+climbing plants and where to grow them").
+Never put the same query in both. If a gap needs both, it is two queries: \
+one to find the items in the documents, one per item to look up on the \
+web."""
 
 
 async def critique(state: ResearchState) -> dict:
@@ -1485,11 +1503,19 @@ async def critique(state: ResearchState) -> dict:
         sufficient = bool(result.get("sufficient", True))
         assessment = str(result.get("assessment", ""))
         mode = str(result.get("failure_mode", "") or "")
-        missing = [
-            str(m).strip()
-            for m in result.get("missing", [])
-            if isinstance(m, str) and m.strip()
-        ]
+        # Each follow-up names ONE source. Plain strings (an older shape, or
+        # a model ignoring the schema) are accepted and searched in both.
+        missing, routes = [], {}
+        for m in result.get("missing", []):
+            if isinstance(m, dict):
+                q = str(m.get("query") or "").strip()
+                src = str(m.get("source") or "").strip()
+            else:
+                q, src = str(m).strip(), ""
+            if q:
+                missing.append(q)
+                if src in ("documents", "web"):
+                    routes[q] = src
         overclaims = [
             str(c).strip()
             for c in result.get("unsupported_claims", [])
@@ -1500,7 +1526,7 @@ async def critique(state: ResearchState) -> dict:
         # review than a 502.
         log.warning("critique_failed", error=str(exc))
         sufficient, assessment = True, f"critique unavailable ({exc})"
-        mode, missing, overclaims = "", [], []
+        mode, missing, overclaims, routes = "", [], [], {}
 
     # The drafter's own `unanswered` list is more reliable than the critic's
     # inference -- it knows exactly what it couldn't support. If it reported
@@ -1549,6 +1575,7 @@ async def critique(state: ResearchState) -> dict:
         "missing": missing,
         "unsupported_claims": overclaims,
         "pending_queries": missing,
+        "query_routes": {q: routes[q] for q in missing if q in routes},
         "tried_queries": missing,
         "iterations": iterations,
         "trace": [

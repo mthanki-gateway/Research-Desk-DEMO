@@ -52,55 +52,60 @@ export default function SettingsPage() {
   }, []);
 
   return (
-    <div className="mx-auto max-w-5xl px-6 py-9">
+    <div className="grid min-h-full md:grid-cols-[16rem_1fr]">
+      <nav
+        aria-label="Settings sections"
+        className="space-y-1 border-r px-3 py-9 md:sticky md:top-0 md:h-screen"
+        style={{ borderColor: "var(--md-outline-variant)" }}
+      >
+        <p className="md-title-medium px-2.5 pb-3">Settings</p>
+        {SECTIONS.map((sec) => {
+          const on = section === sec.id;
+          const inner = (
+            <>
+              <span className={`md-morph-tile md-morph-${sec.tone}`} aria-hidden>
+                <sec.Glyph />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="md-label-large block">{sec.label}</span>
+                <span className="md-body-small block truncate" style={{ color: "var(--md-on-surface-variant)" }}>
+                  {sec.hint}
+                </span>
+              </span>
+            </>
+          );
+          const cls = "group md-state flex w-full items-center gap-3 rounded-[var(--md-shape-lg)] px-2.5 py-2 text-left";
+          const style = { background: on ? "var(--md-secondary-container)" : "transparent" };
+          return sec.id === "profile" ? (
+            <Link key={sec.id} href="/profile" className={cls} style={style}>
+              {inner}
+            </Link>
+          ) : (
+            <button
+              key={sec.id}
+              type="button"
+              className={cls}
+              style={style}
+              aria-current={on ? "page" : undefined}
+              onClick={() => {
+                setSection(sec.id);
+                history.replaceState(null, "", `#${sec.id}`);
+              }}
+            >
+              {inner}
+            </button>
+          );
+        })}
+      </nav>
+
+      <div className="min-w-0 max-w-4xl px-8 py-9">
       <header className="mb-6">
-        <h1 className="md-headline-small">Settings</h1>
+        <h1 className="md-headline-small">{section === "features" ? "Feature access" : "API keys"}</h1>
         <p className="md-body-medium mt-1" style={{ color: "var(--md-on-surface-variant)" }}>
           Keys are encrypted on the server and never shown again in full; only the
           last four characters appear here.
         </p>
       </header>
-
-      <div className="grid gap-8 md:grid-cols-[15rem_1fr]">
-        <nav aria-label="Settings sections" className="space-y-1 self-start md:sticky md:top-6">
-          {SECTIONS.map((sec) => {
-            const on = section === sec.id;
-            const inner = (
-              <>
-                <span className={`md-morph-tile md-morph-${sec.tone}`} aria-hidden>
-                  <sec.Glyph />
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="md-label-large block">{sec.label}</span>
-                  <span className="md-body-small block truncate" style={{ color: "var(--md-on-surface-variant)" }}>
-                    {sec.hint}
-                  </span>
-                </span>
-              </>
-            );
-            const cls = "group md-state flex w-full items-center gap-3 rounded-[var(--md-shape-lg)] px-2.5 py-2 text-left";
-            const style = { background: on ? "var(--md-secondary-container)" : "transparent" };
-            return sec.id === "profile" ? (
-              <Link key={sec.id} href="/profile" className={cls} style={style}>
-                {inner}
-              </Link>
-            ) : (
-              <button
-                key={sec.id}
-                type="button"
-                className={cls}
-                style={style}
-                aria-current={on ? "page" : undefined}
-                onClick={() => {
-                  setSection(sec.id);
-                  history.replaceState(null, "", `#${sec.id}`);
-                }}
-              >
-                {inner}
-              </button>
-            );
-          })}
-        </nav>
 
         <div className="min-w-0 space-y-4">
           {error && (

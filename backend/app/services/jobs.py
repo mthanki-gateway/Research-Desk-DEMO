@@ -151,7 +151,7 @@ async def claim() -> dict | None:
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
          )
-        RETURNING id, kind, payload, attempts, max_attempts
+        RETURNING id, kind, payload, attempts, max_attempts, owner_id
         """
     )
     try:
@@ -211,6 +211,11 @@ async def run_one() -> bool:
         return True
 
     try:
+        # A job runs on its OWNER's keys -- a graph extraction or an interview
+        # transcription is that person's usage, not the server's.
+        from app.services import keys
+
+        await keys.bind(job.get("owner_id"))
         result = await handler(dict(job["payload"] or {}))
         await _finish(job["id"], DONE, result, None)
         bound.info("job_done")

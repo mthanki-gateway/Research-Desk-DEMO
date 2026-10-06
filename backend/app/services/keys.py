@@ -195,3 +195,80 @@ async def resolve(owner_id: str | None, provider: str) -> str | None:
     if get_settings().require_user_keys:
         return None
     return getattr(get_settings(), PROVIDERS[provider]["setting"], "") or None
+
+
+# ---------------------------------------------------------------------------
+# Runtime: which key THIS request, job or call should use.
+#
+# A context variable, set once at the edge -- the authenticated request, the
+# job being run, the live socket -- and read by the provider clients just
+# before they send. The repo's rule is that owner scoping for DATA is passed
+# explicitly, never through a context var; this is not data scoping, it is
+# credential selection deep inside shared HTTP clients that a dozen call
+# chains reach, and threading an owner through every one of them is what
+# would drift.
+#
+# Context vars are copied into tasks created from the request, so a
+# background ingest started by an upload carries the uploader's keys too.
+# ---------------------------------------------------------------------------
+
+import contextvars  # noqa: E402
+
+_active: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
+    "provider_keys", default=None
+)
+
+
+class KeyMissing(RuntimeError):
+    """A feature was used without the key it needs. Shown to the person."""
+
+    def __init__(self, provider: str) -> None:
+        self.provider = provider
+        label = PROVIDERS.get(provider, {}).get("label", provider)
+        super().__init__(f"Add your {label} API key in Settings to use this.")
+
+
+async def bind(owner_id: str | None) -> None:
+    """Load this owner's keys into the current context. Never raises."""
+    found: dict[str, str] = {}
+    try:
+        f = _fernet()
+        for pid, row in (await _rows(owner_id)).items():
+            try:
+                found[pid] = f.decrypt(row.ciphertext.encode()).decode()
+            except InvalidToken:
+                continue
+    except Exception:  # noqa: BLE001 - no secret, or no table yet: no user keys
+        found = {}
+    _active.set(found)
+
+
+def key_for(provider: str) -> str:
+    """The key for this call: the person's, else (unless required) the server's."""
+    mine = (_active.get() or {}).get(provider)
+    if mine:
+        return mine
+    if get_settings().require_user_keys:
+        return ""
+    return getattr(get_settings(), PROVIDERS[provider]["setting"], "") or ""
+
+
+def require(provider: str) -> str:
+    """`key_for`, raising KeyMissing instead of returning ""."""
+    key = key_for(provider)
+    if not key:
+        raise KeyMissing(provider)
+    return key
+
+
+def header_hook(provider: str, header: str, fmt: str = "{}"):
+    """An httpx request hook that sets the provider key on every request.
+
+    For the SHARED clients (Gemini LLM, embeddings, Serper), which are built
+    once at startup and so cannot have a person's key baked into them.
+    """
+
+    async def hook(request) -> None:
+        request.headers[header] = fmt.format(require(provider))
+
+    return hook

@@ -38,7 +38,7 @@ class TestToolsAreShared:
         assert "remember_preference" not in names
         assert "read_around" not in names
 
-    def test_speak_reaches_both_the_corpus_and_the_web(self):
+    def test_speak_reaches_both_the_corpus_and_the_web(self, with_keys):
         """A voice assistant that can only reach one of them is half the app."""
         names = {d.name for d in live._declarations("speak")}
         assert "search_documents" in names
@@ -56,7 +56,7 @@ class TestToolsAreShared:
         assert "list_documents" not in names
         assert "corpus_stats" not in names
 
-    def test_the_interview_keeps_the_web(self):
+    def test_the_interview_keeps_the_web(self, with_keys):
         """Worth being able to place a company or a technology they mention."""
         assert "search_web" in {d.name for d in live._declarations("interview")}
 

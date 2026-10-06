@@ -26,6 +26,7 @@ from app.api import (
 )
 from app.api import auth as auth_api
 from app.config import get_settings
+from app.services.keys import KeyMissing
 from app.db.session import create_tables
 from app.services import jobs, tracing
 from app.services.analysis import run_emotion_job
@@ -255,6 +256,17 @@ app.include_router(evaluation.router)
 app.include_router(profile.router)
 app.include_router(playground.router)
 app.include_router(atlas.router)
+
+
+@app.exception_handler(KeyMissing)
+async def _key_missing(_request, exc: KeyMissing):
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(
+        status_code=403,
+        content={"detail": str(exc), "code": "key_required", "provider": exc.provider},
+    )
+
 app.include_router(settings_api.router)
 app.include_router(voice.router)
 app.include_router(live.router)

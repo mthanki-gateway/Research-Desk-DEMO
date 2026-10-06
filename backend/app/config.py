@@ -983,7 +983,7 @@ class Settings(BaseSettings):
     # server's, and the server's keys are the fallback. On: the server's keys
     # stop counting, and a feature whose key the person has not added is
     # unavailable -- the setting for when clients pay for their own usage.
-    require_user_keys: bool = False
+    require_user_keys: bool = True
     supabase_jwt_audience: str = "authenticated"
 
     # One-time migration switch for POST /auth/claim, which assigns rows with

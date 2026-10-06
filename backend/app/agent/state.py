@@ -79,6 +79,12 @@ class ResearchState(TypedDict, total=False):
     # Queries the next retrieve pass should run. `plan` fills it from the
     # question; `critique` refills it with whatever was missing.
     pending_queries: list[str]
+    # Where each pending query should be searched: "documents" or "web".
+    # Written by `critique`, which knows what kind of fact each gap is; a
+    # query not listed is searched everywhere, as before. Without it every
+    # follow-up went to both, so "Clematis mature height" was searched in a
+    # gardening book that never gives heights, every time.
+    query_routes: dict[str, str]
     # Everything ever asked, for the trace. Never overwritten.
     sub_questions: Annotated[list[str], append]
     # Every query already run. Guards the cycle against re-searching the same

@@ -172,6 +172,7 @@ async def current_user(
     settings = get_settings()
 
     if not settings.auth_enabled:
+        await _bind_keys(ANONYMOUS)
         return ANONYMOUS
 
     if credentials is None or not credentials.credentials:
@@ -181,7 +182,20 @@ async def current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    return await _verify(credentials.credentials)
+    user = await _verify(credentials.credentials)
+    await _bind_keys(user)
+    return user
+
+
+async def _bind_keys(user: User) -> None:
+    """Make this caller's own API keys the ones every provider call uses.
+
+    Here, in the dependency every authenticated endpoint already has, so no
+    endpoint can forget it. See services/keys.py.
+    """
+    from app.services import keys
+
+    await keys.bind(user.owner_id)
 
 
 async def optional_user(

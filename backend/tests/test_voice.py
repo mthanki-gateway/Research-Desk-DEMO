@@ -186,6 +186,7 @@ class TestNoSpeechGuard:
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("with_keys")
 class TestTheTurnCanActuallyRun:
     """The graph in the RUNNING server is not the graph in a test process.
 

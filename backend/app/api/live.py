@@ -422,6 +422,12 @@ async def live_socket(
         await ws.close(code=4401)
         return
 
+    # A guest on a Howler link has no account and no keys; the interview
+    # runs on the keys of whoever sent the link.
+    from app.services import keys
+
+    await keys.bind(user.owner_id)
+
     if not live.enabled():
         await ws.send_text(
             json.dumps(

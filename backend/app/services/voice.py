@@ -40,6 +40,7 @@ import httpx
 import structlog
 
 from app.config import get_settings
+from app.services import keys
 
 log = structlog.get_logger()
 
@@ -72,20 +73,18 @@ class VoiceError(RuntimeError):
 
 
 def enabled() -> bool:
-    return bool(get_settings().google_api_key)
+    return bool(keys.key_for("gemini"))
 
 
 def _client() -> httpx.AsyncClient:
     s = get_settings()
-    if not s.google_api_key:
-        raise VoiceError("GOOGLE_API_KEY is not set, so speech is unavailable.")
     return httpx.AsyncClient(
         base_url=GENAI_BASE,
         # Generous: a TTS call for a long answer is slower than a text
         # completion of the same length, and the failure mode of a short
         # timeout here is a turn that silently produces no audio.
         timeout=httpx.Timeout(180.0),
-        headers={"x-goog-api-key": s.google_api_key},
+        headers={"x-goog-api-key": keys.require("gemini")},
     )
 
 

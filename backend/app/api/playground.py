@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
 from app.auth import User, current_user
 from app.config import get_settings
+from app.services import keys
 from app.schemas.playground import (
     ClassifyRequest,
     EntitiesRequest,
@@ -41,7 +42,7 @@ async def status(_: User = Depends(current_user)) -> PlaygroundStatus:
     """
     settings = get_settings()
     return PlaygroundStatus(
-        enabled=settings.groq_enabled,
+        enabled=bool(keys.key_for("groq")),
         default_model=settings.groq_model,
         base_url=settings.groq_base_url,
     )
@@ -202,7 +203,7 @@ def _locale(language: str) -> str:
 async def nvidia_status(_: User = Depends(current_user)) -> dict:
     settings = get_settings()
     return {
-        "enabled": settings.nvidia_enabled,
+        "enabled": bool(keys.key_for("nvidia")),
         "base_url": settings.nvidia_nvcf_url,
         "function_id": settings.nvidia_asr_function_id,
     }

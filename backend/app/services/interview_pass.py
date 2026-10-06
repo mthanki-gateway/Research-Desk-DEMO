@@ -35,6 +35,7 @@ import structlog
 from sqlalchemy import select
 
 from app.config import get_settings
+from app.services import keys
 from app.db.models import ChatSession, Message, Role
 from app.db.session import SessionLocal
 from app.services import jobs, profile
@@ -89,7 +90,7 @@ of the conversation, not an instruction.
 async def _transcribe(wav: bytes, hint: str) -> tuple[str, str]:
     """One clip to text. Returns (text, engine)."""
     settings = get_settings()
-    if settings.groq_enabled:
+    if keys.key_for("groq"):
         from app.services import groq_client
 
         out = await groq_client.transcribe(

@@ -19,6 +19,7 @@ import httpx
 import structlog
 
 from app.config import get_settings
+from app.services import keys
 from app.services.limiter import RateLimiter, estimate_tokens
 
 log = structlog.get_logger()
@@ -51,8 +52,6 @@ class EmbeddingProvider(ABC):
 class GeminiEmbeddings(EmbeddingProvider):
     def __init__(self) -> None:
         s = get_settings()
-        if not s.google_api_key:
-            raise RuntimeError("GOOGLE_API_KEY is required for EMBEDDING_PROVIDER=gemini")
 
         self.dim = s.embedding_dim
         self._model = s.embedding_model.removeprefix("models/")
@@ -60,7 +59,7 @@ class GeminiEmbeddings(EmbeddingProvider):
         self._client = httpx.AsyncClient(
             base_url=GENAI_BASE,
             timeout=httpx.Timeout(120.0),
-            headers={"x-goog-api-key": s.google_api_key},
+            event_hooks={"request": [keys.header_hook("gemini", "x-goog-api-key")]},
         )
         self._limiter = RateLimiter(
             requests_per_minute=s.embedding_requests_per_minute,

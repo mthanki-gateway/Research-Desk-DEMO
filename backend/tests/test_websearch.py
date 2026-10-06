@@ -127,7 +127,7 @@ class TestEnabled:
         monkeypatch.setattr(websearch, "get_settings", lambda: _settings())
         assert websearch.enabled() is False
 
-    def test_on_with_a_key(self, monkeypatch):
+    def test_on_with_a_key(self, monkeypatch, with_keys):
         monkeypatch.setattr(websearch, "get_settings", lambda: _settings(serper_api_key="k"))
         assert websearch.enabled() is True
 

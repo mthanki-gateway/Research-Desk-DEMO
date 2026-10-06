@@ -39,6 +39,7 @@ import httpx
 import structlog
 
 from app.config import get_settings
+from app.services import keys
 
 log = structlog.get_logger()
 
@@ -92,7 +93,7 @@ async def complete(
     against the Gemini path is only interesting if the numbers are on screen.
     """
     settings = get_settings()
-    if not settings.groq_api_key:
+    if not keys.key_for("groq"):
         raise GroqError(
             "GROQ_API_KEY is not set, so there is nothing to call. Add it to "
             ".env and recreate the container with "
@@ -116,7 +117,7 @@ async def complete(
         async with httpx.AsyncClient(
             base_url=settings.groq_base_url,
             timeout=httpx.Timeout(settings.groq_timeout_seconds),
-            headers={"Authorization": f"Bearer {settings.groq_api_key}"},
+            headers={"Authorization": f"Bearer {keys.key_for('groq')}"},
         ) as client:
             resp = await client.post("/chat/completions", json=body)
     except httpx.HTTPError as exc:
@@ -217,7 +218,7 @@ async def transcribe(
     forcing the other language through the wrong one.
     """
     settings = get_settings()
-    if not settings.groq_api_key:
+    if not keys.key_for("groq"):
         raise GroqError(
             "GROQ_API_KEY is not set, so there is nothing to call. Add it to "
             ".env and recreate the container with "
@@ -243,7 +244,7 @@ async def transcribe(
         async with httpx.AsyncClient(
             base_url=settings.groq_base_url,
             timeout=httpx.Timeout(settings.groq_timeout_seconds),
-            headers={"Authorization": f"Bearer {settings.groq_api_key}"},
+            headers={"Authorization": f"Bearer {keys.key_for('groq')}"},
         ) as client:
             resp = await client.post(
                 "/audio/transcriptions",
@@ -314,14 +315,14 @@ async def list_models() -> list[dict[str, Any]]:
     like a bug in this app.
     """
     settings = get_settings()
-    if not settings.groq_api_key:
+    if not keys.key_for("groq"):
         return []
 
     try:
         async with httpx.AsyncClient(
             base_url=settings.groq_base_url,
             timeout=httpx.Timeout(30.0),
-            headers={"Authorization": f"Bearer {settings.groq_api_key}"},
+            headers={"Authorization": f"Bearer {keys.key_for('groq')}"},
         ) as client:
             resp = await client.get("/models")
         resp.raise_for_status()

@@ -60,10 +60,10 @@ export const PROJECTS: Project[] = [
     home: "/chat",
     owns: ["/chat", "/library", "/lab", "/atlas"],
     nav: [
-      { href: "/chat", label: "Chat", Icon: IconChat },
-      { href: "/library", label: "Library", Icon: IconLibrary },
-      { href: "/lab", label: "Lab", Icon: IconLab },
-      { href: "/atlas", label: "Atlas", Icon: IconAtlas },
+      { href: "/chat", label: "Chat", Icon: IconChat, feature: "chat" },
+      { href: "/library", label: "Library", Icon: IconLibrary, feature: "library" },
+      { href: "/lab", label: "Lab", Icon: IconLab, feature: "lab" },
+      { href: "/atlas", label: "Atlas", Icon: IconAtlas, feature: "atlas" },
     ],
   },
   {
@@ -89,9 +89,9 @@ export const PROJECTS: Project[] = [
     home: "/parley",
     owns: ["/parley"],
     nav: [
-      { href: "/parley", label: "Speak", Icon: IconParley },
-      { href: "/parley/interview", label: "Interview", Icon: IconInterview },
-      { href: "/parley/howler", label: "Howler", Icon: IconHowler },
+      { href: "/parley", label: "Speak", Icon: IconParley, feature: "parley" },
+      { href: "/parley/interview", label: "Interview", Icon: IconInterview, feature: "parley" },
+      { href: "/parley/howler", label: "Howler", Icon: IconHowler, feature: "parley" },
     ],
   },
 ];

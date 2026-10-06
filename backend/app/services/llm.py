@@ -37,6 +37,7 @@ import httpx
 import structlog
 
 from app.config import get_settings
+from app.services import keys
 from app.services import tracing
 from app.services.limiter import RateLimiter, estimate_tokens
 
@@ -97,14 +98,15 @@ class GenAIClient:
         tokens_per_minute: int | None = None,
     ) -> None:
         s = get_settings()
-        if not s.google_api_key:
-            raise RuntimeError("GOOGLE_API_KEY is required")
 
         self._model = (model or s.llm_model).removeprefix("models/")
         self._client = httpx.AsyncClient(
             base_url=GENAI_BASE,
             timeout=httpx.Timeout(180.0),
-            headers={"x-goog-api-key": s.google_api_key},
+            # The key is set per REQUEST, from whoever the call is for -- see
+            # services/keys.py. Baking the server's key in here is what made
+            # every saved user key decorative.
+            event_hooks={"request": [keys.header_hook("gemini", "x-goog-api-key")]},
         )
         self._limiter = RateLimiter(
             requests_per_minute=requests_per_minute or s.llm_requests_per_minute,

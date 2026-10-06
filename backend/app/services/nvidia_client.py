@@ -49,6 +49,7 @@ import httpx
 import structlog
 
 from app.config import get_settings
+from app.services import keys
 
 log = structlog.get_logger()
 
@@ -104,7 +105,7 @@ def _friendly(status: int, body: str) -> str:
 
 def _client() -> httpx.AsyncClient:
     settings = get_settings()
-    if not settings.nvidia_api_key:
+    if not keys.key_for("nvidia"):
         raise NvidiaError(
             "NVIDIA_API_KEY is not set. Get a free key from build.nvidia.com, "
             "add it to .env, and recreate the container with "
@@ -113,7 +114,7 @@ def _client() -> httpx.AsyncClient:
     return httpx.AsyncClient(
         base_url=settings.nvidia_nvcf_url,
         timeout=httpx.Timeout(120.0),
-        headers={"Authorization": f"Bearer {settings.nvidia_api_key}"},
+        headers={"Authorization": f"Bearer {keys.key_for('nvidia')}"},
     )
 
 
@@ -305,7 +306,7 @@ async def transcribe(
     gating in the frontend exists for one and not the other.
     """
     settings = get_settings()
-    if not settings.nvidia_api_key:
+    if not keys.key_for("nvidia"):
         raise NvidiaError(
             "NVIDIA_API_KEY is not set. Get a free key from build.nvidia.com, "
             "add it to .env, and recreate the container with "
@@ -324,7 +325,7 @@ async def transcribe(
             audio,
             function_id=function_id,
             language=language,
-            api_key=settings.nvidia_api_key,
+            api_key=keys.key_for("nvidia"),
         )
     except Exception as exc:  # noqa: BLE001 - grpc raises its own error types
         raise NvidiaError(f"Transcription failed: {type(exc).__name__}: {exc}") from exc

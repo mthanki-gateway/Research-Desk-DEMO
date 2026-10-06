@@ -42,6 +42,7 @@ from dataclasses import asdict, dataclass
 import structlog
 
 from app.config import get_settings
+from app.services import keys
 
 log = structlog.get_logger()
 
@@ -138,7 +139,7 @@ def _build_judge():
     llm = LangchainLLMWrapper(
         ChatGoogleGenerativeAI(
             model=settings.judge_model.removeprefix("models/"),
-            google_api_key=settings.google_api_key,
+            google_api_key=keys.key_for("gemini"),
             # Requested for reproducibility -- grading should not vary between
             # runs, or a real regression is indistinguishable from variance.
             #
@@ -161,7 +162,7 @@ def _build_judge():
     embeddings = LangchainEmbeddingsWrapper(
         GoogleGenerativeAIEmbeddings(
             model=settings.embedding_model,
-            google_api_key=settings.google_api_key,
+            google_api_key=keys.key_for("gemini"),
         )
     )
     return llm, embeddings

@@ -331,12 +331,12 @@ export default function Shell({ children }: { children: React.ReactNode }) {
               <Fragment key={href}>
               <Ripplable
                 as={Link}
-                href={locked ? "/settings#keys" : href}
+                href={href}
                 prefetch
                 className="md-nav-item"
                 data-active={active}
                 aria-disabled={locked || undefined}
-                title={locked ? `Add an API key in Settings to use ${label}` : undefined}
+                title={locked ? `${label} needs an API key — add one in Settings` : undefined}
                 style={locked ? { opacity: 0.45 } : undefined}
               >
                 {/* The icon gets its own container so it can carry the hover
@@ -584,6 +584,10 @@ export default function Shell({ children }: { children: React.ReactNode }) {
           } as React.CSSProperties
         }
       >
+        <KeyBanner
+          feature={project.nav.find((n) => n.href === activeHref)?.feature}
+          features={features}
+        />
         {children}
       </main>
 
@@ -657,6 +661,43 @@ export default function Shell({ children }: { children: React.ReactNode }) {
       </Dialog>
 
       <ChunkPanel />
+    </div>
+  );
+}
+
+/**
+ * Shown above a page whose feature has no API key behind it.
+ *
+ * The page still renders -- someone can look around -- but anything that
+ * calls a provider will fail, and this says why before they find out by
+ * clicking. One button, straight to the keys.
+ */
+function KeyBanner({
+  feature,
+  features,
+}: {
+  feature?: string;
+  features: Record<string, boolean> | null;
+}) {
+  if (!feature || !features || features[feature] !== false) return null;
+  return (
+    <div
+      className="sticky top-0 z-20 flex flex-wrap items-center gap-3 px-6 py-3"
+      style={{
+        background: "var(--md-tertiary-container)",
+        color: "var(--md-on-tertiary-container)",
+      }}
+      role="status"
+    >
+      <span className="md-body-medium min-w-0 flex-1">
+        This needs an API key. Add your own in Settings to turn it on.
+      </span>
+      <Link
+        href="/settings#keys"
+        className="md-btn md-btn-filled md-state shrink-0"
+      >
+        Add API key
+      </Link>
     </div>
   );
 }

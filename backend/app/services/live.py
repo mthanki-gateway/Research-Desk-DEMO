@@ -58,7 +58,7 @@ from google.genai import types
 
 from app.agent import tools as agent_tools
 from app.config import get_settings
-from app.services import live_prompts, profile, websearch
+from app.services import keys, live_prompts, profile, websearch
 
 log = structlog.get_logger()
 
@@ -140,7 +140,7 @@ def kind_of(mode: str) -> str:
 
 
 def enabled() -> bool:
-    return bool(get_settings().google_api_key)
+    return bool(keys.key_for("gemini"))
 
 
 def _declarations(
@@ -373,11 +373,8 @@ def config(
 
 
 def client() -> genai.Client:
-    settings = get_settings()
-    if not settings.google_api_key:
-        raise RuntimeError("GOOGLE_API_KEY is required for Parley.")
     return genai.Client(
-        api_key=settings.google_api_key, http_options={"api_version": "v1beta"}
+        api_key=keys.require("gemini"), http_options={"api_version": "v1beta"}
     )
 
 

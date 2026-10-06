@@ -26,6 +26,7 @@ import httpx
 import structlog
 
 from app.config import get_settings
+from app.services import keys
 from app.services import progress, tracing
 from app.services.limiter import RateLimiter
 from app.services.vectorstore import SearchHit
@@ -52,7 +53,7 @@ _limiter: RateLimiter | None = None
 
 
 def enabled() -> bool:
-    return bool(get_settings().serper_api_key)
+    return bool(keys.key_for("serper"))
 
 
 def _get_client() -> httpx.AsyncClient:
@@ -62,9 +63,9 @@ def _get_client() -> httpx.AsyncClient:
         _client = httpx.AsyncClient(
             timeout=httpx.Timeout(20.0),
             headers={
-                "X-API-KEY": settings.serper_api_key,
                 "Content-Type": "application/json",
             },
+            event_hooks={"request": [keys.header_hook("serper", "X-API-KEY")]},
         )
         _limiter = RateLimiter(
             requests_per_minute=settings.serper_requests_per_minute,
