@@ -152,17 +152,46 @@ body {
   max-width: 100%;
 }
 
-:root {
-  /* Shared page canvas: Model Lab's blue surface tone across all app areas. */
-  --app-background: #f3f3f6;
+:root[data-accent] {
+  /* Share Model Lab's neutral surfaces across the app areas. The app-specific
+     primary, secondary and tertiary accent colors remain theme-controlled. */
+  --md-background: #fcfcff;
+  --md-surface: #fcfcff;
+  --md-surface-variant: #dfe3ea;
+  --md-outline: #72787e;
+  --md-outline-variant: #c2c7ce;
+  --md-inverse-surface: #2f3033;
+  --md-inverse-on-surface: #f0f0f4;
+  --md-surface-dim: #d9dadd;
+  --md-surface-bright: #f9f9fc;
+  --md-surface-container-lowest: #ffffff;
+  --md-surface-container-low: #f3f3f6;
+  --md-surface-container: #ededf1;
+  --md-surface-container-high: #e8e8eb;
+  --md-surface-container-highest: #e2e2e5;
 }
 
 @media (prefers-color-scheme: dark) {
-  :root { --app-background: #1a1c1e; }
+  :root[data-accent] {
+    --md-background: #1a1c1e;
+    --md-surface: #1a1c1e;
+    --md-surface-variant: #42474e;
+    --md-outline: #8c9198;
+    --md-outline-variant: #42474e;
+    --md-inverse-surface: #e2e2e5;
+    --md-inverse-on-surface: #2f3033;
+    --md-surface-dim: #111416;
+    --md-surface-bright: #37393c;
+    --md-surface-container-lowest: #0c0e11;
+    --md-surface-container-low: #1a1c1e;
+    --md-surface-container: #1e2022;
+    --md-surface-container-high: #282a2d;
+    --md-surface-container-highest: #333537;
+  }
 }
 
 body {
-  background: var(--app-background);
+  background: var(--md-surface-container-low);
   color: var(--md-on-surface);
   font-family: Roboto, system-ui, -apple-system, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
