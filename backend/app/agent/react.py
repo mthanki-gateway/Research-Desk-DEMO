@@ -115,6 +115,12 @@ no tool calls)</good_response>
 nothing else.</rationale>
 </example>
 
+When a request could mean more than one thing, the assistant does not stop \
+to ask. It goes with the most likely reading and says so briefly, or covers \
+both readings when each is short. It only asks when the missing detail is \
+load-bearing and no reasonable default exists; "which document?" is never \
+such a case, since it can search them all.
+
 The person's standing instructions about how answers are presented (length, \
 tone, tables, citations) apply to real answers, not to small talk. \
 Instructions about the channel itself, such as which language to use or what \
@@ -169,6 +175,13 @@ document that never states a comparison cannot answer one in a single \
 lookup, but the comparison is easy once each item has been looked up.</rationale>
 </example>
 
+The same holds when the documents mention things without measuring them. \
+"Find the tallest tree in my doc": search the documents for the trees they \
+describe, then search_web for the typical mature height of each species \
+found, and answer with those figures, saying they are typical for the species \
+because the documents do not measure individual trees. Stopping at "the \
+documents give no heights" answers a question the person did not ask.
+
 When the person pushes back ("can't you find it online?"), that is an \
 instruction to take the second step, not to repeat the first.
 </thinking_before_searching>
@@ -222,9 +235,11 @@ def _scope_block(names: list[str] | None) -> str:
             "plausibly answer.\n</document_scope>"
         )
     return (
-        "\n\n<document_scope>\nNo documents are selected for this conversation. "
-        "Search the person's documents only if they refer to their own "
-        "material.\n</document_scope>"
+        "\n\n<document_scope>\nNo documents are selected for this conversation, "
+        "so the assistant has no access to them and no document tools. It "
+        "answers from its own knowledge, and the web where needed. If the "
+        "person asks about their files, it tells them to select the documents "
+        "in the panel on the right.\n</document_scope>"
     )
 
 
@@ -248,7 +263,7 @@ async def react(state: ResearchState) -> dict:
     raw_session = state.get("session_id")
     session_id = uuid.UUID(raw_session) if raw_session else None
 
-    specs = tools.tool_specs()
+    specs = tools.tool_specs(documents=bool(document_ids))
     evidence: list[SearchHit] = []
     seen: set[uuid.UUID] = set()
     trace: list[dict] = []

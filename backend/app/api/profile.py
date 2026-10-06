@@ -14,6 +14,7 @@ import uuid
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from app.auth import User, current_user
@@ -29,15 +30,14 @@ router = APIRouter(prefix="/profile", tags=["profile"])
 
 @router.get("/memory", response_model=ProfileMemoryOut)
 async def get_memory(user: User = Depends(current_user)) -> ProfileMemoryOut:
-    """Everything remembered, grouped by scope.
+    """Everything remembered and IN FORCE, grouped by scope.
 
-    Includes INACTIVE preferences. `forget` is a soft delete precisely so this
-    view can show what was once in force -- an instruction the user cancelled
-    is itself part of the record, and hiding it would make a preference that
-    stopped applying look like one that was never captured.
+    Forgotten preferences are left out. They used to be listed struck through
+    as an audit trail, and the page became a growing list of things that no
+    longer apply; `forget` is still a soft delete underneath.
     """
     async with SessionLocal() as db:
-        stmt = select(Preference)
+        stmt = select(Preference).where(Preference.active.is_(True))
         if user.owner_id is not None:
             stmt = stmt.where(Preference.owner_id == user.owner_id)
         # Newest first: the thing most likely to explain today's behaviour is
@@ -82,6 +82,47 @@ async def get_memory(user: User = Depends(current_user)) -> ProfileMemoryOut:
     ]
 
     return ProfileMemoryOut(user_preferences=user_level, conversations=conversations)
+
+
+class NewPreference(BaseModel):
+    text: str = Field(min_length=2, max_length=500)
+
+
+@router.post("/memory", response_model=MemoryOut, status_code=201)
+async def add_memory(body: NewPreference, user: User = Depends(current_user)) -> MemoryOut:
+    """A preference the person writes themselves, applying everywhere.
+
+    Stored verbatim and tagged `user`, so it is never mistaken for one the
+    assistant inferred.
+    """
+    async with SessionLocal() as db:
+        row = Preference(
+            owner_id=user.owner_id,
+            text=body.text.strip(),
+            origin="user",
+            active=True,
+        )
+        db.add(row)
+        await db.commit()
+        await db.refresh(row)
+    return MemoryOut.model_validate(row)
+
+
+@router.delete("/account")
+async def delete_account(user: User = Depends(current_user)) -> dict:
+    """Delete the CALLER's account data, everywhere.
+
+    No id in the path or body: the owner comes only from the verified token,
+    so there is nothing a request can change to aim this at someone else.
+    """
+    from app.services import account
+
+    try:
+        counts = await account.delete_account(user.owner_id)
+    except account.NoAccount as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log.info("account_delete_requested", deleted=counts)
+    return {"deleted": counts}
 
 
 @router.delete("/memory/{preference_id}", status_code=204)

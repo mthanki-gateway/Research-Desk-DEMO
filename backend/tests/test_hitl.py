@@ -136,19 +136,27 @@ class TestRouting:
     def test_asks_only_when_a_question_was_drafted(self):
         assert needs_human({"pending_clarification": {"question": "?"}}) == "ask_human"
 
+    # The planned path is for chats WITH documents selected; with none, the
+    # agent answers (see test_no_documents_takes_the_agent_path).
     def test_clear_question_goes_straight_to_plan(self):
-        assert needs_human({}) == "plan"
+        assert needs_human({"document_ids": ["d1"]}) == "plan"
 
     def test_empty_clarification_goes_straight_to_plan(self):
         """`clarify` writes nothing when the request is already specific."""
-        assert needs_human({"pending_clarification": {}}) == "plan"
+        assert needs_human({"pending_clarification": {}, "document_ids": ["d1"]}) == "plan"
 
     def test_cancel_ends_the_run(self):
         assert after_human({"cancelled": True}) == END
 
     def test_otherwise_plans(self):
-        assert after_human({"cancelled": False}) == "plan"
-        assert after_human({}) == "plan"
+        assert after_human({"cancelled": False, "document_ids": ["d1"]}) == "plan"
+        assert after_human({"document_ids": ["d1"]}) == "plan"
+
+    def test_no_documents_takes_the_agent_path(self):
+        """No documents selected: there is nothing for the planner to look
+        up, and it turned "Hello!" into a failed document search."""
+
+        assert after_human({"cancelled": False}) == "react"
 
 
 # --------------------------------------------------------------------------
@@ -236,13 +244,13 @@ def _reset_calls():
 class TestGraphPauseResume:
     async def test_runs_straight_through_when_clarify_is_off(self):
         graph = _stub_graph()
-        out = await graph.ainvoke({"question": ORIGINAL, "clarify": False}, config=CONFIG)
+        out = await graph.ainvoke({"question": ORIGINAL, "clarify": False, "document_ids": ["d1"]}, config=CONFIG)
         assert interrupt_payload(out) is None
         assert out["draft"] == ORIGINAL
 
     async def test_pauses_before_planning_when_the_question_is_vague(self):
         graph = _stub_graph()
-        out = await graph.ainvoke({"question": ORIGINAL, "clarify": True}, config=CONFIG)
+        out = await graph.ainvoke({"question": ORIGINAL, "clarify": True, "document_ids": ["d1"]}, config=CONFIG)
 
         payload = interrupt_payload(out)
         assert payload is not None
@@ -257,7 +265,7 @@ class TestGraphPauseResume:
 
     async def test_answer_reaches_the_planner(self):
         graph = _stub_graph()
-        await graph.ainvoke({"question": ORIGINAL, "clarify": True}, config=CONFIG)
+        await graph.ainvoke({"question": ORIGINAL, "clarify": True, "document_ids": ["d1"]}, config=CONFIG)
 
         out = await graph.ainvoke(
             Command(resume={"action": "answer", "answer": "Construction methods"}),
@@ -269,7 +277,7 @@ class TestGraphPauseResume:
 
     async def test_skip_plans_the_original_question(self):
         graph = _stub_graph()
-        await graph.ainvoke({"question": ORIGINAL, "clarify": True}, config=CONFIG)
+        await graph.ainvoke({"question": ORIGINAL, "clarify": True, "document_ids": ["d1"]}, config=CONFIG)
 
         out = await graph.ainvoke(Command(resume={"action": "skip"}), config=CONFIG)
         assert out["draft"] == ORIGINAL
@@ -277,7 +285,7 @@ class TestGraphPauseResume:
 
     async def test_cancel_never_plans(self):
         graph = _stub_graph()
-        await graph.ainvoke({"question": ORIGINAL, "clarify": True}, config=CONFIG)
+        await graph.ainvoke({"question": ORIGINAL, "clarify": True, "document_ids": ["d1"]}, config=CONFIG)
 
         out = await graph.ainvoke(Command(resume={"action": "cancel"}), config=CONFIG)
         assert out["cancelled"] is True
@@ -292,7 +300,7 @@ class TestGraphPauseResume:
         second time -- silently, and only on the human-in-the-loop path.
         """
         graph = _stub_graph()
-        await graph.ainvoke({"question": ORIGINAL, "clarify": True}, config=CONFIG)
+        await graph.ainvoke({"question": ORIGINAL, "clarify": True, "document_ids": ["d1"]}, config=CONFIG)
         assert CALLS.count("clarify") == 1
 
         await graph.ainvoke(Command(resume={"action": "skip"}), config=CONFIG)
@@ -306,7 +314,7 @@ class TestGraphPauseResume:
         lets a real resume arrive from a different worker, after a deploy.
         """
         graph = _stub_graph()
-        await graph.ainvoke({"question": ORIGINAL, "clarify": True}, config=CONFIG)
+        await graph.ainvoke({"question": ORIGINAL, "clarify": True, "document_ids": ["d1"]}, config=CONFIG)
 
         snapshot = await graph.aget_state(CONFIG)
         assert snapshot.next == ("ask_human",)
@@ -321,8 +329,8 @@ class TestGraphPauseResume:
         a = {"configurable": {"thread_id": "a"}}
         b = {"configurable": {"thread_id": "b"}}
 
-        await graph.ainvoke({"question": "qa", "clarify": True}, config=a)
-        await graph.ainvoke({"question": "qb", "clarify": True}, config=b)
+        await graph.ainvoke({"question": "qa", "clarify": True, "document_ids": ["d1"]}, config=a)
+        await graph.ainvoke({"question": "qb", "clarify": True, "document_ids": ["d1"]}, config=b)
 
         out_a = await graph.ainvoke(Command(resume={"action": "cancel"}), config=a)
         assert out_a["cancelled"] is True

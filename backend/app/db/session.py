@@ -143,6 +143,14 @@ _MIGRATIONS: tuple[str, ...] = (
     # scan on every poll -- cheap at this size and not worth leaving to grow.
     "CREATE INDEX IF NOT EXISTS jobs_claim_idx "
     "ON jobs (kind, status, created_at)",
+    # Who added a preference: the assistant, from something said in a chat,
+    # or the person, typing it on the profile page. Existing rows were all
+    # captured by the assistant, which is what the default says.
+    "ALTER TABLE preferences ADD COLUMN IF NOT EXISTS origin VARCHAR(16) "
+    "NOT NULL DEFAULT 'assistant'",
+    # Topic category per entity, for the graph's Categories view.
+    "ALTER TABLE graph_entities ADD COLUMN IF NOT EXISTS category VARCHAR(32) "
+    "NOT NULL DEFAULT 'Other'",
 )
 
 

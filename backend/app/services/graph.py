@@ -57,6 +57,25 @@ MAX_NODES = 250
 
 TYPES = ["person", "organization", "place", "product", "concept", "event", "other"]
 
+# Topic categories, for the graph's Categories view: what FIELD a term
+# belongs to, as opposed to what KIND of thing it is (`type`). "CUDA" is a
+# product by type and Technology by category; "subalpine fir" is a concept
+# and Nature. A fixed list, so the same category never splits into two
+# spellings across documents.
+CATEGORIES = [
+    "Technology",
+    "Science",
+    "Business",
+    "People & Society",
+    "Nature",
+    "Places",
+    "History",
+    "Arts & Culture",
+    "Health",
+    "Food",
+    "Other",
+]
+
 SYSTEM = """<role>
 The assistant reads passages from one document and extracts a knowledge \
 graph: the specific entities the text mentions and the relationships it \
@@ -71,15 +90,29 @@ named the way the text most fully names it ("Acme Corporation", not "they"), \
 so that the same thing mentioned twice gets the same name.
 </entities>
 
-<relations>
-A relation is something the text states, not something the assistant infers \
-or knows from elsewhere. The predicate is a short verb phrase in lowercase \
-("acquired", "is located in", "reports to", "depends on"). Both ends must be \
-entities from the list. Each relation names the passage number it came from.
+<categories>
+Each entity also gets a `category`: the field it belongs to, from the fixed \
+list (Technology, Science, Business, People & Society, Nature, Places, \
+History, Arts & Culture, Health, Food, Other). A GPU toolkit is Technology, \
+a tree species is Nature, a company is Business, a monument is History.
+</categories>
 
-Quality matters more than coverage: a dozen relations that are plainly stated \
-are worth more than fifty guesses, because every edge is shown to the person \
-as something their document says.
+<relations>
+A relation is a connection the passage states OR clearly implies: the \
+reader of that passage would agree the two things are connected that way. \
+That includes lists and comparisons ("alternatives include ROCm, OpenCL and \
+SYCL" -> each "alternative to" the thing they are alternatives to), \
+membership and parts ("plot CR-11 is part of the Cascade Ridge survey"), \
+use ("the toolkit includes a compiler" -> "includes"), location, cause, and \
+sequence. It is not something the assistant knows from elsewhere: if the \
+passage gives no basis for the link, there is no relation.
+
+The predicate is a short verb phrase in lowercase ("alternative to", \
+"part of", "used for", "located in", "developed by"). Both ends must be \
+entities from the list. Each relation names the passage it came from, \
+because the person opens that passage from the graph to read the connection \
+in context. Most entities in a passage connect to something else in it; \
+aim to connect each one where the passage supports it.
 </relations>
 
 <input_handling>
@@ -97,8 +130,9 @@ SCHEMA = {
                 "properties": {
                     "name": {"type": "string"},
                     "type": {"type": "string", "enum": TYPES},
+                    "category": {"type": "string", "enum": CATEGORIES},
                 },
-                "required": ["name", "type"],
+                "required": ["name", "type", "category"],
             },
         },
         "relations": {
@@ -187,6 +221,7 @@ async def run_graph_job(payload: dict) -> dict:
 
     names: dict[str, str] = {}
     types: dict[str, Counter] = defaultdict(Counter)
+    categories: dict[str, Counter] = defaultdict(Counter)
     mentions: Counter = Counter()
     relations: list[tuple[str, str, str, uuid.UUID]] = []
 
@@ -208,6 +243,8 @@ async def run_graph_job(payload: dict) -> dict:
             if len(name) > len(names.get(k, "")):
                 names[k] = name
             types[k][str(e.get("type") or "other")] += 1
+            cat = str(e.get("category") or "Other")
+            categories[k][cat if cat in CATEGORIES else "Other"] += 1
             mentions[k] += 1
             local.add(k)
         for r in found.get("relations") or []:
@@ -232,6 +269,7 @@ async def run_graph_job(payload: dict) -> dict:
                 key=k,
                 name=names[k],
                 type=types[k].most_common(1)[0][0],
+                category=(categories[k].most_common(1) or [("Other", 0)])[0][0],
                 mentions=mentions[k],
             )
             for k in names
@@ -270,7 +308,7 @@ async def enqueue_for(document_id: uuid.UUID, owner_id: str | None) -> None:
     )
 
 
-async def backfill(owner_id: str | None) -> int:
+async def backfill(owner_id: str | None, rebuild: bool = False) -> int:
     """Queue every ready document of this owner's that has no graph and no job.
 
     For documents indexed before the graph existed. Skipping ones with a job
@@ -290,7 +328,7 @@ async def backfill(owner_id: str | None) -> int:
                     if owner_id is not None
                     else Document.owner_id.is_(None),
                     Document.status == DocStatus.ready,
-                    Document.id.not_in(has_graph),
+                    *(() if rebuild else (Document.id.not_in(has_graph),)),
                     Document.id.not_in(pending),
                 )
             )
@@ -314,6 +352,7 @@ async def read(owner_id: str | None) -> dict[str, Any]:
                     GraphEntity.type,
                     GraphEntity.mentions,
                     Document.filename,
+                    GraphEntity.category,
                 )
                 .join(Document, Document.id == GraphEntity.document_id)
                 .where(owner(GraphEntity.owner_id))
@@ -352,10 +391,19 @@ async def read(owner_id: str | None) -> dict[str, Any]:
         ).scalar_one()
 
     nodes: dict[str, dict[str, Any]] = {}
-    for key, name, type_, n, filename in ents:
+    for key, name, type_, n, filename, category in ents:
         node = nodes.setdefault(
-            key, {"id": key, "name": name, "types": Counter(), "mentions": 0, "documents": set()}
+            key,
+            {
+                "id": key,
+                "name": name,
+                "types": Counter(),
+                "categories": Counter(),
+                "mentions": 0,
+                "documents": set(),
+            },
         )
+        node["categories"][category or "Other"] += n
         if len(name) > len(node["name"]):
             node["name"] = name
         node["types"][type_] += n
@@ -387,6 +435,7 @@ async def read(owner_id: str | None) -> dict[str, Any]:
             "id": k,
             "name": nodes[k]["name"],
             "type": nodes[k]["types"].most_common(1)[0][0],
+            "category": nodes[k]["categories"].most_common(1)[0][0],
             "mentions": nodes[k]["mentions"],
             "degree": degree[k],
             # More than one document is the interesting case: an entity that
@@ -397,6 +446,55 @@ async def read(owner_id: str | None) -> dict[str, Any]:
         if k in keep
     ]
     out_edges = [e for e in edges if e["source"] in keep and e["target"] in keep]
+    for n in out_nodes:
+        n["origin"] = "document"
+    for e in out_edges:
+        e["origin"] = "document"
+
+    # The person's own topics, merged in. A topic whose key matches a document
+    # entity IS that entity (it gains the topic's links); otherwise it is a
+    # node of its own with no documents behind it.
+    from app.db.models import TopicEdge, TopicNode
+
+    async with SessionLocal() as db:
+        topics = list(
+            (await db.execute(select(TopicNode).where(owner(TopicNode.owner_id)))).scalars()
+        )
+        tedges = list(
+            (await db.execute(select(TopicEdge).where(owner(TopicEdge.owner_id)))).scalars()
+        )
+    shown = {n["id"]: n for n in out_nodes}
+    for t in topics:
+        if t.key in shown:
+            shown[t.key]["origin"] = "both"
+            continue
+        node = {
+            "id": t.key,
+            "name": t.name,
+            "type": t.type or "concept",
+            "category": t.category or "Other",
+            "mentions": 0,
+            "degree": 0,
+            "documents": [],
+            "origin": "topic",
+        }
+        out_nodes.append(node)
+        shown[t.key] = node
+    for e in tedges:
+        if e.source_key in shown and e.target_key in shown:
+            shown[e.source_key]["degree"] += 1
+            shown[e.target_key]["degree"] += 1
+            out_edges.append(
+                {
+                    "source": e.source_key,
+                    "target": e.target_key,
+                    "predicate": e.predicate,
+                    "chunk_id": None,
+                    "filename": "",
+                    "origin": "topic",
+                }
+            )
+
     return {
         "nodes": out_nodes,
         "edges": out_edges,

@@ -55,8 +55,7 @@ export default function SettingsPage() {
     <div className="grid min-h-full md:grid-cols-[16rem_1fr]">
       <nav
         aria-label="Settings sections"
-        className="space-y-1 border-r px-3 py-9 md:sticky md:top-0 md:h-screen"
-        style={{ borderColor: "var(--md-outline-variant)" }}
+        className="space-y-1 px-3 py-9 md:sticky md:top-0 md:h-screen"
       >
         <p className="md-title-medium px-2.5 pb-3">Settings</p>
         {SECTIONS.map((sec) => {
@@ -75,7 +74,7 @@ export default function SettingsPage() {
             </>
           );
           const cls = "group md-state flex w-full items-center gap-3 rounded-[var(--md-shape-lg)] px-2.5 py-2 text-left";
-          const style = { background: on ? "var(--md-secondary-container)" : "transparent" };
+          const style = { background: on ? "color-mix(in srgb, var(--md-primary) 10%, transparent)" : "transparent", fontWeight: on ? 600 : undefined };
           return sec.id === "profile" ? (
             <Link key={sec.id} href="/profile" className={cls} style={style}>
               {inner}
@@ -117,7 +116,6 @@ export default function SettingsPage() {
 
           {status && section === "features" && (
             <section className="space-y-3">
-              <h2 className="md-title-medium">Feature access</h2>
               <p className="md-body-small" style={{ color: "var(--md-on-surface-variant)" }}>
                 {status.require_user_keys
                   ? "Each feature needs its key added under API keys."
@@ -144,7 +142,6 @@ export default function SettingsPage() {
 
           {status && section === "keys" && (
             <section className="space-y-3">
-              <h2 className="md-title-medium">API keys</h2>
               {status.providers.map((p, i) => (
                 <ProviderCard key={p.id} p={p} tone={i % 4} onChange={setStatus} />
               ))}

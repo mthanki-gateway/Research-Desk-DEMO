@@ -175,7 +175,7 @@ class TestToolCallingCapability:
         monkeypatch.setattr(
             graph_mod, "get_settings", lambda: _settings(model_profile="gemma")
         )
-        assert gather_strategy({"react": True}) == "plan"
+        assert gather_strategy({"react": True, "document_ids": ["d1"]}) == "plan"
 
     def test_react_is_honoured_where_it_does_work(self, monkeypatch):
         import app.agent.graph as graph_mod
@@ -184,7 +184,9 @@ class TestToolCallingCapability:
             graph_mod, "get_settings", lambda: _settings(model_profile="gemini")
         )
         assert gather_strategy({"react": True}) == "react"
-        assert gather_strategy({"react": False}) == "plan"
+        assert gather_strategy({"react": False, "document_ids": ["d1"]}) == "plan"
+        # With no documents selected there is nothing to plan lookups for.
+        assert gather_strategy({"react": False}) == "react"
 
 
 class TestOverrideScope:

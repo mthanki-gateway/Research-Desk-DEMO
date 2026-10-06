@@ -1077,11 +1077,18 @@ textarea:focus-visible {
     font-weight: 500;
     letter-spacing: 0.00714em;
   }
+  /* QUIET selected state: a light tint and stronger text, not a solid
+     primary pill. The selected item should be findable at a glance, not the
+     loudest thing on the screen. */
   .md-nav-item[data-active="true"] {
-    background: var(--md-primary);
-    color: var(--md-on-primary);
-    --md-state-color: var(--md-on-primary);
+    background: color-mix(in srgb, var(--md-primary) 10%, transparent);
+    color: var(--md-on-surface);
+    font-weight: 600;
+    --md-state-color: var(--md-primary);
   }
+  .md-nav-item[data-active="true"] .md-nav-icon { color: var(--md-primary); }
+  /* Focus ring for KEYBOARD focus only; a mouse click left a double ring. */
+  .md-nav-item:focus:not(:focus-visible) { outline: none; box-shadow: none; }
   /* Dense variant for the session list, which can be long. */
   .md-nav-item-dense { height: 40px; font-size: 0.8125rem; }
 
@@ -1205,7 +1212,7 @@ textarea:focus-visible {
      only needs to hint -- a full-strength layer on top of --md-primary muddies
      it. */
   .md-nav-item[data-active="true"] .md-nav-icon {
-    background: color-mix(in srgb, var(--md-on-primary) 15%, transparent);
+    background: transparent;
     border-radius: var(--md-shape-full);
   }
 
@@ -1419,10 +1426,10 @@ textarea:focus-visible {
    =========================================================================== */
 
   :root {
-    --morph-violet-bg: #8b5cf6;
-    --morph-mint-bg: #10b981;
-    --morph-amber-bg: #f59e0b;
-    --morph-sky-bg: #0ea5e9;
+    --morph-violet-bg: #8f65ed;
+    --morph-mint-bg: #1aaf7e;
+    --morph-amber-bg: #e79a19;
+    --morph-sky-bg: #1ba0dc;
     --morph-violet-fg: #ffffff;
     --morph-mint-fg: #ffffff;
     --morph-amber-fg: #ffffff;
@@ -1438,64 +1445,9 @@ textarea:focus-visible {
     --md-shape-burst: polygon(100.00% 50.00%,99.26% 53.23%,97.44% 56.25%,95.43% 59.04%,94.14% 61.83%,93.87% 64.89%,94.20% 68.31%,94.28% 71.84%,93.30% 75.00%,91.05% 77.43%,87.96% 79.13%,84.83% 80.54%,82.31% 82.31%,80.54% 84.83%,79.13% 87.96%,77.43% 91.05%,75.00% 93.30%,71.84% 94.28%,68.31% 94.20%,64.89% 93.87%,61.83% 94.14%,59.04% 95.43%,56.25% 97.44%,53.23% 99.26%,50.00% 100.00%,46.77% 99.26%,43.75% 97.44%,40.96% 95.43%,38.17% 94.14%,35.11% 93.87%,31.69% 94.20%,28.16% 94.28%,25.00% 93.30%,22.57% 91.05%,20.87% 87.96%,19.46% 84.83%,17.69% 82.31%,15.17% 80.54%,12.04% 79.13%,8.95% 77.43%,6.70% 75.00%,5.72% 71.84%,5.80% 68.31%,6.13% 64.89%,5.86% 61.83%,4.57% 59.04%,2.56% 56.25%,0.74% 53.23%,0.00% 50.00%,0.74% 46.77%,2.56% 43.75%,4.57% 40.96%,5.86% 38.17%,6.13% 35.11%,5.80% 31.69%,5.72% 28.16%,6.70% 25.00%,8.95% 22.57%,12.04% 20.87%,15.17% 19.46%,17.69% 17.69%,19.46% 15.17%,20.87% 12.04%,22.57% 8.95%,25.00% 6.70%,28.16% 5.72%,31.69% 5.80%,35.11% 6.13%,38.17% 5.86%,40.96% 4.57%,43.75% 2.56%,46.77% 0.74%,50.00% 0.00%,53.23% 0.74%,56.25% 2.56%,59.04% 4.57%,61.83% 5.86%,64.89% 6.13%,68.31% 5.80%,71.84% 5.72%,75.00% 6.70%,77.43% 8.95%,79.13% 12.04%,80.54% 15.17%,82.31% 17.69%,84.83% 19.46%,87.96% 20.87%,91.05% 22.57%,93.30% 25.00%,94.28% 28.16%,94.20% 31.69%,93.87% 35.11%,94.14% 38.17%,95.43% 40.96%,97.44% 43.75%,99.26% 46.77%);
   }
 
-  .md-icon-btn {
-    --morph-bg: var(--morph-amber-bg);
-    --morph-fg: var(--morph-amber-fg);
-    --morph-shape: var(--md-shape-pentagon);
-  }
-  .md-icon-btn:nth-of-type(4n + 1) {
-    --morph-bg: var(--morph-mint-bg);
-    --morph-fg: var(--morph-mint-fg);
-    --morph-shape: var(--md-shape-clover);
-  }
-  .md-icon-btn:nth-of-type(4n + 2) {
-    --morph-bg: var(--morph-sky-bg);
-    --morph-fg: var(--morph-sky-fg);
-    --morph-shape: var(--md-shape-cookie);
-  }
-  .md-icon-btn:nth-of-type(4n + 3) {
-    --morph-bg: var(--morph-violet-bg);
-    --morph-fg: var(--morph-violet-fg);
-    --morph-shape: var(--md-shape-burst);
-  }
-
-  .md-icon-btn::after {
-    content: "";
-    position: absolute;
-    inset: 0;
-    z-index: 0;
-    pointer-events: none;
-    background: var(--morph-bg);
-    clip-path: var(--md-shape-circle);
-    transform: scale(0.6);
-    opacity: 0;
-    transition:
-      clip-path 320ms cubic-bezier(0.2, 0, 0, 1),
-      transform 320ms cubic-bezier(0.2, 0, 0, 1),
-      opacity 160ms ease-out;
-  }
-  .md-icon-btn:hover:not(:disabled)::after,
-  .md-icon-btn:focus-visible:not(:disabled)::after {
-    clip-path: var(--morph-shape);
-    transform: scale(0.95);
-    opacity: 1;
-  }
-  .md-icon-btn:hover:not(:disabled),
-  .md-icon-btn:focus-visible:not(:disabled) {
-    color: var(--morph-fg);
-  }
-  /* The flat state layer would sit on top of the shape as a grey wash. */
-  .md-icon-btn:hover:not(:disabled)::before { opacity: 0; }
-  .md-icon-btn > svg { transition: transform 240ms cubic-bezier(0.2, 0, 0, 1); }
-  .md-icon-btn:hover:not(:disabled) > svg { transform: scale(1.04); }
-  /* Filled and error variants already have a colour of their own. */
-  .md-icon-btn-filled::after,
-  .md-icon-btn-error::after { display: none; }
-
-  @media (prefers-reduced-motion: reduce) {
-    .md-icon-btn::after,
-    .md-icon-btn > svg { transition: opacity 120ms linear; transform: none !important; }
-  }
+  /* The shape morph is for MENU ITEMS only (drawer nav, the settings menu,
+     list tiles). Icon buttons -- back, collapse, toolbars -- keep the plain
+     round state layer: a coloured blob on every small control was noise. */
 }
 
 /* Chat list rows and the tile that morphs on row hover. Same 48-point shapes
@@ -1555,7 +1507,8 @@ textarea:focus-visible {
       color 200ms ease-out,
       transform 240ms cubic-bezier(0.2, 0, 0, 1);
   }
-  .md-nav-item:not([data-active="true"]):hover .md-nav-icon {
+  /* The SELECTED item morphs too: hovering it is still pointing at it. */
+  .md-nav-item:hover .md-nav-icon {
     background: var(--nav-bg);
     color: #ffffff;
     clip-path: var(--nav-shape);

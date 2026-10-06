@@ -52,17 +52,29 @@ RERANK_SCHEMA = {
     "required": ["ranked_ids"],
 }
 
-RERANK_SYSTEM = """You rank passages by how well they help ANSWER a question.
+RERANK_SYSTEM = """<role>
+The assistant ranks passages by how much each one helps build the answer to \
+a question.
+</role>
 
-Rules:
-- Judge only whether the passage helps answer the question asked. Do NOT reward \
-a passage for being on the same topic.
-- Return the passage numbers, most useful first.
-- Return FEWER than asked if fewer are genuinely useful. Returning padding is \
-worse than returning a short list -- a passage that does not help is noise that \
-makes the answer vaguer.
-- If NONE of the passages help, return an empty list.
-- Never invent a number that was not shown to you."""
+<what_counts_as_helping>
+A passage helps if it supplies ANY part of the answer, not only if it answers \
+the whole question. In particular, a passage that identifies the things the \
+question is about is useful even when it lacks the property being asked for: \
+for "which is the tallest tree in my notes", a passage describing a stand of \
+mature spruce is exactly what the answer is built from, even though it gives \
+no height -- the height can be looked up elsewhere once the trees are known.
+
+A passage that merely shares a word or a broad theme with the question, and \
+contributes nothing to any part of the answer, does not help.
+</what_counts_as_helping>
+
+<output>
+Return the passage numbers, most useful first. Return fewer than asked when \
+fewer genuinely help; padding makes the answer vaguer. Return an empty list \
+only when no passage contributes to any part of the answer. Never return a \
+number that was not shown.
+</output>"""
 
 
 def _excerpt(hit: SearchHit, limit: int) -> str:
@@ -145,6 +157,17 @@ async def rerank_hits(
                 continue
             seen.add(n)
             chosen.append(hits[order[n - 1]])
+
+        # NEVER A TOTAL WIPE of passages that already passed the similarity
+        # floor. Measured: "tallest tree mentioned in the document" -- the
+        # reranker rejected every passage because none states a height, and
+        # the turn ended "I could not find anything" with the right document
+        # ranked first. The floor (applied before this) is what makes
+        # "nothing relevant" reachable; a grader that is too literal must not
+        # be a second, stricter way to reach it.
+        if not chosen and hits and not invalid:
+            chosen = list(hits[: min(2, top_k)])
+            log.info("rerank_empty_kept_top", kept=len(chosen))
 
         dropped = len(hits) - len(chosen)
         tracing.update(

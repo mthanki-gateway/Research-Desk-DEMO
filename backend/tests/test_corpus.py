@@ -191,5 +191,9 @@ class TestDraftWithoutPassages:
         assert "n documents: 5" in called["prompt"]
 
     async def test_no_evidence_and_no_facts_still_bails_out(self):
-        out = await nodes.draft({"question": "x", "evidence": [], "corpus_facts": []})
-        assert "Nothing was found" in out["draft"]
+        """With documents selected and nothing found, it says so -- it does not
+        answer from memory as if it had looked."""
+        out = await nodes.draft(
+            {"question": "x", "evidence": [], "corpus_facts": [], "document_ids": ["d1"]}
+        )
+        assert "Nothing in the selected documents" in out["draft"]

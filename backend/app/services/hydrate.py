@@ -21,7 +21,7 @@ from typing import Any
 import structlog
 from sqlalchemy import delete, select
 
-from app.db.models import GraphEntity, GraphHydration, GraphRelation
+from app.db.models import Chunk, Document, GraphEntity, GraphHydration, GraphRelation
 from app.db.session import SessionLocal
 from app.services import websearch
 from app.services.pool import get_pool
@@ -52,8 +52,15 @@ pad: if the results only support two good facts, it gives two.
 </task>
 
 <disambiguation>
-The entity comes from the person's documents, and the context says what kind \
-of thing it is there and what it is related to. If the results are about a \
+The entity comes from the person's documents. The context gives its whole \
+knowledge tree there (what it connects to, and what those connect to) and \
+the passages it was read from. The assistant uses them to work out WHICH \
+thing the documents mean -- "CSC" in a lecture about an NVIDIA toolkit is \
+not a concrete supplier -- and then profiles that thing from the matching \
+search results. The tree and passages identify the entity; the facts in the \
+profile still come from the cited search results.
+
+The context says what kind of thing it is there and what it is related to. If the results are about a \
 different thing with the same name, the assistant writes about the entity \
 the documents mean, from whichever results match it, and says plainly in \
 `note` if the results were mixed. It never writes a confident profile of the \
@@ -124,28 +131,118 @@ async def hydrate(owner_id: str | None, key: str) -> dict[str, Any]:
             )
         ).scalar_one_or_none()
         if ent is None:
-            raise LookupError("No such entity.")
-        rels = (
-            await db.execute(
-                select(GraphRelation.source_key, GraphRelation.predicate, GraphRelation.target_key)
-                .where(
-                    _owner(GraphRelation.owner_id, owner_id),
-                    (GraphRelation.source_key == key) | (GraphRelation.target_key == key),
+            from types import SimpleNamespace
+
+            from app.db.models import TopicNode
+
+            topic = (
+                await db.execute(
+                    select(TopicNode).where(_owner(TopicNode.owner_id, owner_id), TopicNode.key == key)
                 )
-                .limit(12)
+            ).scalar_one_or_none()
+            if topic is None:
+                raise LookupError("No such entity.")
+            ent = SimpleNamespace(name=topic.name, type=topic.type, document_id=None)
+        # THE WHOLE CONNECTED TREE, not just the neighbours. A short name is
+        # ambiguous on its own ("CSC" -> a concrete toolbox, a cancer charity,
+        # a crowd-management firm); the chain it sits in -- CSC has Toolkit,
+        # Toolkit provided by NVIDIA -- is what says which one the documents
+        # mean. Walked breadth-first over this owner's relations, capped so a
+        # huge component cannot become a huge prompt.
+        all_rels = (
+            await db.execute(
+                select(
+                    GraphRelation.source_key,
+                    GraphRelation.predicate,
+                    GraphRelation.target_key,
+                    GraphRelation.chunk_id,
+                ).where(_owner(GraphRelation.owner_id, owner_id))
             )
         ).all()
-    name, type_ = ent.name, ent.type
-    related = [t if s == key else s for s, _, t in rels]
-    statements = [f"{s} {p} {t}" for s, p, t in rels]
+        from app.db.models import TopicEdge
 
-    # Two searches: one pinned by the strongest relation, one by type. The
-    # first disambiguates; the second catches the plain encyclopedic page.
-    queries = [f"{name} {related[0]}" if related else f"{name} {type_}", f"{name} {type_}"]
+        topic_rels = (
+            await db.execute(
+                select(TopicEdge.source_key, TopicEdge.predicate, TopicEdge.target_key).where(
+                    _owner(TopicEdge.owner_id, owner_id)
+                )
+            )
+        ).all()
+        all_rels = [*all_rels, *((s, p, t, None) for s, p, t in topic_rels)]
+        adjacency: dict[str, list[tuple[str, str, str, Any]]] = {}
+        for s, p, t, c in all_rels:
+            adjacency.setdefault(s, []).append((s, p, t, c))
+            adjacency.setdefault(t, []).append((s, p, t, c))
+        depth = {key: 0}
+        frontier = [key]
+        tree: list[tuple[str, str, str, Any]] = []
+        seen_edges: set[tuple[str, str, str]] = set()
+        while frontier and len(depth) < 25:
+            nxt = []
+            for k in frontier:
+                for edge in adjacency.get(k, []):
+                    s, p, t, c = edge
+                    if (s, p, t) not in seen_edges:
+                        seen_edges.add((s, p, t))
+                        tree.append(edge)
+                    other = t if s == k else s
+                    if other not in depth:
+                        depth[other] = depth[k] + 1
+                        nxt.append(other)
+            frontier = nxt
+
+        names = dict(
+            (
+                await db.execute(
+                    select(GraphEntity.key, GraphEntity.name).where(
+                        _owner(GraphEntity.owner_id, owner_id),
+                        GraphEntity.key.in_(list(depth)),
+                    )
+                )
+            ).all()
+        )
+        from app.db.models import TopicNode as _TN
+
+        for k, n in (
+            await db.execute(
+                select(_TN.key, _TN.name).where(_owner(_TN.owner_id, owner_id), _TN.key.in_(list(depth)))
+            )
+        ).all():
+            names.setdefault(k, n)
+        # The passages the tree's relations were read from: the documents'
+        # own words, which say more about what "CSC" is than any search.
+        chunk_ids = [c for *_, c in tree if c is not None][:6]
+        passages = (
+            list(
+                (await db.execute(select(Chunk.text).where(Chunk.id.in_(chunk_ids)))).scalars()
+            )
+            if chunk_ids
+            else []
+        )
+        doc_name = (
+            (await db.execute(select(Document.filename).where(Document.id == ent.document_id))).scalar_one_or_none()
+            if ent.document_id
+            else None
+        )
+
+    name, type_ = ent.name, ent.type
+    label = lambda k: names.get(k, k)  # noqa: E731
+    # Closest first: direct neighbours pin the meaning best.
+    related = [label(k) for k, d in sorted(depth.items(), key=lambda kv: kv[1]) if k != key]
+    statements = [f"{label(s)} {p} {label(t)}" for s, p, t, _ in tree]
+
+    # Searches, most specific first: the name with its two nearest tree
+    # mates, the name with the broader tree, then the name with its type.
+    queries = []
+    if related:
+        queries.append(f"{name} {' '.join(related[:2])}")
+    if len(related) > 2:
+        queries.append(f"{name} {' '.join(related[2:4])}")
+    queries.append(f"{name} {type_}")
     hits = []
     seen: set[str] = set()
     for q in dict.fromkeys(queries):
-        for h in await websearch.search_web(q, limit=6):
+        for h in await websearch.search_web(q, limit=5):
             if h.url and h.url not in seen:
                 seen.add(h.url)
                 hits.append(h)
@@ -156,8 +253,17 @@ async def hydrate(owner_id: str | None, key: str) -> dict[str, Any]:
     results = "\n\n".join(
         f"[{i}] {h.filename}\n{h.url}\n{h.text}" for i, h in enumerate(hits, start=1)
     )
-    context = f"Entity: {name}\nKind of thing, in the documents: {type_}\n" + (
-        f"What the documents say about it: {'; '.join(statements)}\n" if statements else ""
+    context = (
+        f"Entity: {name}\nKind of thing, in the documents: {type_}\n"
+        + (f"Found in: {doc_name}\n" if doc_name else "")
+        + (f"Its knowledge tree in the documents: {'; '.join(statements[:30])}\n" if statements else "")
+        + (
+            "Passages from the documents where it appears:\n"
+            + "\n---\n".join(p[:700] for p in passages)
+            + "\n"
+            if passages
+            else ""
+        )
     )
     raw = await get_pool("answer").generate(
         f"<entity>\n{context}</entity>\n\n<search_results>\n{results}\n</search_results>\n\n"

@@ -86,6 +86,11 @@ export default function Shell({ children }: { children: React.ReactNode }) {
         : best,
     "",
   );
+  // The feature behind the page being shown, and whether its key is missing.
+  // `features` is null until loaded, which counts as unlocked so nothing
+  // flashes grey on every page load.
+  const pageFeature = project.nav.find((n) => n.href === activeHref)?.feature;
+  const pageLocked = !!(pageFeature && features && features[pageFeature] === false);
   const scroller = useAutoHideScroll<HTMLElement>();
 
   // Routes that render WITHOUT the drawer and are never gated.
@@ -283,7 +288,10 @@ export default function Shell({ children }: { children: React.ReactNode }) {
         {isResearchDesk && (
           <Button
             onClick={() => void startSession()}
-            disabled={creating}
+            // Locked with the chat feature: an empty session per click is all
+            // it could make without a Gemini key.
+            disabled={creating || features?.chat === false}
+            title={features?.chat === false ? "Add a Gemini API key in Settings to chat" : undefined}
             className="w-full"
           >
             {creating ? <IconSpinner /> : <IconPlus />}
@@ -584,11 +592,23 @@ export default function Shell({ children }: { children: React.ReactNode }) {
           } as React.CSSProperties
         }
       >
-        <KeyBanner
-          feature={project.nav.find((n) => n.href === activeHref)?.feature}
-          features={features}
-        />
-        {children}
+        <KeyBanner feature={pageFeature} features={features} />
+        {/* INERT when the page's key is missing: not merely dimmed. The
+            browser then ignores every click, keystroke and focus inside it,
+            so nothing can start a call that is certain to fail -- a dimmed
+            page whose buttons still work was the first version, and people
+            reasonably kept pressing them. */}
+        <div
+          inert={pageLocked || undefined}
+          aria-disabled={pageLocked || undefined}
+          style={
+            pageLocked
+              ? { opacity: 0.45, filter: "grayscale(0.4)", userSelect: "none" }
+              : undefined
+          }
+        >
+          {children}
+        </div>
       </main>
 
       {palette && <CommandPalette onClose={() => setPalette(false)} />}
@@ -682,22 +702,21 @@ function KeyBanner({
   if (!feature || !features || features[feature] !== false) return null;
   return (
     <div
-      className="sticky top-0 z-20 flex flex-wrap items-center gap-3 px-6 py-3"
+      className="sticky top-0 z-20 px-6 py-3"
       style={{
         background: "var(--md-tertiary-container)",
         color: "var(--md-on-tertiary-container)",
       }}
       role="status"
     >
-      <span className="md-body-medium min-w-0 flex-1">
-        This needs an API key. Add your own in Settings to turn it on.
-      </span>
-      <Link
-        href="/settings#keys"
-        className="md-btn md-btn-filled md-state shrink-0"
-      >
-        Add API key
-      </Link>
+      <div className="mx-auto flex max-w-3xl flex-wrap items-center gap-3">
+        <span className="md-body-medium min-w-0 flex-1">
+          This needs an API key. Add your own in Settings to turn it on.
+        </span>
+        <Link href="/settings#keys" className="md-btn md-btn-filled md-state shrink-0">
+          Add API key
+        </Link>
+      </div>
     </div>
   );
 }

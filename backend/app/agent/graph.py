@@ -152,7 +152,11 @@ def gather_strategy(state: ResearchState) -> Literal["react", "plan"]:
     misconfiguration. So a turn that asks for ReAct on a model that cannot do
     it falls back to the planned path instead.
     """
-    if not state.get("react"):
+    # NO DOCUMENTS SELECTED: always the agent path. The planned path exists
+    # to decompose a question into DOCUMENT lookups, and with no documents
+    # there is nothing for it to look up -- it turned "Hello!" into a failed
+    # search. The agent answers directly or reaches for the web.
+    if not state.get("react") and state.get("document_ids"):
         return "plan"
     if not get_settings().supports_tool_calling:
         log.info("react_unavailable", reason="model has no native tool calling")

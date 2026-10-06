@@ -251,7 +251,13 @@ async def add_turn(
                 preferences=prep.get("preferences", ""),
                 thread_id=prep["thread_id"],
                 clarify=req.clarify,
-                react=req.react,
+                # ALWAYS THE AGENT in chat. This is a general-purpose assistant
+                # and documents are one of its tools; the planned,
+                # documents-first path is kept for models without tool calling
+                # and for the evaluation harness, which asks for it directly.
+                # A client toggle that switched chat back into a document
+                # analyst is exactly what the product no longer is.
+                react=None,
             )
         except LLMError as exc:
             log.warning("turn_failed", error=str(exc))
@@ -348,7 +354,13 @@ async def stream_turn(
                     preferences=prep.get("preferences", ""),
                     thread_id=prep["thread_id"],
                     clarify=req.clarify,
-                    react=req.react,
+                    # ALWAYS THE AGENT in chat. This is a general-purpose assistant
+                # and documents are one of its tools; the planned,
+                # documents-first path is kept for models without tool calling
+                # and for the evaluation harness, which asks for it directly.
+                # A client toggle that switched chat back into a document
+                # analyst is exactly what the product no longer is.
+                react=None,
                 ),
                 session_id=session_id,
                 question=req.question,
@@ -521,7 +533,11 @@ async def _stream_events(
         # The response has already started, so an HTTP error code is no
         # longer available -- the failure has to travel as an event.
         log.exception("stream_turn_failed")
-        yield _sse("error", {"detail": str(exc)})
+        # In words the person can act on -- a missing or rejected key says
+        # so and links to Settings, instead of a provider's JSON envelope.
+        from app.services import keys
+
+        yield _sse("error", {"detail": keys.explain(exc)})
     finally:
         stack.close()
 

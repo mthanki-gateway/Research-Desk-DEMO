@@ -272,3 +272,100 @@ def header_hook(provider: str, header: str, fmt: str = "{}"):
         request.headers[header] = fmt.format(require(provider))
 
     return hook
+
+
+# ---------------------------------------------------------------------------
+# Plain-language provider errors, and checking a key before it is stored.
+# ---------------------------------------------------------------------------
+
+SETTINGS_LINK = "[Open Settings → API keys](/settings#keys)"
+
+
+def explain(exc: Exception, provider: str = "gemini") -> str:
+    """A provider failure as one sentence the person can act on.
+
+    The raw text is a JSON envelope ("403: { error: { code: 403, ... } }")
+    that tells nobody what to do. The cases that matter are few, and each has
+    a different remedy, so they are named rather than passed through.
+    """
+    text = str(exc)
+    status = getattr(exc, "status", None)
+    label = PROVIDERS.get(provider, {}).get("label", provider)
+    low = text.lower()
+    if isinstance(exc, KeyMissing):
+        return f"{exc} {SETTINGS_LINK}"
+    if "denied access" in low:
+        return (
+            f"{label} rejected your API key: the Google project behind it has been "
+            "denied access, so every request with it is refused. Create a key in a "
+            f"new project in Google AI Studio and replace it in Settings. {SETTINGS_LINK}"
+        )
+    if status in (400, 401, 403) and ("api key" in low or "api_key" in low or "permission" in low):
+        return (
+            f"{label} rejected your API key ({status}). Check it is correct and "
+            f"enabled, then update it in Settings. {SETTINGS_LINK}"
+        )
+    if status == 429 or "quota" in low or "resource_exhausted" in low:
+        return (
+            f"Your {label} key has run out of quota or hit its rate limit. Wait a "
+            f"minute, or raise the limit on your {label} account."
+        )
+    if status and status >= 500:
+        return f"{label} is having trouble right now ({status}). Please try again shortly."
+    return f"The request to {label} failed. Please try again."
+
+
+class KeyInvalid(ValueError):
+    """The provider refused the key on a test call."""
+
+
+async def validate(provider: str, key: str) -> None:
+    """One tiny real call with the key. Raises KeyInvalid with the reason.
+
+    A refusal (400/401/403) blocks the save. A network failure does not: the
+    key may well be fine, and refusing to store it because we could not reach
+    the provider would be blaming the person for our outage.
+    """
+    import httpx
+
+    s = get_settings()
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            if provider == "gemini":
+                model = s.llm_model.removeprefix("models/")
+                r = await c.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                    headers={"x-goog-api-key": key},
+                    json={
+                        "contents": [{"parts": [{"text": "ok"}]}],
+                        "generationConfig": {"maxOutputTokens": 1},
+                    },
+                )
+            elif provider == "groq":
+                r = await c.get(
+                    f"{s.groq_base_url.rstrip('/')}/models",
+                    headers={"Authorization": f"Bearer {key}"},
+                )
+            elif provider == "serper":
+                r = await c.post(
+                    "https://google.serper.dev/search",
+                    headers={"X-API-KEY": key, "Content-Type": "application/json"},
+                    json={"q": "test", "num": 1},
+                )
+            elif provider == "nvidia":
+                r = await c.get(
+                    f"{s.nvidia_nvcf_url.rstrip('/')}/v2/nvcf/functions",
+                    headers={"Authorization": f"Bearer {key}"},
+                )
+            else:
+                return
+    except httpx.HTTPError:
+        return
+    if r.status_code in (400, 401, 403):
+        try:
+            body = r.json()
+            reason = (body.get("error") or {}).get("message") if isinstance(body.get("error"), dict) else body.get("message") or body.get("error")
+        except Exception:  # noqa: BLE001
+            reason = r.text[:200]
+        label = PROVIDERS[provider]["label"]
+        raise KeyInvalid(f"{label} refused this key: {reason or r.status_code}")

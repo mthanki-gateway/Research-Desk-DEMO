@@ -14,7 +14,9 @@ from sqlalchemy import select
 from app.auth import User, current_user, forbid_if_not_owner
 from app.db.models import ChatSession, Message, Role
 from app.db.session import SessionLocal
-from app.services import atlas, graph, hydrate
+from pydantic import BaseModel, Field
+
+from app.services import atlas, graph, hydrate, topics
 
 log = structlog.get_logger()
 
@@ -33,9 +35,39 @@ async def get_graph(user: User = Depends(current_user)) -> dict:
 
 
 @router.post("/graph/build")
-async def build_graph(user: User = Depends(current_user)) -> dict:
-    """Queue extraction for every document that has no graph yet."""
-    return {"queued": await graph.backfill(user.owner_id)}
+async def build_graph(rebuild: bool = False, user: User = Depends(current_user)) -> dict:
+    """Queue extraction for every document without a graph -- or, with
+    `rebuild`, for every document, to pick up a better extraction."""
+    return {"queued": await graph.backfill(user.owner_id, rebuild=rebuild)}
+
+
+class NewTopic(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
+@router.post("/graph/topics")
+async def add_topic(body: NewTopic, user: User = Depends(current_user)) -> dict:
+    """Add your own concept; it is linked to related nodes already there."""
+    try:
+        return await topics.add_topic(user.owner_id, body.name)
+    except topics.TopicError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/graph/topics/{key}/explore")
+async def explore_topic(key: str, user: User = Depends(current_user)) -> dict:
+    """Pull in the concepts around this node, as new connected topics."""
+    try:
+        return await topics.explore(user.owner_id, key)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except topics.TopicError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/graph/topics/{key}", status_code=204)
+async def delete_topic(key: str, user: User = Depends(current_user)) -> None:
+    await topics.remove_topic(user.owner_id, key)
 
 
 @router.get("/graph/entity/{key}/hydration")

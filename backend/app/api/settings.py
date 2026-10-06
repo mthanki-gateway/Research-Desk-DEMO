@@ -20,6 +20,13 @@ async def get_keys(user: User = Depends(current_user)) -> dict:
 
 @router.put("/keys/{provider}")
 async def put_key(provider: str, body: KeyIn, user: User = Depends(current_user)) -> dict:
+    # Checked BEFORE it is stored: a key the provider refuses would otherwise
+    # be saved, unlock the feature, and fail on every request with an error
+    # nobody can read.
+    try:
+        await keys.validate(provider, body.key.strip())
+    except keys.KeyInvalid as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
         await keys.save(user.owner_id, provider, body.key)
     except LookupError as exc:

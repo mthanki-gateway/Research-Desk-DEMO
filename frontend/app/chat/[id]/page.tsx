@@ -388,6 +388,13 @@ function Conversation({ id }: { id: string }) {
     await load();
   }
 
+  async function setDocs(ids: string[]) {
+    if (!session) return;
+    setSession({ ...session, document_ids: ids });
+    await updateSession(id, { document_ids: ids });
+    await load();
+  }
+
   async function remove() {
     detailCache.delete(id);
     await deleteSession(id);
@@ -549,7 +556,7 @@ function Conversation({ id }: { id: string }) {
               color: "var(--md-on-error-container)",
             }}
           >
-            {error}
+            <LinkedText text={error} />
           </p>
         )}
 
@@ -572,7 +579,7 @@ function Conversation({ id }: { id: string }) {
               label={
                 pendingClarify
                   ? "Answer the question above to continue"
-                  : "Ask about your documents"
+                  : "Ask anything"
               }
               value={question}
               onChange={(e) => setQuestion(e.target.value)}
@@ -682,6 +689,7 @@ function Conversation({ id }: { id: string }) {
           onClose={() => setRailOpen(false)}
           onCollapse={setRailCollapsed}
           onToggleDoc={toggleDoc}
+          onSetDocs={setDocs}
           onSettings={changeSettings}
           onClearChunk={closeChunk}
           onDeleteSession={remove}
@@ -1081,3 +1089,26 @@ type ActivityRow = {
   done: boolean;
   n?: number;
 };
+
+/**
+ * Plain text with [label](/path) links made clickable. Errors from the API
+ * carry a link to the fix ("Open Settings → API keys"), and showing the
+ * markdown raw would make the one useful part of the message unusable.
+ */
+function LinkedText({ text }: { text: string }) {
+  const parts = text.split(/(\[[^\]]+\]\([^)]+\))/g);
+  return (
+    <>
+      {parts.map((part, i) => {
+        const m = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+        return m ? (
+          <a key={i} href={m[2]} className="font-medium underline">
+            {m[1]}
+          </a>
+        ) : (
+          <span key={i}>{part}</span>
+        );
+      })}
+    </>
+  );
+}

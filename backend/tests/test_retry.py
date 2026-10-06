@@ -119,7 +119,7 @@ class TestTheRetryReachesTheWeb:
         return calls
 
     async def test_a_retry_also_searches_the_web(self, monkeypatch):
-        calls = await self._run(monkeypatch, seen={"chunk-1", "chunk-2"})
+        calls = await self._run(monkeypatch, seen={"chunk-1", "chunk-2"}, document_ids=["6f1a5b3c-0000-4000-8000-000000000000"])
         assert calls["documents"], "stopped searching documents"
         assert calls["web"] == ["Red Pyramid height"], "the web was never retried"
 
@@ -128,9 +128,14 @@ class TestTheRetryReachesTheWeb:
 
         Duplicating it here would double every web call on every turn.
         """
-        calls = await self._run(monkeypatch, seen=set())
+        calls = await self._run(monkeypatch, seen=set(), document_ids=["6f1a5b3c-0000-4000-8000-000000000000"])
         assert calls["documents"]
         assert calls["web"] == []
+
+    async def test_no_documents_selected_means_no_document_search(self, monkeypatch):
+        """Documents are opt-in per chat. With none selected, nothing is sent."""
+        calls = await self._run(monkeypatch, seen={"chunk-1"})
+        assert calls["documents"] == []
 
     async def test_selected_documents_do_not_wall_off_the_web(self, monkeypatch):
         """Selecting documents means "use these", not "use nothing else".

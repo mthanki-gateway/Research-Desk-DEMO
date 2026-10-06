@@ -70,7 +70,7 @@ export const SPREAD = 2.4;
 /** The plot's own ground, deliberately independent of the app theme. */
 export const GROUND: Record<PlotTheme, string> = {
   dark: "#0e1016",
-  light: "#eef0f6",
+  light: "#eef1f8",
 };
 
 /**
@@ -90,7 +90,7 @@ export const GROUND: Record<PlotTheme, string> = {
  */
 export const BACKDROP: Record<PlotTheme, { core: string; edge: string }> = {
   dark: { core: "#222a44", edge: "#06070b" },
-  light: { core: "#ffffff", edge: "#c9cfe0" },
+  light: { core: "#fdfdff", edge: "#dbe1f0" },
 };
 
 /**
@@ -453,11 +453,11 @@ export default function Scatter({
     const dust = new THREE.Points(
       dustGeometry,
       new THREE.PointsMaterial({
-        color: new THREE.Color(theme === "dark" ? 0xaab2d0 : 0x6b73a0),
+        color: new THREE.Color(theme === "dark" ? 0xaab2d0 : 0x9aa4cc),
         size: 0.03,
         sizeAttenuation: true,
         transparent: true,
-        opacity: theme === "dark" ? 0.5 : 0.35,
+        opacity: theme === "dark" ? 0.5 : 0.28,
         depthWrite: false,
         fog: true,
       }),
@@ -474,7 +474,7 @@ export default function Scatter({
     const STARS = 1400;
     const starPositions = new Float32Array(STARS * 3);
     const starColors = new Float32Array(STARS * 3);
-    const starInk = new THREE.Color(theme === "dark" ? 0xdfe6ff : 0x5a6290);
+    const starInk = new THREE.Color(theme === "dark" ? 0xdfe6ff : 0x8e98c4);
     for (let i = 0; i < STARS; i++) {
       const r = 60 + rand() * 25;
       const theta = rand() * Math.PI * 2;
@@ -499,7 +499,7 @@ export default function Scatter({
         sizeAttenuation: false,
         vertexColors: true,
         transparent: true,
-        opacity: theme === "dark" ? 0.75 : 0.3,
+        opacity: theme === "dark" ? 0.75 : 0.22,
         depthWrite: false,
         // Outside the fog by design; fogged, they would vanish entirely.
         fog: false,

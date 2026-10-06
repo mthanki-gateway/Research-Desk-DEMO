@@ -50,12 +50,14 @@ function CollapsedRail({
   onExpand: () => void;
 }) {
   const scoped = session.document_ids.length > 0;
-  const docCount = scoped ? session.document_ids.length : documents.length;
+  // Nothing selected now means NO documents, not all of them: this is a
+  // general assistant and documents are a tool you opt into per chat.
+  const docCount = session.document_ids.length;
   const scopeTitle = scoped
     ? session.document_ids
         .map((d) => documents.find((r) => r.id === d)?.filename ?? "unknown")
         .join(", ")
-    : `All ${documents.length} document${documents.length === 1 ? "" : "s"}`;
+    : "None -- documents are not used in this chat";
 
   return (
     <aside
@@ -99,14 +101,6 @@ function CollapsedRail({
         />
       )}
 
-      {settings.react && (
-        <RailStat
-          title="Research mode: searches your documents and the web"
-          onClick={onExpand}
-          active
-          label="TOOLS"
-        />
-      )}
 
       {session.summary && (
         <RailStat
@@ -166,6 +160,7 @@ export default function Rail({
   onClose,
   onCollapse,
   onToggleDoc,
+  onSetDocs,
   onSettings,
   onClearChunk,
   onDeleteSession,
@@ -182,6 +177,7 @@ export default function Rail({
   onClose: () => void;
   onCollapse: (v: boolean) => void;
   onToggleDoc: (id: string) => Promise<void>;
+  onSetDocs: (ids: string[]) => Promise<void>;
   onSettings: (s: TurnSettings) => void;
   onClearChunk: () => void;
   onDeleteSession: () => Promise<void>;
@@ -291,6 +287,7 @@ export default function Rail({
               documents={documents}
               settings={settings}
               onToggleDoc={onToggleDoc}
+              onSetDocs={onSetDocs}
               onSettings={onSettings}
               onDeleteSession={onDeleteSession}
             />
@@ -332,6 +329,7 @@ function Controls({
   documents,
   settings,
   onToggleDoc,
+  onSetDocs,
   onSettings,
   onDeleteSession,
 }: {
@@ -339,6 +337,7 @@ function Controls({
   documents: Document[];
   settings: TurnSettings;
   onToggleDoc: (id: string) => Promise<void>;
+  onSetDocs: (ids: string[]) => Promise<void>;
   onSettings: (s: TurnSettings) => void;
   onDeleteSession: () => Promise<void>;
 }) {
@@ -349,13 +348,32 @@ function Controls({
       <section>
         <SectionHeading
           meta={
-            scoped
-              ? `${session.document_ids.length} of ${documents.length}`
-              : "all"
+            `${session.document_ids.length} of ${documents.length}`
           }
         >
-          Documents searched
+          Documents
         </SectionHeading>
+
+        {documents.length > 0 && (
+          <div className="mb-3 flex gap-2">
+            <button
+              type="button"
+              className="md-chip md-state md-chip-sm"
+              disabled={session.document_ids.length === documents.length}
+              onClick={() => void onSetDocs(documents.map((d) => d.id))}
+            >
+              Select all
+            </button>
+            <button
+              type="button"
+              className="md-chip md-state md-chip-sm"
+              disabled={!scoped}
+              onClick={() => void onSetDocs([])}
+            >
+              Deselect all
+            </button>
+          </div>
+        )}
 
         {documents.length === 0 ? (
           <p
@@ -384,14 +402,12 @@ function Controls({
                       color: explicit
                         ? "var(--md-on-secondary-container)"
                         : "var(--md-on-surface)",
-                      opacity: scoped && !explicit ? 0.6 : 1,
+                      opacity: explicit ? 1 : 0.75,
                     }}
                     title={
                       explicit
-                        ? "Remove from scope"
-                        : scoped
-                          ? "Add to scope"
-                          : "Restrict the search to this document"
+                        ? "Stop using this document"
+                        : "Let the assistant search this document"
                     }
                   >
                     <span className="mt-0.5">
@@ -420,8 +436,8 @@ function Controls({
           style={{ color: "var(--md-on-surface-variant)" }}
         >
           {scoped
-            ? "Only the selected documents are searched."
-            : "Nothing selected, so every document is searched."}
+            ? "The assistant can search the selected documents when they help."
+            : "No documents selected: the assistant answers on its own and from the web, and never touches your documents."}
         </p>
       </section>
 
@@ -521,23 +537,6 @@ function Controls({
             />
           </div>
 
-          <div className="flex items-center justify-between gap-3">
-            <span className="md-body-medium">
-              Research mode
-              <span
-                className="md-body-small mt-0.5 block"
-                style={{ color: "var(--md-on-surface-variant)" }}
-              >
-                Searches your documents and the web. Off restricts
-                answers to your documents only.
-              </span>
-            </span>
-            <Switch
-              on={settings.react}
-              onChange={(v) => onSettings({ ...settings, react: v })}
-              aria-label="Research mode"
-            />
-          </div>
 
           {/* DEVELOPMENT ONLY.
               Gated on NODE_ENV rather than hidden with CSS, so the whole block

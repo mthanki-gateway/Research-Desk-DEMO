@@ -67,7 +67,13 @@ NON_RETRIEVAL = frozenset(
 )
 
 
-def tool_specs() -> list[dict[str, Any]]:
+# Tools that read the person's documents. Withheld entirely from a chat with
+# no documents selected: the assistant is general-purpose, documents are
+# opt-in per chat, and a tool it can see is a tool it will reach for.
+DOCUMENT_TOOLS = frozenset({SEARCH_DOCUMENTS, READ_AROUND, LIST_DOCUMENTS, CORPUS_STATS})
+
+
+def tool_specs(documents: bool = True) -> list[dict[str, Any]]:
     """functionDeclarations for the models that support them.
 
     `search_web` is omitted entirely when unconfigured rather than declared and
@@ -295,6 +301,8 @@ def tool_specs() -> list[dict[str, Any]]:
         }
     )
 
+    if not documents:
+        declarations = [d for d in declarations if d["name"] not in DOCUMENT_TOOLS]
     return [{"functionDeclarations": declarations}]
 
 

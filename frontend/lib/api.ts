@@ -509,6 +509,8 @@ export type Memory = {
   id: string;
   text: string;
   source_message: string | null;
+  /** "assistant" (captured from a chat) or "user" (added on the profile page). */
+  origin: "assistant" | "user";
   active: boolean;
   created_at: string;
 };
@@ -535,6 +537,22 @@ export async function getMemory(): Promise<ProfileMemory> {
   const res = await authedFetch("/profile/memory");
   if (!res.ok) throw new Error(await detail(res));
   return res.json();
+}
+
+export async function addMemory(text: string): Promise<Memory> {
+  const res = await authedFetch("/profile/memory", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+/** Deletes the SIGNED-IN account's data everywhere. No id: the server takes it from the token. */
+export async function deleteAccount(): Promise<void> {
+  const res = await authedFetch("/profile/account", { method: "DELETE" });
+  if (!res.ok) throw new Error(await detail(res));
 }
 
 export async function forgetMemory(id: string): Promise<void> {
@@ -1067,6 +1085,10 @@ export type GraphNode = {
   id: string;
   name: string;
   type: string;
+  /** Topic field (Technology, Nature, ...), for the Categories view. */
+  category: string;
+  /** "document" (extracted), "topic" (added or explored by you), or "both". */
+  origin?: "document" | "topic" | "both";
   mentions: number;
   degree: number;
   /** More than one means the entity bridges files. */
@@ -1074,6 +1096,8 @@ export type GraphNode = {
 };
 
 export type GraphEdge = {
+  /** "topic" links are general knowledge and have no passage behind them. */
+  origin?: "document" | "topic";
   source: string;
   target: string;
   predicate: string;
@@ -1099,8 +1123,8 @@ export async function getGraph(): Promise<KnowledgeGraph> {
   return res.json();
 }
 
-export async function buildGraph(): Promise<{ queued: number }> {
-  const res = await authedFetch("/corpus/graph/build", { method: "POST" });
+export async function buildGraph(rebuild = false): Promise<{ queued: number }> {
+  const res = await authedFetch(`/corpus/graph/build${rebuild ? "?rebuild=true" : ""}`, { method: "POST" });
   if (!res.ok) throw new Error(await detail(res));
   return res.json();
 }
@@ -1120,6 +1144,27 @@ export async function getHydration(key: string): Promise<Hydration | null> {
   const res = await authedFetch(`/corpus/graph/entity/${encodeURIComponent(key)}/hydration`);
   if (!res.ok) throw new Error(await detail(res));
   return (await res.json()).hydration;
+}
+
+export async function addTopic(name: string): Promise<{ key: string; links: number }> {
+  const res = await authedFetch("/corpus/graph/topics", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function exploreTopic(key: string): Promise<{ key: string; added: number }> {
+  const res = await authedFetch(`/corpus/graph/topics/${encodeURIComponent(key)}/explore`, { method: "POST" });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function deleteTopic(key: string): Promise<void> {
+  const res = await authedFetch(`/corpus/graph/topics/${encodeURIComponent(key)}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await detail(res));
 }
 
 export async function hydrateEntity(key: string): Promise<Hydration> {

@@ -8,6 +8,9 @@ import {
   getGraph,
   getHydration,
   hydrateEntity,
+  addTopic,
+  exploreTopic,
+  deleteTopic,
   type Chunk,
   type Hydration,
   type GraphEdge,
@@ -61,6 +64,103 @@ const TYPE_COLOURS: Record<PlotTheme, Record<string, string>> = {
 };
 const TYPES = Object.keys(TYPE_COLOURS.dark);
 
+/** Category colours for the Categories view, one set per ground. */
+const CATEGORY_COLOURS: Record<PlotTheme, Record<string, string>> = {
+  dark: {
+    Technology: "#4fd1ff",
+    Science: "#a78bfa",
+    Business: "#ffc247",
+    "People & Society": "#ff8ae2",
+    Nature: "#34e3a4",
+    Places: "#9be0b4",
+    History: "#ffa06b",
+    "Arts & Culture": "#f2a7c3",
+    Health: "#ff6b81",
+    Food: "#b6ef6a",
+    Other: "#b8bfd6",
+  },
+  light: {
+    Technology: "#0369a1",
+    Science: "#5b3fd6",
+    Business: "#a86400",
+    "People & Society": "#b52f93",
+    Nature: "#00855a",
+    Places: "#3f7d4f",
+    History: "#c2410c",
+    "Arts & Culture": "#9d3b6b",
+    Health: "#c62348",
+    Food: "#4d7c0f",
+    Other: "#5a6178",
+  },
+};
+
+/**
+ * The Categories view: the same graph re-drawn as category trees.
+ *
+ * Each category becomes a hub node; every term is linked to its category's
+ * hub, and the term-to-term relations stay. So a category is a tree you can
+ * click into -- Technology, and under it CUDA, the Toolkit, NVIDIA and how
+ * they connect -- rather than a colour in a legend. Hubs and their links are
+ * synthetic: they carry no passage, because no document said "CUDA is
+ * Technology"; the extraction classified it.
+ */
+type Source = "all" | "documents" | "topics";
+
+/**
+ * Which trees to show. "documents": what the files say. "topics": the
+ * concepts you added or explored, plus whatever they link to -- the learning
+ * trees. "all": both, joined wherever a topic links to a document term.
+ */
+function bySource(data: KnowledgeGraph, source: Source): KnowledgeGraph {
+  if (source === "all") return data;
+  if (source === "documents") {
+    const nodes = data.nodes.filter((n) => n.origin !== "topic");
+    const ids = new Set(nodes.map((n) => n.id));
+    return {
+      ...data,
+      nodes,
+      edges: data.edges.filter((e) => e.origin !== "topic" && ids.has(e.source) && ids.has(e.target)),
+    };
+  }
+  const edges = data.edges.filter((e) => e.origin === "topic");
+  const ids = new Set<string>();
+  for (const n of data.nodes) if (n.origin === "topic" || n.origin === "both") ids.add(n.id);
+  for (const e of edges) {
+    ids.add(e.source);
+    ids.add(e.target);
+  }
+  return { ...data, nodes: data.nodes.filter((n) => ids.has(n.id)), edges };
+}
+
+function byCategory(data: KnowledgeGraph): KnowledgeGraph {
+  const cats = new Map<string, number>();
+  for (const n of data.nodes) cats.set(n.category || "Other", (cats.get(n.category || "Other") ?? 0) + 1);
+  const hubs: GraphNode[] = [...cats].map(([c, count]) => ({
+    id: `cat:${c}`,
+    name: c,
+    type: c,
+    category: c,
+    mentions: count,
+    degree: count,
+    documents: [],
+  }));
+  const nodes: GraphNode[] = [
+    ...hubs,
+    ...data.nodes.map((n) => ({ ...n, type: n.category || "Other" })),
+  ];
+  const edges: GraphEdge[] = [
+    ...data.edges,
+    ...data.nodes.map((n) => ({
+      source: n.id,
+      target: `cat:${n.category || "Other"}`,
+      predicate: "is in",
+      chunk_id: null,
+      filename: "",
+    })),
+  ];
+  return { ...data, nodes, edges };
+}
+
 /** World radius the layout is fitted to, and the default camera distance. */
 const FIT = 3.2;
 const HOME_RADIUS = 8.5;
@@ -84,6 +184,12 @@ export default function GraphView({ theme, onThemeChange }: Props) {
   const [data, setData] = useState<KnowledgeGraph | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [queuing, setQueuing] = useState(false);
+  // Categories view: the graph redrawn as category trees (see byCategory).
+  const [categories, setCategories] = useState(false);
+  const [source, setSource] = useState<Source>("all");
+  // A node to select once the graph reloads -- after adding or exploring, the
+  // thing you just made is what you want to look at.
+  const [focusKey, setFocusKey] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -105,10 +211,10 @@ export default function GraphView({ theme, onThemeChange }: Props) {
     return () => clearTimeout(t);
   }, [data, load]);
 
-  async function backfill() {
+  async function backfill(rebuild = false) {
     setQueuing(true);
     try {
-      await buildGraph();
+      await buildGraph(rebuild);
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not queue extraction");
@@ -139,6 +245,17 @@ export default function GraphView({ theme, onThemeChange }: Props) {
             Build graph for {missing} document{missing === 1 ? "" : "s"}
           </Button>
         )}
+        {missing === 0 && data.pending === 0 && data.n_documents > 0 && (
+          <Button
+            variant="text"
+            onClick={() => void backfill(true)}
+            disabled={queuing}
+            title="Read every document again with the current extraction"
+          >
+            {queuing && <IconSpinner />}
+            Rebuild graph
+          </Button>
+        )}
       </div>
 
       {data.nodes.length === 0 ? (
@@ -153,7 +270,23 @@ export default function GraphView({ theme, onThemeChange }: Props) {
           </p>
         </div>
       ) : (
-        <Scene data={data} theme={theme} onThemeChange={onThemeChange} />
+        <Scene
+          key={`${categories ? "categories" : "entities"}-${source}`}
+          data={categories ? byCategory(bySource(data, source)) : bySource(data, source)}
+          source={source}
+          onSource={setSource}
+          onReload={async (key?: string) => {
+            if (key) setFocusKey(key);
+            await load();
+          }}
+          focusKey={focusKey}
+          onFocused={() => setFocusKey(null)}
+          theme={theme}
+          onThemeChange={onThemeChange}
+          palette={categories ? CATEGORY_COLOURS : TYPE_COLOURS}
+          categories={categories}
+          onToggleCategories={() => setCategories((v) => !v)}
+        />
       )}
     </div>
   );
@@ -236,10 +369,26 @@ function Scene({
   data,
   theme,
   onThemeChange,
+  palette,
+  categories,
+  onToggleCategories,
+  source,
+  onSource,
+  onReload,
+  focusKey,
+  onFocused,
 }: {
+  source: Source;
+  onSource: (s: Source) => void;
+  onReload: (key?: string) => Promise<void>;
+  focusKey: string | null;
+  onFocused: () => void;
   data: KnowledgeGraph;
   theme: PlotTheme;
   onThemeChange: (t: PlotTheme) => void;
+  palette: Record<PlotTheme, Record<string, string>>;
+  categories: boolean;
+  onToggleCategories: () => void;
 }) {
   const host = useRef<HTMLDivElement | null>(null);
   // The passage behind a relation, shown INSIDE the graph's own panel. The
@@ -264,6 +413,41 @@ function Scene({
   const labelLayer = useRef<HTMLDivElement | null>(null);
   const [hover, setHover] = useState<{ i: number; x: number; y: number } | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
+  const [newTopic, setNewTopic] = useState("");
+  const [topicBusy, setTopicBusy] = useState<"add" | "explore" | "remove" | null>(null);
+  const [topicError, setTopicError] = useState<string | null>(null);
+  // The reading panel's width, dragged from its left edge and remembered.
+  const [panelWidth, setPanelWidth] = useState(352);
+  useEffect(() => {
+    try {
+      const w = Number(localStorage.getItem("graph.panelWidth"));
+      if (w >= 260 && w <= 900) setPanelWidth(w);
+    } catch {
+      /* private mode: the default width is fine */
+    }
+  }, []);
+  const startResize = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = panelWidth;
+    const max = Math.min(900, (host.current?.clientWidth ?? 1200) * 0.7);
+    let last = startW;
+    const move = (ev: PointerEvent) => {
+      last = Math.max(260, Math.min(max, startW + (startX - ev.clientX)));
+      setPanelWidth(last);
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      try {
+        localStorage.setItem("graph.panelWidth", String(Math.round(last)));
+      } catch {
+        /* not persisted; still applied for this visit */
+      }
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
   const [typeFocus, setTypeFocus] = useState<string | null>(null);
   const [labels, setLabels] = useState(true);
   const [bridges, setBridges] = useState(false);
@@ -306,7 +490,7 @@ function Scene({
     const layer = labelLayer.current;
     if (!el || !layer || nodes.length === 0) return;
     const n = nodes.length;
-    const colours = TYPE_COLOURS[theme];
+    const colours = palette[theme];
     const ink = INK[theme];
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -327,10 +511,11 @@ function Scene({
     const base = new Float32Array(n);
     const c = new THREE.Color();
     nodes.forEach((nd, i) => {
-      c.set(colours[nd.type] ?? colours.other);
+      c.set(colours[nd.type] ?? colours.other ?? colours.Other);
       colourAttr.set([c.r, c.g, c.b], i * 3);
-      base[i] = BASE_SIZE;
-      sizes[i] = BASE_SIZE;
+      // Category hubs are drawn larger: they are the roots of the trees.
+      base[i] = nd.id.startsWith("cat:") ? BASE_SIZE * 2.1 : BASE_SIZE;
+      sizes[i] = base[i];
     });
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
@@ -398,7 +583,7 @@ function Scene({
       .filter((l): l is readonly [number, number] => l[0] !== undefined && l[1] !== undefined);
     const edgePos = new Float32Array(pairs.length * 6);
     const edgeCol = new Float32Array(pairs.length * 6);
-    const edgeInk = new THREE.Color(theme === "dark" ? 0x9aa3c8 : 0x4a5275);
+    const edgeInk = new THREE.Color(theme === "dark" ? 0x9aa3c8 : 0x5b6489);
     pairs.forEach(([a, b], k) => {
       edgePos.set(positions.subarray(a * 3, a * 3 + 3), k * 6);
       edgePos.set(positions.subarray(b * 3, b * 3 + 3), k * 6 + 3);
@@ -409,7 +594,7 @@ function Scene({
     const edgeMaterial = new THREE.LineBasicMaterial({
       vertexColors: true,
       transparent: true,
-      opacity: theme === "dark" ? 0.55 : 0.5,
+      opacity: theme === "dark" ? 0.55 : 0.42,
       depthWrite: false,
     });
     const lines = new THREE.LineSegments(edgeGeometry, edgeMaterial);
@@ -424,7 +609,7 @@ function Scene({
     const STARS = 1400;
     const starPos = new Float32Array(STARS * 3);
     const starCol = new Float32Array(STARS * 3);
-    const starInk = new THREE.Color(theme === "dark" ? 0xdfe6ff : 0x5a6290);
+    const starInk = new THREE.Color(theme === "dark" ? 0xdfe6ff : 0x8e98c4);
     for (let i = 0; i < STARS; i++) {
       const r = 60 + rand() * 25, th = rand() * Math.PI * 2, u = rand() * 2 - 1, w = Math.sqrt(1 - u * u);
       starPos.set([r * w * Math.cos(th), r * u, r * w * Math.sin(th)], i * 3);
@@ -441,7 +626,7 @@ function Scene({
         sizeAttenuation: false,
         vertexColors: true,
         transparent: true,
-        opacity: theme === "dark" ? 0.75 : 0.3,
+        opacity: theme === "dark" ? 0.75 : 0.22,
         depthWrite: false,
       }),
     );
@@ -580,7 +765,10 @@ function Scene({
       // scatter; fading the whole graph every time the mouse crossed a node
       // made it flicker as you moved. Only a click, a type or Bridges fades.
       const focus = sel;
-      const near = focus !== null ? new Set([focus, ...neighbours[focus]]) : null;
+      // The WHOLE connected tree, not just the node and its neighbours: a
+      // chain like CSC -> Toolkit -> NVIDIA is one idea, and lighting only
+      // the first hop cut it in half.
+      const near = focus !== null ? treeOf(focus) : null;
       const sizeAttr = geometry.getAttribute("size") as THREE.BufferAttribute;
       const alphaAttr = geometry.getAttribute("alpha") as THREE.BufferAttribute;
       for (let i = 0; i < n; i++) {
@@ -611,9 +799,35 @@ function Scene({
       shown = new Set(pool.slice(0, MAX_LABELS));
     };
 
+    // Breadth-first over relations: every node reachable from i.
+    const treeOf = (i: number): Set<number> => {
+      const seen = new Set<number>([i]);
+      const queue = [i];
+      while (queue.length) {
+        const k = queue.shift()!;
+        for (const j of neighbours[k]) {
+          if (!seen.has(j)) {
+            seen.add(j);
+            queue.push(j);
+          }
+        }
+      }
+      return seen;
+    };
+
+    // Frame the clicked node's whole tree: centre on its centroid and back off
+    // far enough to see all of it.
     api.current.flyToNode = (i) => {
-      wantTarget.set(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
-      wantRadius = Math.min(wantRadius, 4.2);
+      const tree = [...treeOf(i)];
+      const c = new THREE.Vector3();
+      for (const k of tree) c.add(new THREE.Vector3(positions[k * 3], positions[k * 3 + 1], positions[k * 3 + 2]));
+      c.divideScalar(tree.length);
+      let extent = 0;
+      for (const k of tree) {
+        extent = Math.max(extent, c.distanceTo(new THREE.Vector3(positions[k * 3], positions[k * 3 + 1], positions[k * 3 + 2])));
+      }
+      wantTarget.copy(c);
+      wantRadius = Math.max(2.5, Math.min(HOME_RADIUS, extent * 2.8 + 1.2));
     };
     api.current.flyToType = (t) => {
       if (!t) {
@@ -723,6 +937,15 @@ function Scene({
   }, [selected, hover, typeFocus, bridges, theme]);
 
   useEffect(() => {
+    if (!focusKey) return;
+    const i = index.get(focusKey);
+    if (i !== undefined) {
+      setSelected(i);
+      onFocused();
+    }
+  }, [focusKey, index, onFocused]);
+
+  useEffect(() => {
     setPassage(null);
     setHydration(undefined);
     setHydrateError(null);
@@ -731,6 +954,10 @@ function Scene({
     // A saved profile shows up the moment the entity is opened; nothing is
     // generated without a click.
     let live = true;
+    if (nodes[selected].id.startsWith("cat:")) {
+      setHydration(null);
+      return;
+    }
     getHydration(nodes[selected].id)
       .then((h) => live && setHydration(h))
       .catch(() => live && setHydration(null));
@@ -788,7 +1015,7 @@ function Scene({
   }, [expanded]);
 
   const ink = INK[theme];
-  const colours = TYPE_COLOURS[theme];
+  const colours = palette[theme];
   const panel = theme === "dark" ? "rgba(16,18,26,0.94)" : "rgba(255,255,255,0.95)";
   const hovered = hover ? nodes[hover.i] : null;
   const chosen = selected !== null ? nodes[selected] : null;
@@ -850,6 +1077,57 @@ function Scene({
 
         {/* Top-left: search and legend. */}
         <div className="pointer-events-none absolute left-3 top-3 z-10 flex w-56 flex-col gap-2">
+          <div className="pointer-events-auto flex rounded-[var(--md-shape-sm)] p-0.5 text-xs" style={{ background: panel }} role="tablist" aria-label="Which trees to show">
+            {(["all", "documents", "topics"] as Source[]).map((s) => (
+              <button
+                key={s}
+                type="button"
+                role="tab"
+                aria-selected={source === s}
+                onClick={() => onSource(s)}
+                className="flex-1 rounded-[var(--md-shape-sm)] px-2 py-1"
+                style={{ background: source === s ? ink.chip : "transparent", color: ink.text }}
+              >
+                {s === "all" ? "All" : s === "documents" ? "Documents" : "Topics"}
+              </button>
+            ))}
+          </div>
+          <form
+            className="pointer-events-auto flex gap-1"
+            onSubmit={async (e) => {
+              e.preventDefault();
+              const name = newTopic.trim();
+              if (!name || topicBusy) return;
+              setTopicBusy("add");
+              setTopicError(null);
+              try {
+                const r = await addTopic(name);
+                setNewTopic("");
+                await onReload(r.key);
+              } catch (err) {
+                setTopicError(err instanceof Error ? err.message : "Could not add it");
+              } finally {
+                setTopicBusy(null);
+              }
+            }}
+          >
+            <input
+              value={newTopic}
+              onChange={(e) => setNewTopic(e.target.value)}
+              placeholder="Add a topic to learn…"
+              aria-label="Add a topic"
+              className="min-w-0 flex-1 rounded-[var(--md-shape-sm)] px-2.5 py-1.5 text-xs outline-none"
+              style={{ background: panel, color: ink.text, border: `1px solid ${ink.chip}` }}
+            />
+            <button type="submit" disabled={!newTopic.trim() || !!topicBusy} className="rounded-[var(--md-shape-sm)] px-2 text-xs" style={chip(true)}>
+              {topicBusy === "add" ? "…" : "Add"}
+            </button>
+          </form>
+          {topicError && (
+            <p className="pointer-events-auto rounded-[var(--md-shape-sm)] p-1.5 text-xs" style={{ background: panel, color: ink.text }}>
+              {topicError}
+            </p>
+          )}
           <div className="pointer-events-auto relative">
             <input
               value={query}
@@ -886,7 +1164,7 @@ function Scene({
             )}
           </div>
           <div className="pointer-events-auto flex flex-col gap-0.5 rounded-[var(--md-shape-md)] p-1.5" style={{ background: panel }}>
-            {TYPES.filter((t) => typeCounts[t]).map((t) => {
+            {(categories ? Object.keys(CATEGORY_COLOURS.dark) : TYPES).filter((t) => typeCounts[t]).map((t) => {
               const on = typeFocus === t;
               return (
                 <button
@@ -917,6 +1195,9 @@ function Scene({
           <button type="button" className="pointer-events-auto rounded-[var(--md-shape-sm)] px-2.5 py-1.5 text-xs" style={chip(labels)} onClick={() => setLabels((v) => !v)} title="Show names next to the best-connected entities">
             Labels
           </button>
+          <button type="button" className="pointer-events-auto rounded-[var(--md-shape-sm)] px-2.5 py-1.5 text-xs" style={chip(categories)} onClick={onToggleCategories} title="Group the graph into category trees: Technology, Nature, Business...">
+            Categories
+          </button>
           <button type="button" className="pointer-events-auto rounded-[var(--md-shape-sm)] px-2.5 py-1.5 text-xs" style={chip(bridges)} onClick={() => { setSelected(null); setTypeFocus(null); setBridges((v) => !v); }} title="Show only entities that appear in more than one document">
             Bridges
           </button>
@@ -938,9 +1219,18 @@ function Scene({
             selected entity, each statement one click from its passage. */}
         {chosen && (
           <div
-            className="absolute bottom-10 right-3 top-14 z-10 flex w-[22rem] max-w-[45%] flex-col rounded-[var(--md-shape-md)]"
-            style={{ background: panel, color: ink.text }}
+            className="absolute bottom-10 right-3 top-14 z-10 flex flex-col rounded-[var(--md-shape-md)]"
+            style={{ background: panel, color: ink.text, width: panelWidth, maxWidth: "70%" }}
           >
+            {/* Drag handle: the panel's left edge. Width is remembered. */}
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Resize panel"
+              onPointerDown={startResize}
+              className="absolute -left-1 bottom-0 top-0 z-20 w-2 cursor-col-resize"
+              title="Drag to resize"
+            />
             <div className="flex items-start gap-2 p-4 pb-2">
               <div className="min-w-0 flex-1">
                 <p className="break-words text-sm font-medium">{chosen.name}</p>
@@ -949,13 +1239,62 @@ function Scene({
                   {chosen.degree} relation{chosen.degree === 1 ? "" : "s"}
                 </p>
                 <p className="mt-1 break-words text-xs" style={{ color: ink.faint }}>
-                  in {chosen.documents.join(", ")}
+                  {chosen.documents.length
+                    ? `in ${chosen.documents.join(", ")}`
+                    : chosen.id.startsWith("cat:")
+                      ? "category"
+                      : "your topic · links are general knowledge, not from a document"}
                 </p>
               </div>
               <button type="button" onClick={() => setSelected(null)} className="rounded-[var(--md-shape-sm)] px-2 py-1 text-xs" style={chip(false)}>
                 Close
               </button>
             </div>
+            {!chosen.id.startsWith("cat:") && (
+              <div className="flex flex-wrap gap-2 px-4 pb-3">
+                <button
+                  type="button"
+                  disabled={!!topicBusy}
+                  className="rounded-[var(--md-shape-sm)] px-2.5 py-1.5 text-xs font-medium"
+                  style={chip(true)}
+                  title="Pull in the concepts around this one as new connected topics"
+                  onClick={async () => {
+                    setTopicBusy("explore");
+                    setTopicError(null);
+                    try {
+                      await exploreTopic(chosen.id);
+                      await onReload(chosen.id);
+                    } catch (err) {
+                      setTopicError(err instanceof Error ? err.message : "Could not explore");
+                    } finally {
+                      setTopicBusy(null);
+                    }
+                  }}
+                >
+                  {topicBusy === "explore" ? "Exploring…" : "Explore related topics"}
+                </button>
+                {chosen.origin === "topic" && (
+                  <button
+                    type="button"
+                    disabled={!!topicBusy}
+                    className="rounded-[var(--md-shape-sm)] px-2.5 py-1.5 text-xs"
+                    style={chip(false)}
+                    onClick={async () => {
+                      setTopicBusy("remove");
+                      try {
+                        await deleteTopic(chosen.id);
+                        setSelected(null);
+                        await onReload();
+                      } finally {
+                        setTopicBusy(null);
+                      }
+                    }}
+                  >
+                    Remove topic
+                  </button>
+                )}
+              </div>
+            )}
             {passage ? (
               <div className="flex min-h-0 flex-1 flex-col px-4 pb-4">
                 <button type="button" onClick={() => setPassage(null)} className="mb-2 self-start rounded-[var(--md-shape-sm)] px-2 py-1 text-xs" style={chip(false)}>
@@ -978,7 +1317,11 @@ function Scene({
             ) : (
             <div className="min-h-0 flex-1 overflow-y-auto">
             <div className="px-4 pb-3">
-              {hydration ? (
+              {chosen.id.startsWith("cat:") ? (
+                <p className="text-xs" style={{ color: ink.faint }}>
+                  A category: every term below was classified into it. Go to any term to see how it connects.
+                </p>
+              ) : hydration ? (
                 <div className="space-y-2.5 rounded-[var(--md-shape-sm)] p-3" style={{ background: ink.chip }}>
                   <p className="text-[11px] uppercase tracking-wide" style={{ color: ink.faint }}>
                     From the web

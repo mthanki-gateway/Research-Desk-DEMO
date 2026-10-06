@@ -16,6 +16,9 @@ class MemoryOut(BaseModel):
     # without it, a badly-captured preference is indistinguishable from one the
     # user really gave, and the only remedy is to delete and hope.
     source_message: str | None = None
+    # "assistant" or "user" -- shown as a tag, so a person can tell what they
+    # said from what the assistant inferred.
+    origin: str = "assistant"
     active: bool = True
     created_at: datetime
 

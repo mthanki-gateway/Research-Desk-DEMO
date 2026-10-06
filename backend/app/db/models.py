@@ -431,6 +431,9 @@ class Preference(Base):
     # explicit one.
     source_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # "assistant" (captured from a chat) or "user" (added on the profile page).
+    origin: Mapped[str] = mapped_column(String(16), default="assistant", server_default="assistant")
+
     active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -460,6 +463,8 @@ class GraphEntity(Base):
     key: Mapped[str] = mapped_column(String(256), index=True)
     name: Mapped[str] = mapped_column(String(256))
     type: Mapped[str] = mapped_column(String(64))
+    # Topic field (services/graph.CATEGORIES), for the Categories view.
+    category: Mapped[str] = mapped_column(String(32), default="Other", server_default="Other")
     mentions: Mapped[int] = mapped_column(Integer, default=1)
 
 
@@ -528,3 +533,36 @@ class UserApiKey(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class TopicNode(Base):
+    """A concept the PERSON added, or reached by exploring -- not from a document.
+
+    Separate from GraphEntity, which is per document and cascades with it:
+    a topic is the person's own, survives every document being deleted, and
+    is the seed of the Topics view -- connected concepts to learn through.
+    `origin` is "added" (typed in) or "explored" (pulled in from a neighbour).
+    """
+
+    __tablename__ = "topic_nodes"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    key: Mapped[str] = mapped_column(String(256), index=True)
+    name: Mapped[str] = mapped_column(String(256))
+    type: Mapped[str] = mapped_column(String(64), default="concept")
+    category: Mapped[str] = mapped_column(String(32), default="Other")
+    origin: Mapped[str] = mapped_column(String(16), default="added")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class TopicEdge(Base):
+    """A link from a topic to another topic or to a document entity."""
+
+    __tablename__ = "topic_edges"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    source_key: Mapped[str] = mapped_column(String(256), index=True)
+    target_key: Mapped[str] = mapped_column(String(256), index=True)
+    predicate: Mapped[str] = mapped_column(String(128))

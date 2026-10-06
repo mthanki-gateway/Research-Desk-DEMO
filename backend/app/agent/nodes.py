@@ -21,6 +21,7 @@ from langgraph.types import interrupt
 from app.agent.state import ResearchState
 from app.config import get_settings
 from app.services import preferences, websearch
+from app.services import keys
 from app.services.llm import (
     LLMError,
     extract_bool,
@@ -198,61 +199,53 @@ CLARIFY_SCHEMA = {
     "required": ["ambiguous", "question", "options"],
 }
 
-CLARIFY_SYSTEM = """You decide whether to ASK THE USER A QUESTION instead of \
-answering. Almost always, the answer is no.
+CLARIFY_SYSTEM = """<role>
+The assistant decides whether a message must be paused for a clarifying \
+question before any work is done. The answer is almost always no: \
+ambiguous=false.
+</role>
 
-ASKING IS A FAILURE MODE, NOT A COURTESY. It stops the user, costs them a \
-round trip, and makes the assistant feel obstructive. Searching and being \
-partly wrong is nearly always better: they can see what you did and correct it \
-in one line.
+<default_is_to_proceed>
+Stopping someone to ask costs them a round trip and makes the assistant \
+feel obstructive. A reasonable assumption, stated in the answer, costs \
+nothing: the answer can say "Taking this to mean X:" or cover the two \
+likely readings briefly ("If you meant X, ...; if you meant Y, ..."), and \
+the person corrects it in one line if needed. So when intent is unclear, the \
+assistant assumes, and the ANSWER handles the ambiguity, not a question.
 
-THE TEST: could ANY reasonable answer be given without asking?
-If yes -- ambiguous=false. Always.
+These are never reasons to ask:
+- which document, file or source to use. Search everything in scope; the \
+search decides what is relevant. ("Find the largest tree in my doc" searches \
+the selected documents.)
+- a request that is broad. Broad is not ambiguous: cover the main points. \
+"Tell me about the report" summarises the report in scope, or each report if \
+there are several; it never asks which one.
+- a reference to something unnamed when there is any sensible candidate: \
+"the figure", "that document", "the report" mean the most recent or most \
+relevant one, and the answer says which it took.
+- two possible meanings that are both answerable. Answer both.
+- a follow-up whose subject is in the conversation. Read the history.
+- an instruction about how to answer ("shorter", "use the web", "try again").
+- anything where the options would have to be invented.
+</default_is_to_proceed>
 
-APPLY THESE FIRST, and they settle nearly every case:
+<the_only_reason_to_ask>
+ambiguous=true only when the missing detail is LOAD-BEARING: every \
+reasonable assumption would produce a different answer, there is no sensible \
+default, and a wrong guess would be costly or misleading rather than merely \
+imperfect. In practice that is a request that defers its own specifics ("the \
+thing I mentioned", "you know the one") with nothing in the conversation to \
+resolve it, or one that names something that cannot be identified at all.
 
-1. TWO POSSIBLE MEANINGS AND BOTH ARE ANSWERABLE -> ANSWER BOTH.
-   Never ask someone to choose between things you could simply cover.
-   "tell me about pyramids and also the pain points" -> answer both.
-   "you never answered the other question" -> answer the outstanding one.
+When unsure whether it is load-bearing, it is not: ambiguous=false.
+</the_only_reason_to_ask>
 
-2. A BROAD REQUEST IS NOT AMBIGUOUS, it is broad. Summarise, cover the main \
-aspects, and say what you covered.
-   "tell me about the report" -> summarise the report.
-
-3. A FOLLOW-UP TAKES ITS SUBJECT FROM THE CONVERSATION. Read the history.
-   "and the year before?", "what about the other one", "now try the internet".
-
-4. AN INSTRUCTION ABOUT HOW TO ANSWER IS NOT A QUESTION ABOUT WHAT TO ANSWER.
-   "summarise that", "answer from the web instead", "try again", "be shorter".
-
-5. IF YOU WOULD HAVE TO INVENT THE OPTIONS, there is nothing to ask about.
-
-ambiguous=true ONLY when BOTH of these hold:
-- there is genuinely NO sensible default -- not merely several possibilities, \
-but no way to pick or combine them; AND
-- answering the wrong reading would be COSTLY or MISLEADING, not just \
-imperfect. Deleting something, a figure that would be wrong in a way the user \
-could not spot, or a question that names an entity you cannot identify at all.
-
-Concretely, that is nearly only this shape: the request defers its own \
-specifics ("the specific thing I want to know", "you know the one") and the \
-conversation does not say which.
-
-When in doubt, ambiguous=false. A user who wanted something narrower will say \
-so; a user who was stopped for no reason just loses time.
-
-When ambiguous=true:
-- `question` is ONE short sentence asking what they want. Never apologise, \
-never restate their question back to them.
-- `options` are 2 to 4 CONCRETE choices, every one anchored in something REAL: \
-a section heading from their documents, or the specific subject already under \
-discussion. NEVER offer generic categories -- "Latest Technology Trends", \
-"Global Financial Markets", "Historical Architecture" are worthless, because \
-they tell the user nothing and the assistant cannot act on them. If you cannot \
-name 2 concrete, anchored options, return ambiguous=false and let the search \
-run.
-- Options must be genuinely different from each other, not rephrasings.
+<if_asking>
+`question` is one short sentence, with no apology and no restating of their \
+message. `options` are two to four concrete, genuinely different choices, \
+each anchored in something real from the conversation or the documents. If \
+two concrete options cannot be named, return ambiguous=false instead.
+</if_asking>
 
 When ambiguous=false, return ambiguous=false and nothing else."""
 
@@ -587,7 +580,8 @@ async def retrieve_node(state: ResearchState) -> dict:
         # about the documents is not searched on the web.
         route = routes.get(raw_query, "")
         hits = []
-        if route != "web":
+        # No documents selected means documents are not a source at all.
+        if route != "web" and document_ids:
             hits = await retrieve(
                 query,
                 top_k=top_k,
@@ -682,7 +676,23 @@ when every sentence is true.
 
 When the sources genuinely cannot settle it, the first sentence says that, \
 and says what would.
+
+When the documents name things and the web supplies a property of them (a \
+species' typical height, a company's revenue), the answer uses both, and \
+says which is which: "Your notes describe mature spruce and subalpine fir; \
+neither is measured there, but Engelmann spruce typically reaches 45-50 m \
+[4], making it the tallest." A negative statement ("the documents do not give \
+heights") carries at most one citation, not one per passage.
 </answer_first>
+
+<unclear_intent>
+When the request could reasonably mean more than one thing, the assistant \
+does not stop to ask. It picks the most likely reading and says so in a few \
+words ("Taking this to mean the tallest tree:"), or, when two readings are \
+both plausible and both short to answer, covers each ("If you meant X, ...; \
+if you meant Y, ..."). The person corrects it in one line if it guessed \
+wrong, which costs far less than a question would have.
+</unclear_intent>
 
 <the_work_is_already_shown>
 The person can see every search that ran, listed above the answer. So the \
@@ -993,6 +1003,21 @@ def _facts_block(state: ResearchState) -> str:
     )
 
 
+GENERAL_SYSTEM = """<role>
+The assistant is a general-purpose assistant. No documents are in play for \
+this conversation, so it answers from its own knowledge.
+</role>
+
+<tone_and_formatting>
+It answers the question directly, first, then adds what is useful. Clear \
+prose with the minimum formatting needed; lists, tables and code blocks only \
+where the content has that shape. Length matches the question: a greeting \
+gets a warm sentence. No opening flattery, no closing summary. If it is not \
+sure something it recalls is true and current, it says so rather than \
+stating it flatly.
+</tone_and_formatting>"""
+
+
 async def draft(state: ResearchState) -> dict:
     settings = get_settings()
     evidence = state.get("evidence") or []
@@ -1003,6 +1028,28 @@ async def draft(state: ResearchState) -> dict:
     # no passage at all. Bailing out here on an empty evidence list would have
     # replied "nothing was found" to a question this app had already answered
     # exactly, which is the same class of mistake as sending "hi" to retrieval.
+    if not evidence and not (state.get("corpus_facts") or []) and not state.get("document_ids"):
+        # A general question with no documents in play: answer it. This is
+        # only reached on the planned path (the agent answers these itself),
+        # e.g. on a model without tool calling.
+        try:
+            text = await get_llm().generate(
+                (f"Conversation so far:\n{state.get('chat_context')}\n\n" if state.get("chat_context") else "")
+                + f"{state['question']}",
+                system=GENERAL_SYSTEM + (state.get("preferences") or ""),
+                temperature=0.4,
+                max_output_tokens=4096,
+            )
+        except LLMError as exc:
+            text = keys.explain(exc)
+        return {
+            "draft": text.strip(),
+            "citations": [],
+            "sufficient": True,
+            "answered_directly": True,
+            "trace": [{"node": "draft", "general": True}],
+        }
+
     if not evidence and not (state.get("corpus_facts") or []):
         # Deliberately does NOT say "upload a document". That was right while
         # the corpus was the whole universe, but a search can now come back
@@ -1011,8 +1058,9 @@ async def draft(state: ResearchState) -> dict:
         # them off to fix the wrong thing.
         return {
             "draft": (
-                "Nothing was found for this question. If no documents have "
-                "been uploaded yet, add one; otherwise try rephrasing."
+                "Nothing in the selected documents covers this. Try rephrasing, "
+                "select other documents in the panel, or deselect them all to "
+                "ask without them."
             ),
             "citations": [],
             "sufficient": True,  # nothing to retry with
@@ -1107,7 +1155,7 @@ async def draft(state: ResearchState) -> dict:
         # says why beats a 502 -- the retrieved evidence is still on screen.
         log.warning("draft_failed", error=str(exc))
         return {
-            "draft": f"The answer could not be generated ({exc}).",
+            "draft": keys.explain(exc),
             "citations": [],
             "sufficient": True,  # a retry would hit the same wall
             # Flagged, so callers that are not a chat window can tell this
@@ -1204,7 +1252,9 @@ unsupported.
 
 <task>
 The assistant produces the most useful honest answer available. It keeps \
-every claim the sources support, with its [n] citations intact, and removes \
+every claim the sources support, from the documents AND from the web, with \
+its [n] citations intact -- typical figures looked up on the web for things \
+the documents name are part of the answer, not something to drop -- and removes \
 or softens anything the reviewer flagged as unsupported. It then says \
 plainly, in a sentence or two at the end, what could not be answered and why \
 ("your documents do not give X").
@@ -1437,6 +1487,22 @@ tried -- different vocabulary, synonyms, a fuller sentence.
 
 Never repeat a query that has already been tried.
 
+PROPERTIES THE DOCUMENTS DO NOT RECORD. When the question asks for a property \
+of things the documents mention (how tall, how large, how old, how much) and \
+the documents name those things without measuring them, the follow-up is a \
+WEB lookup of that property for each KIND of thing named, never another \
+document search. "Tallest tree in my notes" where the notes mention mature \
+spruce and alpine fir -> web: "Engelmann spruce mature height", "subalpine fir \
+mature height". The answer then reports those as typical figures for the \
+species, saying plainly that the documents do not measure individual trees. \
+Routing such a query to `documents` repeats a search that has already shown \
+the figure is not there.
+
+Once the draft gives those typical figures and says the documents do not \
+measure the individual items, the question IS answered: sufficient=true. A \
+measurement the documents never recorded is not a gap any search can fill, \
+so it is never a reason to keep going.
+
 MULTI-STEP QUESTIONS. When the sources NAME the items the question is about \
 but do not give the property it compares them on -- the plants a book \
 covers but not their sizes, the competitors a report lists but not their \
@@ -1469,6 +1535,11 @@ web."""
 
 async def critique(state: ResearchState) -> dict:
     settings = get_settings()
+    # A direct, general answer has no sources to be checked against; a critic
+    # asked whether it is supported would rightly say no, and send it round
+    # the missing-evidence loop.
+    if state.get("answered_directly"):
+        return {"sufficient": True, "failure_mode": "", "trace": [{"node": "critique", "skipped": "direct answer"}]}
     iterations = state.get("iterations", 0) + 1
     evidence = state.get("evidence") or []
 
@@ -1531,7 +1602,13 @@ async def critique(state: ResearchState) -> dict:
     # The drafter's own `unanswered` list is more reliable than the critic's
     # inference -- it knows exactly what it couldn't support. If it reported
     # gaps, trust that over a sufficient=true verdict.
-    if unanswered and not missing:
+    # FIRST PASS ONLY. After a retry, a draft can still list as "unanswered"
+    # things no search can supply -- measurements a document never recorded --
+    # and overriding the critic then forced the turn into `resolve`, which
+    # rewrote a good answer (typical heights from the web) down to "your
+    # documents do not give heights". Once a retry has run, the critic's
+    # sufficient=true stands.
+    if unanswered and not missing and iterations <= 1:
         missing = list(unanswered)
         if sufficient:
             sufficient = False
