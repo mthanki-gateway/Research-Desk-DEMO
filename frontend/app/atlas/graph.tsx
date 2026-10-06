@@ -827,7 +827,11 @@ function Scene({
         extent = Math.max(extent, c.distanceTo(new THREE.Vector3(positions[k * 3], positions[k * 3 + 1], positions[k * 3 + 2])));
       }
       wantTarget.copy(c);
-      wantRadius = Math.max(2.5, Math.min(HOME_RADIUS, extent * 2.8 + 1.2));
+      // ZOOM IN ONLY. Pulled out to frame a big tree, a click would undo
+      // the person's own zooming every time; it may come closer if they are
+      // further out than the tree needs, never further away.
+      const fit = Math.max(2.5, Math.min(HOME_RADIUS, extent * 2.8 + 1.2));
+      wantRadius = Math.min(wantRadius, fit);
     };
     api.current.flyToType = (t) => {
       if (!t) {
