@@ -83,6 +83,7 @@ export default function LocalModels() {
   const [labels, setLabels] = useState(current.labels.join(", "));
   const [threshold, setThreshold] = useState(0.4);
   const [busy, setBusy] = useState(false);
+  const [hasRun, setHasRun] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [scores, setScores] = useState<LocalScores | null>(null);
   const [ents, setEnts] = useState<LocalEntities | null>(null);
@@ -104,7 +105,13 @@ export default function LocalModels() {
     setLabels(c.labels.join(", "));
     setScores(null);
     setEnts(null);
+    setHasRun(false);
     setError(null);
+  }
+
+  function clearOutput() {
+    setScores(null);
+    setEnts(null);
   }
 
   const labelList = useMemo(
@@ -141,6 +148,7 @@ export default function LocalModels() {
             setProgress({ loaded: p.loaded, total: p.total }),
           ),
         );
+        setHasRun(true);
         setProgress(null);
         return;
       }
@@ -151,6 +159,7 @@ export default function LocalModels() {
           await localClassify({ text, labels: labelList }),
         );
       }
+      setHasRun(true);
       setStatus(await localStatus());
     } catch (e) {
       setError(e instanceof Error ? e.message : "Request failed");
@@ -223,14 +232,20 @@ export default function LocalModels() {
       <TextArea
         label="Text"
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          setText(e.target.value);
+          clearOutput();
+        }}
         surface="var(--md-surface)"
         disabled={busy}
       />
       <TextField
         label={caseId === "entities" ? "Entity types, comma-separated" : "Labels, comma-separated"}
         value={labels}
-        onChange={(e) => setLabels(e.target.value)}
+        onChange={(e) => {
+          setLabels(e.target.value);
+          clearOutput();
+        }}
         disabled={busy}
       />
       {caseId === "entities" && (
@@ -261,7 +276,10 @@ export default function LocalModels() {
             max={0.9}
             step={0.05}
             value={threshold}
-            onChange={(e) => setThreshold(Number(e.target.value))}
+            onChange={(e) => {
+              setThreshold(Number(e.target.value));
+              clearOutput();
+            }}
             className="flex-1"
           />
           <span className="tabular-nums">{threshold.toFixed(2)}</span>
@@ -274,7 +292,7 @@ export default function LocalModels() {
           disabled={busy || !text.trim() || labelList.length === 0 || !runnable}
         >
           {busy ? <IconSpinner /> : <IconGrid />}
-          {busy ? (progress ? "Downloading…" : "Running…") : "Run"}
+          {busy ? (progress ? "Downloading…" : "Running…") : hasRun ? "Run again" : "Run"}
         </Button>
         {progress && progress.total > 0 && (
           <span className="md-body-small tabular-nums" style={{ color: "var(--md-on-surface-variant)" }}>

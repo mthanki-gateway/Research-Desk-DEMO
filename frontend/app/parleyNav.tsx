@@ -1,6 +1,10 @@
 "use client";
 
-import { createHowlerProject } from "@/lib/api";
+import {
+  createHowlerProject,
+  listHowlerProjects,
+  type HowlerProject,
+} from "@/lib/api";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -36,11 +40,8 @@ const SECTION: Record<Mode, { label: string; empty: string; href: string }> = {
     href: "/parley",
   },
   howler: {
-    // "Interviews taken", not "Sessions": these are the conversations people
-    // HAD through a link, and "Sessions" read as the place to start one --
-    // people clicked them looking for a way to begin.
-    label: "Interviews taken",
-    empty: "No one has taken an interview yet",
+    label: "Projects",
+    empty: "No projects yet",
     href: "/parley/howler",
   },
   interview: {
@@ -60,12 +61,13 @@ export default function ParleyNav({
   mode: Mode;
 }) {
   const router = useRouter();
-  // Which conversation the page is showing, so the row can be highlighted.
-  // It lives in the URL rather than in shared state: the drawer and the page
-  // are separate components, and a query parameter is the one thing they both
-  // already see.
-  const current = useSearchParams().get("c");
+  // The active conversation or project lives in the URL, which both the drawer
+  // and page can read without coordinating shared selection state.
+  const params = useSearchParams();
+  const currentConversation = params.get("c");
+  const currentProject = params.get("p");
   const { parleyConversations, refreshParleyConversations } = useApp();
+  const [howlerProjects, setHowlerProjects] = useState<HowlerProject[]>([]);
   const [creating, setCreating] = useState(false);
   // Howler's "start one" lives HERE as well as on the page. The page's button
   // was the only way in, and people looking at this list never found it.
@@ -73,12 +75,13 @@ export default function ParleyNav({
     setCreating(true);
     try {
       const made = await createHowlerProject();
+      setHowlerProjects((previous) => [made, ...previous.filter((p) => p.id !== made.id)]);
       router.push(`/parley/howler?p=${made.id}`);
     } finally {
       setCreating(false);
     }
   }
-  const items = parleyConversations[mode];
+  const items = mode === "howler" ? howlerProjects : parleyConversations[mode];
   const section = SECTION[mode];
   const [open, setOpen] = useState(true);
   /**
@@ -95,6 +98,24 @@ export default function ParleyNav({
   const [renaming, setRenaming] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const renameBox = useRef<HTMLInputElement | null>(null);
+
+  // Howler's sidebar is a list of the design projects, not the participant
+  // conversations that happen inside each project. Opening one should land on
+  // its Design / Links / Results workspace.
+  useEffect(() => {
+    if (mode !== "howler") return;
+    let current = true;
+    listHowlerProjects()
+      .then((projects) => {
+        if (current) setHowlerProjects(projects);
+      })
+      .catch(() => {
+        if (current) setHowlerProjects([]);
+      });
+    return () => {
+      current = false;
+    };
+  }, [mode, currentProject]);
 
   // Restored after mount, not in the initialiser: this is a client component
   // but Next still renders it on the server for the first HTML, where
@@ -163,7 +184,7 @@ export default function ParleyNav({
       await refreshParleyConversations(mode);
       // Leaving the page pointed at a conversation that no longer exists would
       // show its turns until the next reload.
-      if (current === id) router.replace(section.href);
+      if (currentConversation === id) router.replace(section.href);
     } catch {
       /* it stays in the list */
     }
@@ -195,7 +216,7 @@ export default function ParleyNav({
           }}
         >
           {creating ? <IconSpinner className="h-4 w-4" /> : <IconPlus className="h-4 w-4" />}
-          New interview
+          New project
         </button>
       )}
       <button
@@ -226,7 +247,9 @@ export default function ParleyNav({
           // is about no single app's history taking the whole column.
           <ul className="scroll-thin max-h-56 overflow-y-auto">
             {items.map((c) => {
-              const active = pathname === section.href && current === c.id;
+              const active =
+                pathname === section.href &&
+                (mode === "howler" ? currentProject === c.id : currentConversation === c.id);
               return (
                 <li key={c.id} className="relative">
                   {renaming === c.id ? (
@@ -255,35 +278,43 @@ export default function ParleyNav({
                       as="div"
                       className="md-nav-item md-nav-item-dense"
                       data-active={active}
-                      onClick={() => router.push(`${section.href}?c=${c.id}`)}
+                      onClick={() =>
+                        router.push(
+                          mode === "howler"
+                            ? `${section.href}?p=${c.id}`
+                            : `${section.href}?c=${c.id}`,
+                        )
+                      }
                       title={c.title}
                       role="link"
                       tabIndex={0}
                     >
                       <span className="min-w-0 flex-1 truncate">{c.title}</span>
-                      <span
-                        role="button"
-                        tabIndex={0}
-                        aria-label={`Options for ${c.title}`}
-                        aria-haspopup="menu"
-                        aria-expanded={menu?.id === c.id}
-                        data-open={menu?.id === c.id}
-                        onClick={(e) => {
-                          // Or the row navigates out from under the menu.
-                          e.stopPropagation();
-                          if (menu?.id === c.id) return setMenu(null);
-                          // Anchored to the BUTTON's position on screen, taken
-                          // at open time, because `fixed` coordinates are
-                          // viewport coordinates.
-                          const r = (
-                            e.currentTarget as HTMLElement
-                          ).getBoundingClientRect();
-                          setMenu({ id: c.id, x: r.right, y: r.bottom + 4 });
-                        }}
-                        className="md-icon-affordance shrink-0"
-                      >
-                        <IconMore className="h-4 w-4" />
-                      </span>
+                      {mode !== "howler" && (
+                        <span
+                          role="button"
+                          tabIndex={0}
+                          aria-label={`Options for ${c.title}`}
+                          aria-haspopup="menu"
+                          aria-expanded={menu?.id === c.id}
+                          data-open={menu?.id === c.id}
+                          onClick={(e) => {
+                            // Or the row navigates out from under the menu.
+                            e.stopPropagation();
+                            if (menu?.id === c.id) return setMenu(null);
+                            // Anchored to the BUTTON's position on screen, taken
+                            // at open time, because `fixed` coordinates are
+                            // viewport coordinates.
+                            const r = (
+                              e.currentTarget as HTMLElement
+                            ).getBoundingClientRect();
+                            setMenu({ id: c.id, x: r.right, y: r.bottom + 4 });
+                          }}
+                          className="md-icon-affordance shrink-0"
+                        >
+                          <IconMore className="h-4 w-4" />
+                        </span>
+                      )}
                     </Ripplable>
                   )}
 

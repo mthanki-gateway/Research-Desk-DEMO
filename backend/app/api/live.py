@@ -73,7 +73,7 @@ from app.auth import (
 from app.config import get_settings
 from app.db.models import ChatSession, Message, Role
 from app.db.session import SessionLocal
-from app.services import blueprint, invites, live, voice, websearch
+from app.services import blueprint, invites, jobs, live, voice, websearch
 
 log = structlog.get_logger()
 
@@ -201,6 +201,14 @@ async def conversation(
         "fields": chat.fields or [],
         "brief": chat.brief or "",
         "participant": chat.participant or "",
+        # The dedicated speech-to-text pass runs after a participant finishes.
+        # Let the reader know when those cleaner captions are still pending so
+        # the conversation view can refresh until they replace the live captions.
+        "transcription": (
+            await jobs.status_for(chat.id, "interview")
+            if chat.kind in {"interview", "howler"}
+            else None
+        ),
         # Which project this came from, so reading a result has a way BACK to
         # it. Without it the only route out of a conversation was the project
         # list, which loses the one thing you were looking at.

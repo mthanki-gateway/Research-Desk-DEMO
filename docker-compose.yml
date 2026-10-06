@@ -47,6 +47,8 @@ services:
       # /openapi.json -- config.py defaults APP_ENV to "prod" so that a
       # deployment which forgets to set it gets the restrictive behaviour.
       APP_ENV: dev
+      # Enable local CPU voice-emotion analysis for interviews in this stack.
+      EMOTION_ANALYSIS: ${EMOTION_ANALYSIS:-true}
       DATABASE_URL: postgresql+asyncpg://rd:rd_local_dev@postgres:5432/research_desk
       # MODEL SPLIT, chosen by PROFILE rather than pinned model-by-model.
       #

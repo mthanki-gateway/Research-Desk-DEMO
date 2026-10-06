@@ -152,8 +152,17 @@ body {
   max-width: 100%;
 }
 
+:root {
+  /* Shared page canvas: Model Lab's blue surface tone across all app areas. */
+  --app-background: #f3f3f6;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root { --app-background: #1a1c1e; }
+}
+
 body {
-  background: var(--md-surface-container-low);
+  background: var(--app-background);
   color: var(--md-on-surface);
   font-family: Roboto, system-ui, -apple-system, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;

@@ -17,9 +17,9 @@ import { IconChevron, IconSpinner } from "../../icons";
  * the place you are in visible the whole time, which is the point of having a
  * results tab rather than a list of links.
  *
- * FETCHED ON FIRST OPEN, then kept. Five interviews on a page would otherwise
- * be five transcript requests nobody asked for, and closing and reopening one
- * is not a reason to ask again.
+ * FETCHED WHEN OPEN, then refreshed while post-call transcription is running.
+ * The saved turns begin with live captions, then the speech-to-text pass
+ * replaces the participant's side when it completes.
  */
 export default function ConversationPanel({
   sessionId,
@@ -30,22 +30,46 @@ export default function ConversationPanel({
   turns: number;
 }) {
   const [open, setOpen] = useState(false);
-  const [lines, setLines] = useState<string[] | null>(null);
+  const [conversation, setConversation] = useState<
+    Awaited<ReturnType<typeof getParleyConversation>> | null
+  >(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!open || lines !== null || loading) return;
-    setLoading(true);
-    getParleyConversation(sessionId)
-      .then((d) =>
-        setLines(d.turns.map((t) => t.answer).filter((a): a is string => !!a)),
-      )
-      .catch((e) =>
-        setError(e instanceof Error ? e.message : "Could not load it"),
-      )
-      .finally(() => setLoading(false));
-  }, [open, lines, loading, sessionId]);
+    if (!open) return;
+    let stopped = false;
+    let timer: number | undefined;
+
+    async function refresh(showSpinner: boolean) {
+      if (showSpinner) setLoading(true);
+      try {
+        const latest = await getParleyConversation(sessionId);
+        if (stopped) return;
+        setConversation(latest);
+        setError(null);
+        if (
+          latest.transcription?.status === "queued" ||
+          latest.transcription?.status === "running"
+        ) {
+          timer = window.setTimeout(() => void refresh(false), 2000);
+        }
+      } catch (e) {
+        if (!stopped)
+          setError(e instanceof Error ? e.message : "Could not load it");
+      } finally {
+        if (showSpinner && !stopped) setLoading(false);
+      }
+    }
+
+    void refresh(true);
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, [open, sessionId]);
+
+  const transcription = conversation?.transcription;
 
   return (
     <div className="mt-2">
@@ -86,29 +110,70 @@ export default function ConversationPanel({
             </p>
           )}
 
-          {/* THE INTERVIEWER'S SIDE ONLY, as everywhere else. The
-              participant's transcript is a separate, lossier pass -- it
-              rendered somebody saying their name was John as "madre es un" --
-              and a wrong transcript beside a right answer reads as
-              authoritative. What they said survives accurately in the notes
-              and quotes above, recorded by the thing that heard it. */}
-          {lines && (
+          {transcription?.status === "queued" || transcription?.status === "running" ? (
+            <p
+              className="md-body-small mb-2"
+              style={{ color: "var(--md-on-surface-variant)" }}
+            >
+              Transcribing participant turns. Live captions are shown until the
+              cleaner transcript is ready.
+            </p>
+          ) : transcription?.status === "failed" ? (
+            <p
+              className="md-body-small mb-2"
+              style={{ color: "var(--md-error)" }}
+            >
+              Transcription failed; showing the live captions.
+              {transcription.error ? ` ${transcription.error}` : ""}
+            </p>
+          ) : transcription?.status === "done" && transcription.result.engine ? (
+            <p
+              className="md-body-small mb-2"
+              style={{ color: "var(--md-on-surface-variant)" }}
+            >
+              Participant turns transcribed with {String(transcription.result.engine)}.
+            </p>
+          ) : null}
+
+          {/* The participant's clean post-call transcript appears here beside
+              the interviewer's response. While that pass is pending, it is
+              refreshed from the live captions and replaced on completion. */}
+          {conversation && (
             <ol
               className="md-scroll max-h-96 space-y-2 overflow-y-auto rounded-[var(--md-shape-md)] p-3"
               style={{ background: "var(--md-surface-container-high)" }}
             >
-              {lines.map((line, i) => (
-                <li key={i}>
-                  <p
-                    className="md-label-small"
-                    style={{ color: "var(--md-on-surface-variant)" }}
-                  >
-                    Interviewer
-                  </p>
-                  <p className="md-body-small whitespace-pre-wrap">{line}</p>
+              {conversation.turns.map((turn, i) => (
+                <li
+                  key={i}
+                  className="space-y-3 rounded-[var(--md-shape-sm)] px-3 py-2"
+                  style={{ background: "var(--md-surface)" }}
+                >
+                  {turn.question && (
+                    <div>
+                      <p
+                        className="md-label-small"
+                        style={{ color: "var(--md-on-surface-variant)" }}
+                      >
+                        Participant · turn {i + 1}
+                      </p>
+                      <p className="md-body-small whitespace-pre-wrap">{turn.question}</p>
+                    </div>
+                  )}
+                  {turn.answer && (
+                    <div>
+                      <p
+                        className="md-label-small"
+                        style={{ color: "var(--md-on-surface-variant)" }}
+                      >
+                        Interviewer
+                      </p>
+                      <p className="md-body-small whitespace-pre-wrap">{turn.answer}</p>
+                    </div>
+                  )}
                 </li>
               ))}
-              {lines.length === 0 && (
+              {conversation.turns.length === 0 && (
                 <li
                   className="md-body-small"
                   style={{ color: "var(--md-on-surface-variant)" }}

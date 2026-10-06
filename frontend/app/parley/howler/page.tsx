@@ -176,13 +176,13 @@ function Projects() {
             style={{ color: "var(--md-on-surface-variant)" }}
           >
             Design an interview by talking through what you want to find out,
-            then send the link. Your designs are below; the interviews people
-            have taken are listed under Howler in the sidebar.
+            then send the link. Your projects are below; open one from the
+            Projects list in the sidebar to manage its links and results.
           </p>
         </div>
         <Button onClick={() => void start()} disabled={busy} className="shrink-0">
           {busy ? <IconSpinner /> : <IconPlus />}
-          New interview
+          New project
         </Button>
       </header>
 
@@ -211,7 +211,7 @@ function Projects() {
           <div className="mt-6 flex justify-center">
             <Button onClick={() => void start()} disabled={busy}>
               {busy ? <IconSpinner /> : <IconPlus />}
-              New interview
+              New project
             </Button>
           </div>
         </div>
@@ -1558,7 +1558,7 @@ function Results({
                 is none. Showing nothing made this look missing rather than
                 pending -- and the honest answer is usually "there is no
                 recording to analyse yet", which nobody could guess. */}
-            {(result.voice || result.analysis) && (
+            {(result.voice || result.analysis || result.analysis_enabled) && (
               <section className="md-card md-card-outlined mb-3 p-5">
                 <h3 className="md-title-small">Voice analysis</h3>
                 {result.voice ? (
@@ -1608,13 +1608,15 @@ function Results({
                     className="md-body-small mt-2"
                     style={{ color: "var(--md-on-surface-variant)" }}
                   >
-                    {result.analysis?.status === "failed"
+                    {!result.analysis_enabled
+                      ? "Local voice analysis is off. Enable EMOTION_ANALYSIS=true for the API worker to process stored interview audio."
+                      : result.analysis?.status === "failed"
                       ? `Analysis failed: ${result.analysis.error || "unknown error"}`
                       : result.analysis?.status === "running"
                         ? "Analysing the audio…"
                         : result.analysis?.status === "done"
                           ? "Nothing to analyse — this interview has no audio recording."
-                          : "Waiting. Interviews are queued as they finish, and analysed once recordings exist and the model is switched on."}
+                          : "Waiting for the interview audio analysis job."}
                   </p>
                 )}
               </section>

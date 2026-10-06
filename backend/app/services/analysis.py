@@ -67,11 +67,9 @@ async def run_emotion_job(payload: dict) -> dict:
 async def _recorded_turns(session_id: uuid.UUID) -> list[dict]:
     """Which turns of this conversation have audio, oldest first.
 
-    EMPTY UNTIL RECORDINGS EXIST. Interview audio is not captured yet -- see
-    docs/storage.md -- so this returns nothing and the job completes with
-    "no recordings" rather than failing. That is deliberate: the queue, the
-    handler and the status the UI reads are all exercised now, and the day
-    recordings land this is the only function that changes.
+    `live.save_turn` stores one participant WAV and adds its storage key to the
+    user message. Interviews held before recording was enabled simply have no
+    keys and complete with a visible "no recordings" result.
     """
     from sqlalchemy import select
 

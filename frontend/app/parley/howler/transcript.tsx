@@ -3,8 +3,6 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  type BlueprintField,
-  type Profile,
   getParleyConversation,
   renameParleyConversation,
 } from "@/lib/api";
@@ -41,25 +39,40 @@ export default function Transcript({
   projectId: string | null;
 }) {
   const router = useRouter();
-  const [data, setData] = useState<{
-    title: string;
-    turns: { answer: string }[];
-    profile: Profile;
-    missing: string[];
-    complete: boolean;
-    fields: BlueprintField[];
-    project_id: string | null;
-  } | null>(null);
+  const [data, setData] = useState<
+    Awaited<ReturnType<typeof getParleyConversation>> | null
+  >(null);
   const [error, setError] = useState<string | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState("");
 
   useEffect(() => {
-    getParleyConversation(id)
-      .then((d) => setData(d))
-      .catch((e) =>
-        setError(e instanceof Error ? e.message : "Could not open that"),
-      );
+    let stopped = false;
+    let timer: number | undefined;
+
+    async function refresh() {
+      try {
+        const latest = await getParleyConversation(id);
+        if (stopped) return;
+        setData(latest);
+        setError(null);
+        if (
+          latest.transcription?.status === "queued" ||
+          latest.transcription?.status === "running"
+        ) {
+          timer = window.setTimeout(() => void refresh(), 2000);
+        }
+      } catch (e) {
+        if (!stopped)
+          setError(e instanceof Error ? e.message : "Could not open that");
+      }
+    }
+
+    void refresh();
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
   }, [id]);
 
   async function commitRename() {
@@ -109,7 +122,7 @@ export default function Transcript({
     );
   }
 
-  const answered = data.turns.filter((t) => t.answer);
+  const answered = data.turns.filter((t) => t.question || t.answer);
 
   return (
     <div className="mx-auto max-w-3xl px-6 py-6">
@@ -173,7 +186,7 @@ export default function Transcript({
       />
 
       <h2 className="md-title-small mb-3 mt-8">
-        What the interviewer said
+        Conversation
         <span
           className="md-label-small ml-2"
           style={{ color: "var(--md-on-surface-variant)" }}
@@ -182,22 +195,46 @@ export default function Transcript({
         </span>
       </h2>
 
-      {/* THE INTERVIEWER'S SIDE ONLY, as everywhere else in this app. The
-          participant's transcript is a separate, lossier pass -- it rendered
-          somebody saying their name was John as "madre es un" -- and a wrong
-          transcript beside a right answer reads as authoritative. What they
-          said survives accurately in the profile's notes and quotes, recorded
-          by the thing that actually heard it. */}
+      {data.transcription?.status === "queued" || data.transcription?.status === "running" ? (
+        <p
+          className="md-body-small mb-3"
+          style={{ color: "var(--md-on-surface-variant)" }}
+        >
+          Transcribing participant turns. Live captions are shown until the
+          cleaner transcript is ready.
+        </p>
+      ) : data.transcription?.status === "failed" ? (
+        <p className="md-body-small mb-3" style={{ color: "var(--md-error)" }}>
+          Transcription failed; showing the live captions.
+          {data.transcription.error ? ` ${data.transcription.error}` : ""}
+        </p>
+      ) : null}
+
       <ol className="space-y-3">
         {answered.map((turn, i) => (
-          <li key={i} className="md-card md-card-outlined space-y-1.5 p-5">
-            <p
-              className="md-label-medium"
-              style={{ color: "var(--md-on-surface-variant)" }}
-            >
-              Interviewer
-            </p>
-            <p className="md-body-medium whitespace-pre-wrap">{turn.answer}</p>
+          <li key={i} className="md-card md-card-outlined space-y-3 p-5">
+            {turn.question && (
+              <div>
+                <p
+                  className="md-label-medium"
+                  style={{ color: "var(--md-on-surface-variant)" }}
+                >
+                  Participant · turn {i + 1}
+                </p>
+                <p className="md-body-medium whitespace-pre-wrap">{turn.question}</p>
+              </div>
+            )}
+            {turn.answer && (
+              <div>
+                <p
+                  className="md-label-medium"
+                  style={{ color: "var(--md-on-surface-variant)" }}
+                >
+                  Interviewer
+                </p>
+                <p className="md-body-medium whitespace-pre-wrap">{turn.answer}</p>
+              </div>
+            )}
           </li>
         ))}
         {answered.length === 0 && (

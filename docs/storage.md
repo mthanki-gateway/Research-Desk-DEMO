@@ -146,110 +146,35 @@ perfectly well indexed.
 
 ---
 
-## Planned: interview recordings
+## Interview recordings and voice analysis
 
-Not built. The design, so it is not re-derived later:
+Participant audio is captured by the live socket as 16 kHz mono PCM, wrapped
+as one WAV per participant turn, and stored through the shared `Storage`
+interface. Each user message keeps its `audio_key` in `agent_meta`; the default
+local backend writes the files to the `filestore` Docker volume. Audio storage
+failures are logged and do not interrupt the call.
 
-**Why.** A profile says what someone answered. The recording is how they said
-it — and for Howler, where results are read by someone who was not present,
-that is most of the value. It also makes the emotion report checkable rather
-than something to take on faith.
+After an interview ends, a Postgres-backed job transcribes each saved clip,
+replaces the initial live caption in the message, and rebuilds the profile from
+the ordered participant/interviewer turns. It uses Groq Whisper when that
+owner has a Groq key, otherwise Gemini speech-to-text. This transcription is
+provider-hosted; there is no local ASR model in this flow. The live Gemini
+session also emits provisional input/output captions for the live screen.
 
-**Where the audio already is.** Both directions pass through our socket
-(`api/live.py`): the participant's 16 kHz PCM through `_uplink`, the model's
-24 kHz through `_downlink`. Nothing extra needs capturing — it only needs
-keeping.
+The optional local emotion model is
+[`audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim`][aud]. It scores the
+stored clips on the API CPU and reports arousal, dominance and valence relative
+to that participant's own median. The config defaults `EMOTION_ANALYSIS` to
+`false`; the local Docker Compose stack sets it to `true` so voice analysis
+runs after interviews. Set `EMOTION_ANALYSIS=false` in `.env` to disable it
+locally. The development image has PyTorch and Transformers through the
+`local-nlp` extra; the production image omits them. The model weights load
+lazily on the first emotion job.
 
-**Shape.** Buffer per turn rather than per session: a turn is ~30 s ≈ 1 MB at
-16 kHz mono 16-bit, where a 10-minute interview is ~19 MB. Write a WAV per turn
-at `activity_end`, key it `howl/<session>/<n>.wav`, and store the key on the
-`Message` row. Per-turn segmentation is what makes the player able to jump to
-"the answer about budget" — a single file cannot do that without a separate
-index.
-
-**Player.** In the Results tab, beside the profile, with the segment list
-driven by the same turn boundaries the profile was recorded against. Each data
-point links to the turn that filled it.
-
-**Consent is a requirement, not a setting.** Recording someone requires telling
-them. The guest page must say so before the first turn, not in a tooltip.
-
-**Video, later.** The same per-turn keys extend to video, which is what facial
-expression analysis per answer would need. Worth noting that this raises the
-stakes considerably on the point above.
-
----
-
-## Planned: a dedicated emotion model, server-side
-
-Today's "How they came across" is the *interviewer's* impression, recorded as
-`demeanour` and `notable_moments` on `end_interview` and deliberately worded as
-observation rather than diagnosis. The local models in this app — Silero and
-Smart Turn — do **turn detection**. Neither knows anything about emotion.
-
-**It belongs on the backend, not in the browser.** The browser had a hard
-budget: every megabyte is a download before the feature works, and inference
-competes with a live call. A stored recording has neither constraint — it can
-be analysed after the interview, at leisure, and **re-analysed** when a better
-model appears. That last point is the same argument as keeping original
-uploads, and it only works if the audio was kept.
-
-So the order is: recordings → storage → analysis. Not the other way round.
-
-### Dimensional, not categorical
-
-The obvious design is a label — "happy", "angry", "sad". It is the wrong one
-here, twice over.
-
-Most categorical SER models are trained on **acted** corpora (RAVDESS and
-friends), where someone performs an emotion on cue. They report accuracy in the
-eighties and collapse on natural speech, because nobody in a job interview is
-performing anger. And a label is a verdict: "the model says this candidate was
-angry" will be read as fact by whoever is deciding about them.
-
-[`audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim`][aud] is the better
-fit. It outputs **arousal, dominance and valence** as continuous values in
-roughly 0–1, and it was fine-tuned on **MSP-Podcast** — spontaneous speech,
-not acted — which is far closer to an interview than any acted set.
-
-Those three map onto language the profile already uses: how animated, how
-assertive, how positive somebody sounded. Observations, not diagnoses.
-
-**Change matters more than level.** An absolute arousal of 0.6 means very
-little; arousal rising sharply on one question and falling on the next is a
-real signal, and it is exactly what `notable_moments` is already reaching for.
-Per-turn recordings give that for free, since the turn boundaries are the same
-ones the profile was recorded against.
-
-### The others worth knowing
-
-| | |
-|---|---|
-| [Wav2Small][ws] | 72K params, ~120 KB quantised — for when size is the constraint |
-| `emotion2vec_plus_large` (FunASR) | newer self-supervised speech-emotion representation |
-| SenseVoice (FunASR) | ASR + emotion + audio events in one pass |
-| [speechbrain IEMOCAP][sb] | categorical, and IEMOCAP is largely acted |
-| Hume AI | hosted prosody API, no self-hosting |
-
-### The constraint that will bite
-
-**Render's free tier is 512 MB of RAM.** `wav2vec2-large-robust-12` does not
-fit, and neither does the PyTorch that usually runs it — torch alone is well
-over a gigabyte in the image. Options, in order of preference:
-
-1. Export to **ONNX** and run through `onnxruntime` on CPU. The runtime is tens
-   of megabytes rather than gigabytes, and this repo already uses ONNX in the
-   browser, so the pattern is familiar.
-2. Run analysis **off the request path entirely** — a job that reads finished
-   recordings, on a box with more memory, writing results back.
-3. A hosted inference API, accepting that the audio then leaves our control,
-   which is a different conversation with the participant.
-
-And the caveat to keep in the design regardless: SER is substantially less
-reliable than turn detection and varies by culture and accent. It belongs in a
-profile as a note, never as a number anyone decides on. Verify the real ONNX
-input contract before building against it — Smart Turn taught that twice.
+The local browser models Silero VAD and Smart Turn v3 answer a different
+question: when a speaker has paused and whether the turn sounds finished.
+They are not used to transcribe speech or detect emotion. Speech-emotion
+estimates vary across speakers, accents and recording conditions; the UI
+frames them as observations rather than findings about a person.
 
 [aud]: https://huggingface.co/audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim
-[ws]: https://arxiv.org/html/2408.13920
-[sb]: https://huggingface.co/speechbrain/emotion-recognition-wav2vec2-IEMOCAP

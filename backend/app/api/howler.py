@@ -26,6 +26,7 @@ from sqlalchemy import func as sql_func
 from sqlalchemy import select
 
 from app.auth import User, current_user, forbid_if_not_owner
+from app.config import get_settings
 from app.db.models import ChatSession, HowlerInvite, HowlerProject, Message
 from app.db.session import SessionLocal
 from app.services import blueprint, designer, invites, jobs, live, profile
@@ -445,6 +446,7 @@ async def _invite_out(invite: HowlerInvite) -> dict:
                 # So the tab can say "queued" or "failed" rather than showing
                 # nothing and looking broken while the work is still pending.
                 "analysis": await jobs.status_for(chat.id, "emotion"),
+                "analysis_enabled": get_settings().emotion_analysis,
             }
 
     return {

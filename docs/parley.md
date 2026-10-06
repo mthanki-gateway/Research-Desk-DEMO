@@ -46,11 +46,11 @@ from `agent_tools.tool_specs()` and executes them through `agent_tools.run_tool`
 and the divergence would show up as the voice app answering differently from
 the chat app about the same document.
 
-**The input transcript is not shown.** `input_transcription` is a separate,
-lossier pass than the model's own understanding — it rendered a participant
-saying their name was John as "madre es un", in a turn the model answered with
-"Thanks, John". A wrong transcript beside a right answer is worse than none: it
-reads as authoritative, and invites doubt about the half that was correct.
+**Live captions are provisional.** Gemini's `input_transcription` is a separate,
+lossier pass than the model's own understanding. After an interview ends, a
+dedicated speech-to-text job replaces the participant's live captions and the
+saved result shows both sides of each exchange. Until that job finishes, the
+UI labels the captions as provisional.
 
 **Two things fail silently, and both are pinned by tests.**
 
@@ -229,12 +229,13 @@ dependency. The guest page (`/howl/<token>`) renders outside the app shell.
   15 minutes.
 - **Resumption handles** expire 2 hours after termination, and the `resumable`
   flag does not know that.
-- **Audio recordings** — see [storage.md](storage.md).
-- **A dedicated emotion model.** Today "How they came across" is the
-  interviewer's own impression, recorded as `demeanour` and `notable_moments`
-  on `end_interview`. It is deliberately worded as observation, never
-  diagnosis. The local models in this app are Silero and Smart Turn, and they
-  do TURN DETECTION -- neither of them knows anything about emotion.
+- **Audio playback.** Participant clips are stored per turn and analysed after
+  the interview, but the Results page does not yet play the recordings back.
+- **Voice emotion analysis is optional and off by default.** The local
+  `audeering/wav2vec2-large-robust-12-ft-emotion-msp-dim` model runs on the API
+  worker when `EMOTION_ANALYSIS=true`; the profile's separate `affect` field is
+  still the live interviewer's verbal impression. Silero and Smart Turn are
+  local turn detectors, not emotion models. See [storage.md](storage.md).
 
   A participant who ends the interview themselves now gets a closing pass:
   the live model is asked to call `end_interview` before the socket closes,

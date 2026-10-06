@@ -1334,6 +1334,16 @@ export type ParleyTurn = {
   tools: string[];
 };
 
+export type BackgroundJobStatus = {
+  id: string;
+  kind: string;
+  status: "queued" | "running" | "done" | "failed";
+  attempts: number;
+  error: string;
+  result: Record<string, unknown>;
+  finished_at: string | null;
+};
+
 export async function getParleyConversations(
   mode: Mode = "speak",
 ): Promise<ParleyConversation[]> {
@@ -1416,6 +1426,8 @@ export async function getParleyConversation(
   /** Howler only: the project this conversation belongs to, so reading a
    *  result has a way back to it. Null for a session with no project. */
   project_id: string | null;
+  /** Howler and Interview: the post-call speech-to-text/profile job. */
+  transcription: BackgroundJobStatus | null;
 }> {
   const res = await authedFetch(`/live/conversations/${id}`, {
     cache: "no-store",
@@ -1504,6 +1516,8 @@ export type InviteResult = {
     error: string;
     result: Record<string, unknown>;
   } | null;
+  /** Whether the local API worker is configured to run emotion analysis. */
+  analysis_enabled: boolean;
   /** The schema THIS conversation was given, which is not necessarily the
    *  project's current one — a link opened last week gathered last week's
    *  data points, and rendering it against today's would invent empty rows
