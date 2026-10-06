@@ -81,11 +81,12 @@ router = APIRouter(tags=["live"])
 
 
 @router.get("/live/status")
-async def status() -> dict:
+async def status(user: User = Depends(current_user)) -> dict:
     """What the client needs before offering a microphone.
 
-    Unauthenticated on purpose -- it reports CONFIGURATION, not user data, the
-    same way /health does. The socket itself still requires a token.
+    Authenticated, because "enabled" now means "THIS caller has a Gemini key":
+    keys are per user, and `current_user` is what binds them. Unauthenticated,
+    no key is bound and it reported speech as unconfigured for everyone.
     """
     settings = get_settings()
     return {
