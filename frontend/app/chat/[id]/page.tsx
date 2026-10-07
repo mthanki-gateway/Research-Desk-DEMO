@@ -742,7 +742,7 @@ function Turn({
       {/* `.md-answer`, not `.md-card md-card-elevated`: the elevated card's
           background is surface-container-low, which is also the page
           background, so answers were a shadow around nothing. */}
-      <div className="md-answer p-5">
+      <div className="md-answer md-body-medium p-5">
         <Answer
           content={message.content}
           sources={message.sources}
