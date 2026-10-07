@@ -1271,6 +1271,25 @@ export async function askByVoice(
   return res.json();
 }
 
+export async function synthesizeAnswer(
+  text: string,
+  voiceName = "Kore",
+): Promise<{ audio: string; mime: string; sample_rate: number; voice: string }> {
+  const res = await authedJson("/voice/synthesize", "POST", {
+    text,
+    voice_name: voiceName,
+  });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export function synthesizedAudioUrl(audio: string, mime: string): string {
+  const raw = atob(audio);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  return URL.createObjectURL(new Blob([bytes], { type: mime }));
+}
+
 /** base64 WAV -> a URL an <audio> element can play. */
 export function audioUrl(turn: VoiceTurn): string {
   const raw = atob(turn.audio);

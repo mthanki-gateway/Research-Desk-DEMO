@@ -326,6 +326,13 @@ _BULLET = re.compile(r"^\s*[-*+]\s+", re.MULTILINE)
 _TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$", re.MULTILINE)
 
 
+def _table_row_to_speech(match: re.Match[str]) -> str:
+    cells = [cell.strip() for cell in match.group(0).strip().strip("|").split("|")]
+    if cells and all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
+        return ""
+    return "; ".join(cell for cell in cells if cell)
+
+
 def speakable(text: str) -> str:
     """Strip everything that is punctuation to the eye and noise to the ear.
 
@@ -340,7 +347,8 @@ def speakable(text: str) -> str:
     would expect. This only removes markup.
     """
     out = _CODE_FENCE.sub(" (code omitted) ", text)
-    out = _TABLE_ROW.sub("", out)
+    # Keep table contents in the narration; only the visual separators go.
+    out = _TABLE_ROW.sub(_table_row_to_speech, out)
     out = _LINK.sub(r"\1", out)
     out = _CITATION.sub("", out)
     out = _HEADING.sub("", out)

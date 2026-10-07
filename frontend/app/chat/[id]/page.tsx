@@ -15,6 +15,8 @@ import {
   getSession,
   sendFeedback,
   resumeTurn,
+  synthesizeAnswer,
+  synthesizedAudioUrl,
   streamTurn,
   updateSession,
 } from "@/lib/api";
@@ -30,6 +32,7 @@ import {
   IconSpinner,
   IconThumbDown,
   IconThumbUp,
+  IconWave,
 } from "../../icons";
 import Clarify from "./clarify";
 import RayView from "../rayview";
@@ -942,6 +945,7 @@ function Turn({
         {formattedTimestamp && (
           <time dateTime={message.created_at}>{formattedTimestamp}</time>
         )}
+        <ReadAloud content={message.content} />
         {meta.iterations != null && (
           <span className="tabular-nums">
             {meta.iterations} iteration{meta.iterations === 1 ? "" : "s"}
@@ -984,6 +988,95 @@ function Turn({
         )}
       </div>
     </li>
+  );
+}
+
+function ReadAloud({ content }: { content: string }) {
+  const [status, setStatus] = useState<"idle" | "loading" | "playing">("idle");
+  const [error, setError] = useState<string | null>(null);
+  const audio = useRef<HTMLAudioElement | null>(null);
+  const audioUrl = useRef<string | null>(null);
+  const requestId = useRef(0);
+
+  const stop = useCallback(() => {
+    requestId.current += 1;
+    audio.current?.pause();
+    audio.current = null;
+    if (audioUrl.current) URL.revokeObjectURL(audioUrl.current);
+    audioUrl.current = null;
+    setStatus("idle");
+  }, []);
+
+  useEffect(
+    () => () => {
+      requestId.current += 1;
+      audio.current?.pause();
+      if (audioUrl.current) URL.revokeObjectURL(audioUrl.current);
+    },
+    [],
+  );
+
+  const toggle = useCallback(async () => {
+    if (status !== "idle") {
+      stop();
+      return;
+    }
+
+    const id = ++requestId.current;
+    setError(null);
+    setStatus("loading");
+    try {
+      const result = await synthesizeAnswer(content, "Kore");
+      if (requestId.current !== id) return;
+      const url = synthesizedAudioUrl(result.audio, result.mime);
+      audioUrl.current = url;
+      const player = new Audio(url);
+      audio.current = player;
+      player.onended = () => {
+        if (requestId.current === id) stop();
+      };
+      player.onerror = () => {
+        if (requestId.current === id) {
+          setError("Audio playback failed. Try again.");
+          stop();
+        }
+      };
+      await player.play();
+      if (requestId.current === id) setStatus("playing");
+    } catch (cause) {
+      if (requestId.current === id) {
+        setError(cause instanceof Error ? cause.message : "Could not prepare audio.");
+        stop();
+      }
+    }
+  }, [content, status, stop]);
+
+  return (
+    <span className="inline-flex items-center gap-2">
+      <button
+        type="button"
+        onClick={() => void toggle()}
+        className="md-state inline-flex items-center gap-1 rounded-full px-2 py-1"
+        style={{
+          color: "var(--md-primary)",
+          background: "var(--md-surface-container)",
+        }}
+        aria-label={status === "playing" ? "Stop reading answer" : "Listen to answer"}
+        title={status === "playing" ? "Stop reading" : "Listen to the full answer in Kore"}
+      >
+        {status === "loading" ? (
+          <IconSpinner className="h-3.5 w-3.5" />
+        ) : (
+          <IconWave className="h-3.5 w-3.5" />
+        )}
+        {status === "loading" ? "Preparing audio" : status === "playing" ? "Stop" : "Listen"}
+      </button>
+      {error && (
+        <span className="max-w-56 truncate" title={error} style={{ color: "var(--md-error)" }}>
+          {error}
+        </span>
+      )}
+    </span>
   );
 }
 

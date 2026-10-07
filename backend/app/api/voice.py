@@ -31,10 +31,13 @@ the point.
 from __future__ import annotations
 
 import base64
+import io
 import uuid
+import wave
 
 import structlog
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel, Field
 
 from app.agent.graph import run_agent
 from app.auth import User, current_user
@@ -46,6 +49,35 @@ log = structlog.get_logger()
 router = APIRouter(prefix="/voice", tags=["voice"])
 
 MAX_AUDIO_BYTES = 25 * 1024 * 1024
+MAX_SPEECH_TEXT_CHARS = 100_000
+TTS_CHUNK_CHARS = 3_000
+
+
+class SynthesizeRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=MAX_SPEECH_TEXT_CHARS)
+    voice_name: str = "Kore"
+
+
+def _speech_chunks(text: str, limit: int = TTS_CHUNK_CHARS) -> list[str]:
+    """Split long answers at sentence/word boundaries for the TTS model."""
+    chunks: list[str] = []
+    remaining = text.strip()
+    while len(remaining) > limit:
+        boundary = max(
+            remaining.rfind(mark, 0, limit + 1)
+            for mark in (". ", "? ", "! ", "; ", ", ", " ")
+        )
+        if boundary < limit // 2:
+            boundary = limit
+        else:
+            boundary += 1
+        part = remaining[:boundary].strip()
+        if part:
+            chunks.append(part)
+        remaining = remaining[boundary:].strip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks
 
 # How the agent is told to write when it is going to be HEARD.
 #
@@ -107,6 +139,63 @@ async def status(user: User = Depends(current_user)) -> dict:
         # Shown in the UI, because "it did not search the web" and "it cannot
         # search the web" are indistinguishable from a spoken answer.
         "web_search": websearch.enabled(),
+    }
+
+
+@router.post("/synthesize")
+async def synthesize_answer(
+    req: SynthesizeRequest, user: User = Depends(current_user)
+) -> dict:
+    """Speak an existing written answer without rewriting or shortening it."""
+    if not voice.enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="Speech is not configured on this deployment (no Google API key).",
+        )
+
+    spoken = voice.speakable(req.text)
+    if not spoken:
+        raise HTTPException(status_code=400, detail="There is no text to speak.")
+
+    voice_name = req.voice_name if req.voice_name in {
+        item["id"] for item in voice.VOICES
+    } else "Kore"
+    pcm_parts: list[bytes] = []
+    sample_rate: int | None = None
+    for chunk in _speech_chunks(spoken):
+        try:
+            wav_bytes, _chunk_rate = await voice.speak(chunk, voice=voice_name)
+        except voice.VoiceError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        try:
+            with wave.open(io.BytesIO(wav_bytes), "rb") as audio:
+                if audio.getnchannels() != 1 or audio.getsampwidth() != 2:
+                    raise ValueError("Unexpected speech audio format")
+                if sample_rate is not None and sample_rate != audio.getframerate():
+                    raise ValueError("Speech chunks used different sample rates")
+                sample_rate = audio.getframerate()
+                pcm_parts.append(audio.readframes(audio.getnframes()))
+        except (wave.Error, ValueError) as exc:
+            raise HTTPException(
+                status_code=502, detail="The speech model returned invalid audio."
+            ) from exc
+
+    if not sample_rate or not pcm_parts:
+        raise HTTPException(status_code=502, detail="The speech model returned no audio.")
+
+    audio_wav = voice.to_wav(b"".join(pcm_parts), rate=sample_rate)
+    log.info(
+        "answer_synthesized",
+        owner=bool(user.owner_id),
+        chars=len(spoken),
+        chunks=len(pcm_parts),
+        voice=voice_name,
+    )
+    return {
+        "audio": base64.b64encode(audio_wav).decode(),
+        "mime": "audio/wav",
+        "sample_rate": sample_rate,
+        "voice": voice_name,
     }
 
 
