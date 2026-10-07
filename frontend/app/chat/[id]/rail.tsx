@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type CSSProperties } from "react";
+import { useEffect, useState } from "react";
 import type { Chunk, Document, SessionDetail } from "@/lib/api";
 import {
   Checkbox,
@@ -348,9 +348,6 @@ function Controls({
     0,
     EFFORT_OPTIONS.findIndex((option) => option.value === settings.effort),
   );
-  const effortSliderStyle = {
-    "--effort-position": `${effortIndex * 50}%`,
-  } as CSSProperties;
 
   return (
     <div className="space-y-7 p-5">
@@ -466,61 +463,19 @@ function Controls({
                 High branches findings into parallel searches; it can take longer and use more API calls
               </span>
             </span>
-            <div className="effort-slider-card mt-3">
-              <div className="flex items-center justify-between">
-                <span className="effort-slider-current">
-                  {EFFORT_OPTIONS[effortIndex].label}
-                </span>
-                <span className="effort-slider-caption">Reasoning depth</span>
-              </div>
-              <div
-                className="effort-slider-control mt-2"
-                style={effortSliderStyle}
-              >
-                <div className="effort-slider-track" aria-hidden="true">
-                  <span className="effort-slider-fill" />
-                  {EFFORT_OPTIONS.map((option, index) => (
-                    <span
-                      key={option.value}
-                      className={`effort-slider-stop${index <= effortIndex ? " is-active" : ""}`}
-                      style={{ left: `${index * 50}%` }}
-                    />
-                  ))}
-                </div>
-                <span className="effort-slider-thumb" aria-hidden="true" />
-                <input
-                  className="effort-slider-input"
-                  type="range"
-                  min={0}
-                  max={2}
-                  step={1}
-                  value={effortIndex}
-                  onChange={(event) => {
-                    const option = EFFORT_OPTIONS[Number(event.target.value)];
-                    if (option) onSettings({ ...settings, effort: option.value });
-                  }}
-                  aria-label="Research effort"
-                  aria-valuetext={`${settings.effort} research effort`}
-                />
-              </div>
-              <div className="effort-slider-labels mt-1">
-                {EFFORT_OPTIONS.map((option, index) => (
-                  <span
-                    key={option.value}
-                    className={index === effortIndex ? "is-active" : ""}
-                  >
-                    <button
-                      type="button"
-                      aria-pressed={index === effortIndex}
-                      onClick={() =>
-                        onSettings({ ...settings, effort: option.value })
-                      }
-                    >
-                      {option.label}
-                    </button>
-                  </span>
-                ))}
-              </div>
+            <div className="effort-segmented mt-3">
+              {EFFORT_OPTIONS.map((option, index) => (
+                <Ripplable
+                  key={option.value}
+                  as="button"
+                  type="button"
+                  data-active={index === effortIndex ? "true" : undefined}
+                  aria-pressed={index === effortIndex}
+                  onClick={() => onSettings({ ...settings, effort: option.value })}
+                >
+                  {option.label}
+                </Ripplable>
+              ))}
             </div>
           </div>
 

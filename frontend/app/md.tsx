@@ -531,8 +531,15 @@ export const TextArea = forwardRef<HTMLTextAreaElement, TextAreaProps>(
     // Also on `value`, not just on input: the composer clears the field
     // programmatically after sending, and without this the box would stay
     // several lines tall around an empty textarea.
+    //
+    // Deferred via rAF: when value clears and `disabled` is set in the same
+    // render (e.g. on submit), some browsers return a stale scrollHeight for
+    // disabled elements before the layout engine has re-flowed. Waiting one
+    // frame ensures the new empty value is reflected in the layout before we
+    // measure.
     useEffect(() => {
-      resize(inner.current);
+      const frame = requestAnimationFrame(() => resize(inner.current));
+      return () => cancelAnimationFrame(frame);
     }, [resize, rest.value]);
 
     return (
