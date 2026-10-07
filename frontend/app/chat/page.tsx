@@ -8,7 +8,6 @@ import { Button, Checkbox, ConfirmButton, Ripplable } from "../md";
 import {
   IconChat,
   IconClose,
-  IconLibrary,
   IconPlus,
   IconSearch,
   IconSpinner,
@@ -142,31 +141,18 @@ export default function ChatIndex() {
     );
   }
 
-  // Empty states chain: no documents → library; documents but no sessions → chat.
-  if (!readyDocuments.length) {
-    return (
-      <Empty
-        icon={<IconLibrary className="h-8 w-8" />}
-        title="Add a document to begin"
-        body="Research Desk answers questions from documents you provide, with citations you can open and verify. Nothing is indexed yet."
-        action={
-          <Button onClick={() => router.push("/library")}>
-            <IconPlus />
-            Go to Library
-          </Button>
-        }
-      />
-    );
-  }
-
   if (!sessions.length) {
     return (
       <Empty
         icon={<IconChat className="h-8 w-8" />}
         title="Start your first conversation"
-        body={`${readyDocuments.length} document${
-          readyDocuments.length === 1 ? "" : "s"
-        } indexed and ready. Follow-up questions resolve against the conversation, so you can ask "and the prior year?" and it will understand.`}
+        body={
+          readyDocuments.length
+            ? `${readyDocuments.length} document${
+                readyDocuments.length === 1 ? "" : "s"
+              } indexed and ready. Ask general questions or ask about your files; follow-up questions carry the conversation context.`
+            : "Ask general questions, get explanations, or add documents whenever you want answers grounded in your own files."
+        }
         action={
           <Button onClick={() => void start()} disabled={creating}>
             {creating ? <IconSpinner /> : <IconPlus />}

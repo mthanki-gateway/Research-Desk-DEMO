@@ -1,7 +1,7 @@
 "use client";
 
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import {
   type Activity,
   type ChatMessage,
@@ -131,6 +131,7 @@ function Conversation({ id }: { id: string }) {
    * how a chat should feel.
    */
   const composer = useRef<HTMLTextAreaElement | null>(null);
+  const focusedInitialComposer = useRef(false);
   /**
    * Whether a turn was running on the previous render.
    *
@@ -204,6 +205,18 @@ function Conversation({ id }: { id: string }) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Make a newly opened conversation ready for typing as soon as its session
+  // is available. Do this once per page mount; background session refreshes
+  // must not steal focus from someone reading or using another control.
+  useEffect(() => {
+    if (!session || focusedInitialComposer.current || pendingClarify) return;
+    const frame = requestAnimationFrame(() => {
+      composer.current?.focus({ preventScroll: true });
+      focusedInitialComposer.current = true;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [session, pendingClarify]);
 
   /**
    * Keep the newest turn in view.
@@ -406,6 +419,9 @@ function Conversation({ id }: { id: string }) {
   // header renders immediately rather than as a placeholder.
   const title =
     session?.title ?? sessions.find((s) => s.id === id)?.title ?? "Loading";
+  const isNewChat = Boolean(
+    session && session.messages.length === 0 && !pendingQuestion,
+  );
 
   return (
     // The rail's width is reserved by <main>'s right MARGIN in shell.tsx, not
@@ -413,14 +429,18 @@ function Conversation({ id }: { id: string }) {
     // window edge and its scrollbar went with it -- which is the whole reason
     // the chat scrollbar looked like a browser scrollbar.
     <div>
-      <div className="mx-auto flex min-h-[calc(100vh-2rem)] max-w-3xl flex-col px-6 py-6">
+      <div className="mx-auto flex min-h-[calc(100dvh-4rem)] max-w-3xl flex-col px-6 pt-6 md:min-h-[100dvh]">
         {/* Top app bar, small. Sticky only works because html/body use
             `overflow-x: clip` rather than `hidden` -- `hidden` makes body a
             scroll container, which silently disables sticky in descendants.
             The negative margin plus padding lets the opaque background bleed
             to the column edges so text scrolling underneath is covered. */}
         <header
-          className="sticky top-0 z-20 mb-5 -mx-6 flex h-16 items-center gap-3 px-6"
+          className={
+            isNewChat
+              ? "hidden"
+              : "sticky top-0 z-20 -mx-6 mb-5 flex h-16 items-center gap-3 px-6"
+          }
           style={{
             background: "var(--md-surface-container-low)",
             boxShadow: "0 1px 0 0 var(--md-outline-variant)",
@@ -449,16 +469,57 @@ function Conversation({ id }: { id: string }) {
           </Button>
         </header>
 
-        <ol className="flex-1 space-y-6">
-          {session?.messages.map((m) => (
-            <Turn
-              key={m.id}
-              sessionId={id}
-              message={m}
-              activeChunkId={openChunk?.id ?? null}
-              onCite={showChunk}
-            />
-          ))}
+        {isNewChat && <div className="flex-1" aria-hidden="true" />}
+
+        {isNewChat && (
+          <div className="mb-2 text-center">
+            <h1 className="md-headline-small">What can I help you with?</h1>
+            <p
+              className="md-body-medium mt-2"
+              style={{ color: "var(--md-on-surface-variant)" }}
+            >
+              Ask anything, or add documents when you want answers grounded in your files.
+            </p>
+          </div>
+        )}
+
+        <ol className={`${isNewChat ? "hidden" : "flex-1 space-y-6"}`}>
+          {session?.messages.map((m, index) => {
+            const day = localDayKey(m.created_at);
+            const previousDay = index > 0
+              ? localDayKey(session.messages[index - 1].created_at)
+              : null;
+            const dateHeading = day && day !== previousDay
+              ? formatDateHeading(m.created_at)
+              : null;
+
+            return (
+              <Fragment key={m.id}>
+                {dateHeading && (
+                  <li
+                    className="md-body-small flex items-center gap-3 py-1"
+                    style={{ color: "var(--md-on-surface-variant)" }}
+                  >
+                    <span
+                      className="h-px flex-1"
+                      style={{ background: "var(--md-outline-variant)" }}
+                    />
+                    <time dateTime={m.created_at}>{dateHeading}</time>
+                    <span
+                      className="h-px flex-1"
+                      style={{ background: "var(--md-outline-variant)" }}
+                    />
+                  </li>
+                )}
+                <Turn
+                  sessionId={id}
+                  message={m}
+                  activeChunkId={openChunk?.id ?? null}
+                  onCite={showChunk}
+                />
+              </Fragment>
+            );
+          })}
 
           {session && session.messages.length === 0 && !pendingQuestion && (
             <li
@@ -567,11 +628,19 @@ function Conversation({ id }: { id: string }) {
 
         <form
           onSubmit={send}
-          className="sticky bottom-0 -mx-6 mt-6 px-6 pb-5 pt-3"
-          style={{
-            background:
-              "linear-gradient(to top, var(--md-surface-container-low) 65%, transparent)",
-          }}
+          className={
+            isNewChat
+              ? "mx-auto mt-6 w-full max-w-2xl pb-3 pt-3"
+              : "sticky bottom-0 -mx-6 mt-6 px-6 pb-3 pt-3"
+          }
+          style={
+            isNewChat
+              ? undefined
+              : {
+                  background:
+                    "linear-gradient(to top, var(--md-surface-container-low) 65%, transparent)",
+                }
+          }
         >
           <div className="flex items-end gap-3">
             <TextArea
@@ -604,7 +673,7 @@ function Conversation({ id }: { id: string }) {
               // floating label's background, so the notch matches whatever
               // the field is filled with.
               surface="var(--md-surface)"
-              className="flex-1"
+              className="flex-1 chat-composer"
               // Pill composer. `shape` moves the floating label's inset in
               // step with the radius; see TextField.
               shape="var(--md-shape-xl)"
@@ -618,12 +687,13 @@ function Conversation({ id }: { id: string }) {
               autoCorrect="off"
             />
             <Fab
+              className="md-fab-composer"
               type="submit"
               disabled={busy || !session || !question.trim() || Boolean(pendingClarify)}
               aria-label="Send"
             >
               {busy ? (
-                <IconSpinner className="h-6 w-6" />
+                <IconSpinner className="h-5 w-5" />
               ) : (
                 <svg
                   viewBox="0 0 24 24"
@@ -632,7 +702,7 @@ function Conversation({ id }: { id: string }) {
                   strokeWidth={1.8}
                   strokeLinecap="round"
                   strokeLinejoin="round"
-                  className="h-6 w-6"
+                  className="h-5 w-5"
                   aria-hidden="true"
                 >
                   <path d="M4 12h15M13 6l6 6-6 6" />
@@ -675,6 +745,7 @@ function Conversation({ id }: { id: string }) {
             )}
           </p>
         </form>
+        {isNewChat && <div className="flex-1" aria-hidden="true" />}
       </div>
 
       {session && (
@@ -699,6 +770,29 @@ function Conversation({ id }: { id: string }) {
   );
 }
 
+function localDayKey(value: string): string | null {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toDateString();
+}
+
+function formatDateHeading(value: string): string | null {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+
+  const today = new Date();
+  if (date.toDateString() === today.toDateString()) return "Today";
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  if (date.toDateString() === yesterday.toDateString()) return "Yesterday";
+
+  return date.toLocaleDateString(undefined, {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
 function Turn({
   sessionId,
   message,
@@ -710,6 +804,16 @@ function Turn({
   activeChunkId: string | null;
   onCite: (chunkId: string) => Promise<void>;
 }) {
+  const timestamp = new Date(message.created_at);
+  const formattedTimestamp = Number.isNaN(timestamp.getTime())
+    ? null
+    : timestamp.toLocaleTimeString("en-US", {
+        hour: "numeric",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: true,
+      });
+
   // User turns are M3-style sent bubbles: primary container, right-aligned.
   if (message.role === "user") {
     return (
@@ -723,6 +827,15 @@ function Turn({
         >
           {message.content}
         </p>
+        {formattedTimestamp && (
+          <time
+            dateTime={message.created_at}
+            className="md-body-small px-1"
+            style={{ color: "var(--md-on-surface-variant)" }}
+          >
+            {formattedTimestamp}
+          </time>
+        )}
         <QueryRayButton messageId={message.id} />
       </li>
     );
@@ -799,6 +912,9 @@ function Turn({
         className="md-body-small flex flex-wrap items-center gap-x-3 gap-y-1 px-1"
         style={{ color: "var(--md-on-surface-variant)" }}
       >
+        {formattedTimestamp && (
+          <time dateTime={message.created_at}>{formattedTimestamp}</time>
+        )}
         {meta.iterations != null && (
           <span className="tabular-nums">
             {meta.iterations} iteration{meta.iterations === 1 ? "" : "s"}

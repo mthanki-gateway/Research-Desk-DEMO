@@ -621,7 +621,7 @@ textarea:focus-visible {
   .md-prose strong { font-weight: 600; }
   .md-prose h3 {
     font-weight: 600;
-    font-size: 1rem;
+    font-size: 0.875rem;
     letter-spacing: 0.00625em;
   }
 
@@ -653,9 +653,9 @@ textarea:focus-visible {
     transition:
       border-color var(--md-dur-short) var(--md-ease-standard),
       box-shadow var(--md-dur-short) var(--md-ease-standard);
-    font-size: 1rem;
-    line-height: 1.5rem;
-    letter-spacing: 0.03125em;
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    letter-spacing: 0.01786em;
   }
   /* The multiline variant, for the chat composer.
      `height` is driven by JS (scrollHeight) rather than `rows`, so it starts
@@ -714,6 +714,25 @@ textarea:focus-visible {
   textarea.md-field-input:hover,
   textarea.md-field-input:focus {
     scrollbar-color: var(--md-outline-variant) transparent;
+  }
+
+  /* The chat composer uses the compact body size, with a matching field
+     height and send control. Other textareas keep the standard field size. */
+  .chat-composer .md-field-label {
+    top: 0.875rem;
+    font-size: 0.875rem;
+    line-height: 1.25rem;
+    letter-spacing: 0.01786em;
+  }
+  .chat-composer textarea.md-field-input {
+    min-height: 48px;
+    padding-top: 0.75rem;
+    padding-bottom: 0.75rem;
+  }
+  .md-fab-composer {
+    width: 48px;
+    height: 48px;
+    border-radius: var(--md-shape-md);
   }
 
   /* WebKit fallback: Chrome below 121 and Safari ignore the standard

@@ -2,6 +2,7 @@
 import json
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
@@ -584,6 +585,7 @@ async def _prepare_turn(
     session_id: uuid.UUID, req: TurnRequest, user: User
 ) -> dict:
     """Resolve scope and build the history context, before any LLM work."""
+    started_at = datetime.now(UTC)
     async with SessionLocal() as db:
         chat = await _load(db, session_id, user)
         messages = list(chat.messages)
@@ -629,6 +631,7 @@ async def _prepare_turn(
             "scope": scope,
             "was_empty": not messages,
             "thread_id": thread_id,
+            "started_at": started_at,
             # Rendered here rather than in a node so both the blocking and the
             # streaming path get it from one place -- they have diverged before.
             "preferences": preferences.render_for_prompt(prefs),
@@ -667,6 +670,7 @@ async def _prepare_resume(
         "scope": None,
         "was_empty": not messages,
         "thread_id": req.thread_id,
+        "started_at": datetime.now(UTC),
     }
 
 
@@ -774,12 +778,24 @@ async def _persist_turn(
     async with SessionLocal() as db:
         chat = await _load(db, session_id, user)
 
-        db.add(Message(session_id=session_id, role=Role.user, content=question))
+        answer_at = datetime.now(UTC)
+        question_at = prep.get("started_at") or answer_at
+        if answer_at <= question_at:
+            answer_at = question_at + timedelta(microseconds=1)
+        db.add(
+            Message(
+                session_id=session_id,
+                role=Role.user,
+                content=question,
+                created_at=question_at,
+            )
+        )
         db.add(
             Message(
                 session_id=session_id,
                 role=Role.assistant,
                 content=result.answer,
+                created_at=answer_at,
                 # Citation targets only -- never the chunk text. Storing that
                 # would re-send retrieved context on every later turn, which is
                 # the fastest way to blow the token budget.

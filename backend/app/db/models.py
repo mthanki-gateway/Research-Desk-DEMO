@@ -10,6 +10,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    case,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -192,7 +193,13 @@ class ChatSession(Base):
     messages: Mapped[list["Message"]] = relationship(
         back_populates="session",
         cascade="all, delete-orphan",
-        order_by="Message.created_at",
+        # PostgreSQL `now()` is fixed for the whole transaction, so the user
+        # question and its assistant answer can have identical timestamps.
+        # Break ties by role to keep each transcript turn question-first.
+        order_by=lambda: (
+            Message.created_at,
+            case((Message.role == Role.user, 0), else_=1),
+        ),
     )
 
 

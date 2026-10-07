@@ -12,6 +12,7 @@ import {
   type InputHTMLAttributes,
   type TextareaHTMLAttributes,
 } from "react";
+import { createPortal } from "react-dom";
 
 /* ===========================================================================
    Material 3 primitives.
@@ -606,11 +607,22 @@ export function Dialog({
    */
   contentClassName?: string;
 }) {
+  const [portalRoot, setPortalRoot] = useState<HTMLElement | null>(null);
+
+  useEffect(() => {
+    setPortalRoot(document.body);
+  }, []);
+
   if (!open) return null;
-  return (
+  if (!portalRoot) return null;
+
+  return createPortal(
     <div
       className="fixed inset-0 z-50 grid place-items-center p-4"
-      onClick={onClose}
+      onClick={(event) => {
+        event.stopPropagation();
+        onClose();
+      }}
     >
       <div className="md-scrim" />
       <div
@@ -632,7 +644,8 @@ export function Dialog({
         )}
         <div className={contentClassName}>{children}</div>
       </div>
-    </div>
+    </div>,
+    portalRoot,
   );
 }
 

@@ -40,7 +40,7 @@ export function Answer({ content, sources, activeChunkId, onCite }: Props) {
   const byNumber = new Map(sources.map((s) => [s.n, s]));
 
   return (
-    <div className="md-body-large md-prose">
+    <div className="md-body-medium md-prose">
       {blocks(content).map((block, i) => (
         <Block
           key={i}

@@ -50,6 +50,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
@@ -626,6 +627,8 @@ async def save_turn(
     sources: list[dict],
     tools: list[str],
     clip: bytes | None = None,
+    question_at: datetime | None = None,
+    answer_at: datetime | None = None,
 ) -> None:
     """Append one spoken exchange. Never raises.
 
@@ -646,6 +649,10 @@ async def save_turn(
 
     try:
         async with SessionLocal() as db:
+            question_at = question_at or datetime.now(UTC)
+            answer_at = answer_at or datetime.now(UTC)
+            if answer_at <= question_at:
+                answer_at = question_at + timedelta(microseconds=1)
             meta: dict = {"spoken": True}
             if clip:
                 key = await _store_clip(db, session_id, clip)
@@ -658,6 +665,7 @@ async def save_turn(
                     content=question or "(nothing intelligible)",
                     sources=[],
                     agent_meta=meta,
+                    created_at=question_at,
                 )
             )
             db.add(
@@ -667,6 +675,7 @@ async def save_turn(
                     content=answer,
                     sources=sources,
                     agent_meta={"spoken": True, "tools": tools},
+                    created_at=answer_at,
                 )
             )
 

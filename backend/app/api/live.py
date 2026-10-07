@@ -49,6 +49,7 @@ import asyncio
 import contextlib
 import json
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -738,6 +739,8 @@ async def _downlink(
     # than a row per transcript fragment.
     heard: list[str] = []
     said: list[str] = []
+    heard_at: datetime | None = None
+    said_at: datetime | None = None
     sources: list[dict] = []
     tools: list[str] = []
     # What the model RECORDED this turn, as it passed it. The accurate record
@@ -758,6 +761,7 @@ async def _downlink(
             sc = message.server_content
             if sc:
                 if sc.input_transcription and sc.input_transcription.text:
+                    heard_at = heard_at or datetime.now(UTC)
                     heard.append(sc.input_transcription.text)
                     await ws.send_text(
                         json.dumps(
@@ -765,6 +769,7 @@ async def _downlink(
                         )
                     )
                 if sc.output_transcription and sc.output_transcription.text:
+                    said_at = said_at or datetime.now(UTC)
                     said.append(sc.output_transcription.text)
                     await ws.send_text(
                         json.dumps(
@@ -796,6 +801,8 @@ async def _downlink(
                             sources,
                             tools,
                             clip=turn_state.get("clip"),
+                            question_at=heard_at,
+                            answer_at=said_at,
                         )
                     )
                     # THE COMPLETED EXCHANGE, AS ONE EVENT.
@@ -826,6 +833,7 @@ async def _downlink(
                         )
                     )
                     heard, said, sources, tools, recorded = [], [], [], [], []
+                    heard_at, said_at = None, None
                     await ws.send_text(json.dumps({"type": "turn_end"}))
 
             # THE HANDLE THAT MAKES A RECONNECT INVISIBLE.
