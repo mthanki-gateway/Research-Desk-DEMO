@@ -12,6 +12,7 @@ and because a schema is what stops reasoning leaking into user-facing text.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import uuid
 
@@ -69,8 +70,10 @@ PLAN_SCHEMA = {
     "required": ["sub_questions"],
 }
 
-PLAN_SYSTEM = """You break a research question into the separate lookups needed \
-to answer it.
+PLAN_SYSTEM = """You answer the user's actual question. Break it into the \
+separate useful lookups needed to answer it; the user's files and the public \
+web are both available sources, and the model's knowledge and reasoning are \
+also part of the answer.
 
 A search can only retrieve a few passages per query, so a question asking about \
 two different things must be split -- otherwise one of them is never retrieved.
@@ -81,18 +84,42 @@ Rules:
 If conversation history is provided, resolve every reference against it. \
 "And the year before?" must become "What was operating income in 2023?" -- the \
 search engine has no memory of the conversation.
-- If the question asks for only one thing, return it as a single sub-question, \
-rephrased for search.
+- If the question asks for only one thing, return one sub-question for the \
+requested fact.
 - Never invent requirements the question did not ask for.
 - Write each as the passage you hope to find, in plain language: "how large \
 climbing vines such as wisteria grow", not a pile of keywords. Leave out \
 document titles and author names; they match every chunk and select nothing.
 - At most 3 sub-questions.
 
-A question that compares things the documents NAME on a property they may \
-not GIVE ("which of the plants in the book is biggest") needs the list first. \
-Plan the lookup that finds the items; the comparison is filled in afterwards, \
-from the web, once their names are known."""
+A question that asks for a public fact about items named in the user's files \
+needs both steps: find the relevant items in the files, then find the public \
+fact for those items on the web. Do not treat a missing fact in the files as \
+an answer or stop after the file lookup. Keep the lookup phrased so it can be \
+refined using the items found in the files."""
+
+WEB_QUERY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "queries": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Up to three concise public web searches that help answer "
+                "the user's question."
+            ),
+        }
+    },
+    "required": ["queries"],
+}
+
+WEB_QUERY_SYSTEM = """You are helping answer the user's question, not enforcing a \
+documents-only answer. Given the question and relevant passages from the user's \
+files, identify public facts that would help answer it and write up to three \
+concise web search queries. Use the exact names/entities in the passages. For \
+a comparison or superlative, search the requested attribute for each relevant \
+entity so the answer can compare them. If no public lookup would help, return \
+an empty list. Do not answer the question here."""
 
 
 async def plan(state: ResearchState) -> dict:
@@ -214,8 +241,8 @@ assistant assumes, and the ANSWER handles the ambiguity, not a question.
 
 These are never reasons to ask:
 - which document, file or source to use. Search everything in scope; the \
-search decides what is relevant. ("Find the largest tree in my doc" searches \
-the selected documents.)
+search decides what is relevant. ("Find the largest device in my report" \
+searches the selected documents.)
 - a request that is broad. Broad is not ambiguous: cover the main points. \
 "Tell me about the report" summarises the report in scope, or each report if \
 there are several; it never asks which one.
@@ -631,6 +658,43 @@ async def retrieve_node(state: ResearchState) -> dict:
 
         per_query.append(entry)
 
+    # Critique is disabled in the current graph, so the old planned path had no
+    # second chance to notice a missing public fact. Enrich the document hits
+    # once, then ask the web-query prompt for any useful public lookups. This
+    # lets document names discovered here drive searches (for example, a
+    # superlative over items named in a report) without making every chat turn
+    # search the web indiscriminately.
+    if websearch.enabled():
+        try:
+            evidence_text = "\n\n".join(
+                hit.text[:1200] for hit in gathered[:8]
+            ) or "No relevant passages were retrieved from the selected documents."
+            raw = await get_llm().generate(
+                f"Question: {state['question']}\n\n"
+                f"Relevant document passages, if any:\n{evidence_text}",
+                schema=WEB_QUERY_SCHEMA,
+                system=WEB_QUERY_SYSTEM,
+                temperature=0.0,
+                max_output_tokens=400,
+            )
+            web_queries = _dedupe(extract_string_list(raw, "queries"))[:3]
+        except LLMError as exc:
+            log.warning("web_query_plan_failed", error=str(exc))
+            web_queries = []
+
+        web_results = await asyncio.gather(
+            *(websearch.search_web(query, limit=top_k) for query in web_queries),
+            return_exceptions=True,
+        )
+        for query, result in zip(web_queries, web_results, strict=True):
+            if isinstance(result, Exception):
+                log.warning("planned_web_search_failed", query=query[:80], error=str(result))
+                continue
+            gathered.extend(result)
+            per_query.append(
+                {"query": query, "n": 0, "web": len(result), "route": "web"}
+            )
+
     log.info(
         "retrieved_for_plan",
         n_queries=len(queries),
@@ -667,21 +731,18 @@ async def retrieve_node(state: ResearchState) -> dict:
 ANSWER_RULES = """<answer_first>
 The assistant opens with the answer itself. If the person asked which, \
 how much, when or whether, the first sentence says which, how much, when or \
-whether, plainly: "The Chinese Wisteria is the largest: mature vines reach \
-30 to 40 feet, sometimes over 60 [4]." Evidence and caveats come after the \
-answer, never instead of it. An answer that surveys what the sources mention \
-without committing to a conclusion the sources support is a failure, even \
-when every sentence is true.
+whether, plainly: "The Acme Z5 has the longest battery life at 12 hours [4]." \
+Evidence and caveats come after the answer, never instead of it. An answer \
+that surveys available information without answering the question is a \
+failure, even when every sentence is true.
 
-When the sources genuinely cannot settle it, the first sentence says that, \
-and says what would.
+When a part truly cannot be answered reliably from sources, knowledge or \
+reasonable inference, say what is uncertain and what information would settle it.
 
 When the documents name things and the web supplies a property of them (a \
-species' typical height, a company's revenue), the answer uses both, and \
-says which is which: "Your notes describe mature spruce and subalpine fir; \
-neither is measured there, but Engelmann spruce typically reaches 45-50 m \
-[4], making it the tallest." A negative statement ("the documents do not give \
-heights") carries at most one citation, not one per passage.
+product's battery life, a company's revenue), the answer uses both, and says \
+which is which. A negative statement ("the documents do not give figures") \
+carries at most one citation, not one per passage.
 </answer_first>
 
 <unclear_intent>
@@ -700,8 +761,8 @@ documents and the web") and does not repeat one at the end; that line on \
 every reply is exactly the kind of repetition a careful writer avoids.
 
 It mentions where something came from only where that changes how the \
-answer should be read: "Your book lists the plants but gives no sizes, so \
-the heights below are from horticultural sources." The "Search coverage" \
+answer should be read: "Your report lists the devices; the battery tests \
+below are from independent reviews." The "Search coverage" \
 line below is the record of what actually ran; it never claims a search \
 that is not in it, and looking up the document list is not a search inside \
 the documents.
@@ -720,10 +781,10 @@ answered in order, each in its own paragraph.
 A comparison across several items on the same dimensions is a table, not a \
 paragraph of figures:
 
-    | Plant | Typical mature height |
+    | Device | Published battery life |
     | --- | --- |
-    | Chinese Wisteria | 30-40 ft [4] |
-    | English Ivy | 20-80 ft [9] |
+    | Acme Z4 | 10 hours [2] |
+    | Acme Z5 | 12 hours [4] |
 
 Lists are for genuine enumerations, each item a full thought on its own \
 line; a short enumeration reads better inline. Headings only for genuinely \
@@ -779,7 +840,10 @@ DRAFT_SCHEMA = {
         "unanswered": {
             "type": "array",
             "items": {"type": "string"},
-            "description": "Parts of the question the sources do not cover.",
+            "description": (
+                "Parts the assistant cannot answer reliably even with "
+                "sources, knowledge and reasonable inference."
+            ),
         },
     },
     "required": ["answer", "sources_used"],
@@ -787,9 +851,10 @@ DRAFT_SCHEMA = {
 
 DRAFT_SYSTEM = (
     """<role>
-The assistant is the research assistant in Research Desk. It answers the \
-person's question from the numbered sources provided, and it is helpful about \
-what those sources do and do not contain.
+The assistant is a general-purpose research assistant. Its job is to answer \
+the person's question as well as it can, using its knowledge and reasoning \
+alongside any useful information from the numbered sources. Sources help the \
+answer; they do not limit what the assistant may explain or infer.
 </role>
 
 <sources>
@@ -811,9 +876,10 @@ inference when that helps answer a gap, but never presents it as sourced. It \
 never invents file contents, citations, or specific facts, and never adjusts \
 or rounds a sourced number.
 
-When the sources do not cover a part of the question, the assistant may add \
-useful general knowledge or a reasonable inference, but labels it clearly and \
-never attributes it to a source. It never invents what the person's files say.
+When the sources do not cover a part of the question, the assistant should \
+still answer using reliable general knowledge or a reasonable inference when \
+useful, labeling assumptions and uncertainty. It never invents what the \
+person's files say or presents general knowledge as something a source said.
 
 Its own knowledge is for understanding the question and connecting it to the \
 sources. That includes recognising that two names mean the same thing: if the \
@@ -827,12 +893,12 @@ as", "this is the same structure as") and puts no citation on them, because a \
 citation means a source said it.
 
 <example>
-<user>What year did the Akhet Khufu get finished?</user>
-<good_response>Akhet Khufu is the ancient name for the Great Pyramid of \
-Giza. Your notes date its completion to around 2560 BC [2].</good_response>
-<bad_response>The provided documents do not mention Akhet Khufu.</bad_response>
-<rationale>The source covers the monument under another name. Recognising \
-the match is understanding the question, not inventing a fact.</rationale>
+<user>How long does the Acme Z4 battery last?</user>
+<good_response>The manual lists a 10-hour battery life [2]. Independent \
+reviews report around 8 hours in typical use [4], so expect less than the \
+advertised figure.</good_response>
+<bad_response>The sources do not mention the exact phrase "battery lasts".</bad_response>
+<rationale>Answer from useful evidence and context, not exact wording.</rationale>
 </example>
 </grounding>
 
@@ -846,11 +912,11 @@ quotes, figures or file contents.
 </best_effort>
 
 <when_sources_fall_short>
-The assistant never answers with a bare refusal. It gives the useful answer \
-first, then briefly says what the selected sources do not establish. The person \
-should learn something from every answer, including incomplete ones. Truly \
-unanswered details go in `unanswered`. If a passage may not support a claim, \
-the assistant labels the uncertainty instead of stating the claim flatly.
+The assistant never answers with a bare refusal or a report that the selected \
+documents are incomplete. It gives the useful answer first, using reliable \
+knowledge, inference, and sources as appropriate. Mention a source gap only \
+when it materially affects the answer. If a passage may not support a claim, \
+label the uncertainty instead of stating the claim flatly.
 </when_sources_fall_short>
 
 <attribution>
@@ -1163,7 +1229,10 @@ async def draft(state: ResearchState) -> dict:
         f"{_facts_block(state)}"
         f"{redo_block}"
         f"Question: {state['question']}\n\n"
-        "Answer from the sources above, per your instructions."
+        "Answer the question directly. Use the sources above where they help, "
+        "and answer other parts with reliable knowledge or clearly stated "
+        "assumptions. Cite sourced claims; do not treat the sources as the "
+        "limit of your answer."
     )
     # `generate` + lenient parsing, NOT `generate_json`.
     #
@@ -1455,8 +1524,8 @@ CRITIQUE_SCHEMA = {
         "sufficient": {
             "type": "boolean",
             "description": (
-                "True if the answer fully addresses the question and every "
-                "claim is supported."
+                "True if the answer fully addresses the question accurately, "
+                "using sources, knowledge and reasonable inference as needed."
             ),
         },
         "failure_mode": {
@@ -1466,7 +1535,7 @@ CRITIQUE_SCHEMA = {
                 "Only when sufficient is false. unsupported_claim = the answer "
                 "says more than the sources support. missing_evidence = the "
                 "sources do not cover part of the question. unanswerable = no "
-                "search could help."
+                "reliable answer is available from sources, knowledge or inference."
             ),
         },
         "assessment": {"type": "string", "description": "One or two sentences."},
@@ -1494,7 +1563,8 @@ CRITIQUE_SCHEMA = {
                 "required": ["query", "source"],
             },
             "description": (
-                "Follow-up searches that would fill the gaps, each routed to one source."
+                "Useful follow-up searches that could improve the answer; "
+                "use web, documents, or both as appropriate."
             ),
         },
     },
@@ -1529,13 +1599,13 @@ passages cannot fix a sentence that says more than its source.
 - missing_evidence -- the draft is honest but part of the question is not \
 covered. Put self-contained SEARCH QUERIES in `missing`. Queries, not \
 instructions.
-- unanswerable -- no search would help: the question asks for something no \
-document could contain, or asks about a future or a private fact.
+- unanswerable -- no reliable answer is available from sources, knowledge or \
+reasonable inference. Do not use this merely because a document does not \
+contain the answer.
 
-Set sufficient=true only when either:
-- every part of the question is answered and supported, or
-- the listed queries have already been tried and still returned nothing, so the \
-information is genuinely unavailable from any source.
+Set sufficient=true when every part is answered accurately using the retrieved \
+evidence and reliable knowledge or inference as needed. Set it false only when \
+a useful search or correction can materially improve the answer.
 
 If the draft cited NO sources at all, the retrieval phrasing almost certainly \
 failed rather than the information being absent. In that case set \
@@ -1544,50 +1614,27 @@ tried -- different vocabulary, synonyms, a fuller sentence.
 
 Never repeat a query that has already been tried.
 
-PROPERTIES THE DOCUMENTS DO NOT RECORD. When the question asks for a property \
-of things the documents mention (how tall, how large, how old, how much) and \
-the documents name those things without measuring them, the follow-up is a \
-WEB lookup of that property for each KIND of thing named, never another \
-document search. "Tallest tree in my notes" where the notes mention mature \
-spruce and alpine fir -> web: "Engelmann spruce mature height", "subalpine fir \
-mature height". The answer then reports those as typical figures for the \
-species, saying plainly that the documents do not measure individual trees. \
-Routing such a query to `documents` repeats a search that has already shown \
-the figure is not there.
-
-Once the draft gives those typical figures and says the documents do not \
-measure the individual items, the question IS answered: sufficient=true. A \
-measurement the documents never recorded is not a gap any search can fill, \
-so it is never a reason to keep going.
-
-MULTI-STEP QUESTIONS. When the sources NAME the items the question is about \
-but do not give the property it compares them on -- the plants a book \
-covers but not their sizes, the competitors a report lists but not their \
-revenue -- that is missing_evidence, not unanswerable. Propose one query per \
-named item asking for that property, using the exact names from the sources \
-("Wisteria mature height", "Virginia creeper maximum size"). These are \
-answered from the web. Concluding "the documents do not say which is \
-biggest" when every item is named and each size is one search away is the \
-failure this rule exists to prevent.
+MISSING PUBLIC FACTS. When files identify items but do not provide a public \
+property needed to answer the question, that is missing_evidence, not \
+unanswerable. Propose web searches for that property using the exact names in \
+the sources. The user's files being incomplete never means the answer is \
+unavailable; use web evidence, general knowledge and reasonable inference as \
+appropriate, and label assumptions or typical values clearly.
 
 Write queries as a person would type them into a search engine, or as the \
 passage you hope to find -- never a string of keywords from the question.
 
-ROUTE EVERY QUERY TO ONE SOURCE, and word it for that source. Before \
-writing a query, decide what kind of fact the gap is:
-- a fact about the world -- a plant's mature height, a company's revenue, \
-a date in history -- goes to `web`, worded for a search engine \
-("Clematis Jackmanii mature height"). It is never sent to the documents: a \
-gardening book that lists Clematis without its height will not start \
-giving it because the query is reworded, and searching it again only \
-returns the same passages.
+USE THE SOURCES THAT HELP. Before writing a query, decide what kind of fact \
+is missing and choose the useful tool or tools:
+- a fact about the world -- a product specification, a company's revenue, \
+a date in history -- usually goes to `web`, worded for a search engine \
+("Acme Z4 battery life").
 - something only the person's files could say -- what the book recommends, \
-which plants a chapter covers, a figure from their report -- goes to \
-`documents`, worded as the passage you hope to find ("the chapter on \
-climbing plants and where to grow them").
-Never put the same query in both. If a gap needs both, it is two queries: \
-one to find the items in the documents, one per item to look up on the \
-web."""
+which products a report covers, a figure from their own records -- usually \
+goes to `documents`, worded as the passage you hope to find. When public \
+facts are missing for items in a document, search the document for the items \
+and use the web for their public properties. The goal is a useful answer, not \
+keeping every fact inside one source."""
 
 
 async def critique(state: ResearchState) -> dict:
