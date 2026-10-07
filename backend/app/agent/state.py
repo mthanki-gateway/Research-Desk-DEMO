@@ -61,14 +61,10 @@ class ResearchState(TypedDict, total=False):
     owner_id: str | None
     multi_query: bool
     # Rolling summary + last few exchanges, pre-assembled by
-    # services/history.py. Given only to `plan` and `draft`; `critique` does
-    # not need it, and per-node context budgets are where the real token
-    # savings are.
+    # services/history.py and given to the planning and answer prompts.
     chat_context: str
-    # Ask the user a clarifying question when the request is too vague to
-    # search on. Carried in state rather than read from settings inside the
-    # node, so a single compiled graph serves both modes and the choice is per
-    # REQUEST -- which is what makes it comparable in the Lab.
+    # Retained for state/API compatibility. The graph always sets this false;
+    # clarification is disabled.
     clarify: bool
     # Gather evidence with the ReAct tool-calling loop instead of plan +
     # retrieve. Per REQUEST, so one compiled graph serves both strategies and

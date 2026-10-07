@@ -3,9 +3,9 @@
  *
  * WHY localStorage AND NOT THE BACKEND
  *
- * These are UI knobs, not data: how many passages to retrieve, whether to
- * expand the query, whether the agent may ask a question. Nothing else reads
- * them, they carry no tenancy, and losing them costs four clicks. Server-side
+ * These are UI knobs, not data: how many passages to retrieve and whether to
+ * expand the query. Nothing else reads them, they carry no tenancy, and losing
+ * them costs a few clicks. Server-side
  * preferences would mean a new table and a hand-written migration (the project
  * has no Alembic yet) to store something the browser is already good at.
  *
@@ -35,8 +35,6 @@ export type ModelProfile = "gemini" | "gemma";
 export type TurnSettings = {
   topK: number;
   multiQuery: boolean;
-  /** Let the agent ask what a vague question means before searching. */
-  clarify: boolean;
   /** Gather evidence with the tool-calling loop instead of a fixed plan. */
   react: boolean;
   /** Dev-only model override. null = use whatever the server is configured for. */
@@ -46,15 +44,12 @@ export type TurnSettings = {
 /**
  * The starting point for someone who has never changed anything.
  *
- * `react: true` and `clarify: true` mirror REACT_DEFAULT and AGENT_CLARIFY on
- * the server. They are duplicated rather than fetched because the UI has to
- * render before any request completes, and a toggle that flips under the user
- * a second after load is worse than one that starts in the documented state.
+ * `react: true` mirrors REACT_DEFAULT on the server. It is duplicated rather
+ * than fetched because the UI has to render before any request completes.
  */
 export const DEFAULT_TURN_SETTINGS: TurnSettings = {
   topK: 5,
   multiQuery: false,
-  clarify: true,
   react: true,
   // null, not "gemini": the UI should not assert which model the server runs.
   // Sending an explicit profile on every turn would override a deployment's own
@@ -114,7 +109,6 @@ export function loadTurnSettings(): TurnSettings {
     return {
       topK: readTopK(s.topK, DEFAULT_TURN_SETTINGS.topK),
       multiQuery: readBool(s.multiQuery, DEFAULT_TURN_SETTINGS.multiQuery),
-      clarify: readBool(s.clarify, DEFAULT_TURN_SETTINGS.clarify),
       react: readBool(s.react, DEFAULT_TURN_SETTINGS.react),
       modelProfile: readProfile(s.modelProfile),
     };

@@ -92,16 +92,6 @@ function CollapsedRail({
         <RailStat title="Multi-query is on" onClick={onExpand} active label="MQ" />
       )}
 
-      {settings.clarify && (
-        <RailStat
-          title="Clarifying questions are on"
-          onClick={onExpand}
-          active
-          label="ASK"
-        />
-      )}
-
-
       {session.summary && (
         <RailStat
           title={`Memory: ${session.summarised_upto} messages compressed`}
@@ -519,24 +509,6 @@ function Controls({
               aria-label="Multi-query"
             />
           </div>
-
-          <div className="flex items-center justify-between gap-3">
-            <span className="md-body-medium">
-              Ask if unclear
-              <span
-                className="md-body-small mt-0.5 block"
-                style={{ color: "var(--md-on-surface-variant)" }}
-              >
-                Offer options when a question is vague
-              </span>
-            </span>
-            <Switch
-              on={settings.clarify}
-              onChange={(v) => onSettings({ ...settings, clarify: v })}
-              aria-label="Ask if unclear"
-            />
-          </div>
-
 
           {/* DEVELOPMENT ONLY.
               Gated on NODE_ENV rather than hidden with CSS, so the whole block

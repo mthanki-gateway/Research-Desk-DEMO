@@ -295,7 +295,7 @@ function Conversation({ id }: { id: string }) {
         {
           topK: settings.topK,
           multiQuery: settings.multiQuery,
-          clarify: settings.clarify,
+          clarify: false,
           react: settings.react,
           modelProfile: settings.modelProfile,
         },

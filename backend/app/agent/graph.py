@@ -1,40 +1,15 @@
-"""The graph.
+"""Research Desk's retrieval graph.
 
-    START ─┬─(no tools)→ route ─┬─(instruction only)────────────→ END
-           │                    └─→ clarify
-           └─(agent)──────────────→ clarify ─┬─(vague)→ ask_human ─→ …
-                                             │
-                                             ├─→ react ─┬─(no search)→ END
-                                             │          └─→ draft ──┐
-                                             └─→ plan → retrieve → draft
-                                                          ▲          │
-                                                          │      critique
-                                                          │      │    │
-                                              END ←───────┴──────┘    │
-                                                        └── retry ────┘
+    START ─┬─ route ─┬─(remember only)────────────→ END
+           │         ├─ plan → retrieve → draft ──→ END
+           │         └─ react → draft ────────────→ END
+           └─ react → (direct answer or draft) ───→ END
 
-WHO DECIDES WHETHER TO RETRIEVE
-
-The agent does, when it has tools. `react` calls no search for a greeting, a
-question about the assistant, or a bare instruction, and writes the reply
-itself -- so "hi" costs one model call instead of a plan, three sub-questions
-and five web searches. `route` remains the entry point only for the paths that
-cannot make that call for themselves: the Gemma profile, which emits no
-functionCall parts, and the planned path the evaluation harness measures.
-
-The cycle is the reason this is a graph and not four awaits. LangChain's LCEL
-builds DAGs, and a DAG cannot loop; expressing "critique decides whether to go
-back" as a chain is impossible, and as a hand-rolled while-loop it means
-threading a mutable dict through every step by hand.
-
-The checkpointer slot (step 6) is the other reason: compiling with a
-checkpointer snapshots state after every node, which is what turns this into
-resumable chat sessions for free -- and, in step 7, into a graph that can PAUSE
-mid-run to ask the user a question and be resumed by a different request.
-
-`clarify` is a no-op unless the turn asked for it, and even then it only routes
-to `ask_human` when the request is genuinely too vague to search -- so one
-compiled graph serves every mode.
+The tool-using ReAct path gathers evidence itself and can answer directly when
+no search is needed. The planned path decomposes a request and retrieves
+passages. Both paths finish after drafting: no clarification pause and no
+second-pass critique/rewrite loop. ReAct may also answer directly without a
+draft when no search is needed.
 """
 
 from __future__ import annotations
@@ -48,18 +23,10 @@ from langgraph.types import Command
 
 from app.agent.nodes import (
     REMEMBER,
-    UNANSWERABLE,
-    UNSUPPORTED_CLAIM,
-    ask_human,
-    critique,
     draft,
     plan,
-    resolve,
     retrieve_node,
     route,
-)
-from app.agent.nodes import (
-    clarify as clarify_node,
 )
 from app.agent.react import react
 from app.agent.state import ResearchState
@@ -70,68 +37,12 @@ from app.services.vectorstore import SearchHit
 log = structlog.get_logger()
 
 
-def should_continue(
-    state: ResearchState,
-) -> Literal["retrieve", "draft", "resolve", "__end__"]:
-    """The conditional edge: the model's own verdict decides control flow.
-
-    This is the thing a static pipeline cannot express -- whether to loop is
-    data produced at runtime, not a decision made when the code was written.
-
-    THE REMEDY DEPENDS ON THE FAILURE, and that is the whole reason `critique`
-    now returns a category instead of a boolean:
-
-        unsupported_claim  -> draft      rewrite from the SAME evidence.
-                                         Searching again cannot fix a sentence
-                                         that says more than its source.
-        missing_evidence   -> retrieve   find what is not there yet. Rewriting
-                                         cannot fix words that were never in
-                                         any passage.
-        unanswerable       -> resolve    say what IS known and name the gap.
-
-    Every exhausted budget also lands on `resolve` rather than END. Stopping at
-    END would ship whatever draft happened to exist, complete with the claims
-    the critic just rejected -- the budget running out is not a reason to
-    publish a criticised answer unchanged.
-    """
-    settings = get_settings()
-
-    if state.get("sufficient", True):
-        return END
-
-    mode = state.get("failure_mode", "")
-
-    if mode == UNSUPPORTED_CLAIM:
-        # One rewrite, not a conversation. A second pass at the same evidence
-        # rarely differs, and a critic that rejects it twice is usually
-        # disagreeing about tone rather than support.
-        if state.get("regen_count", 0) < settings.agent_max_regens:
-            return "draft"
-        log.info("regen_cap_reached", regens=state.get("regen_count"))
-        return "resolve"
-
-    if mode == UNANSWERABLE:
-        return "resolve"
-
-    # missing_evidence, and anything unrecognised -- the conservative default,
-    # since looking again is recoverable and asserting unanswerable is not.
-    if state.get("iterations", 0) >= settings.agent_max_iterations:
-        # Cap, not a judgement of quality. Each cycle costs ~2 model calls, and
-        # an unbounded loop is the easiest way to spend a daily quota.
-        log.info("iteration_cap_reached", iterations=state.get("iterations"))
-        return "resolve"
-    if not state.get("pending_queries"):
-        return "resolve"  # nothing left to search for
-    return "retrieve"
-
-
 def _uses_react(state: ResearchState) -> bool:
     """Will this turn gather with the ReAct agent?
 
-    Shared by `entry` and `gather_strategy` so the two cannot disagree. They
-    did while this was inlined twice: `entry` skipped the router on a turn that
-    then fell back to `plan` because the model had no tool calling, leaving the
-    turn with neither a router nor an agent able to handle an instruction.
+    The entry decision skips the separate router only when ReAct can handle
+    both the request and its memory instructions. Without tool calling, the
+    route node remains available before the planned path.
     """
     return bool(state.get("react")) and get_settings().supports_tool_calling
 
@@ -179,7 +90,7 @@ def after_react(state: ResearchState) -> Literal["draft", "__end__"]:
     return "draft"
 
 
-def entry(state: ResearchState) -> Literal["route", "clarify"]:
+def entry(state: ResearchState) -> Literal["route", "react"]:
     """Whether the standalone router runs at all.
 
     THE AGENT OWNS THIS JOB WHEN IT CAN DO IT. `route` is a model call in front
@@ -196,10 +107,10 @@ def entry(state: ResearchState) -> Literal["route", "clarify"]:
     the router is still the only thing standing between "remember to cite
     pages" and a document search for the phrase.
     """
-    return "clarify" if _uses_react(state) else "route"
+    return "react" if _uses_react(state) else "route"
 
 
-def after_route(state: ResearchState) -> Literal["clarify", "__end__"]:
+def after_route(state: ResearchState) -> Literal["react", "plan", "__end__"]:
     """Only a PURE instruction ends the turn here.
 
     `route` already wrote the confirmation into `draft`, and for an instruction
@@ -217,30 +128,6 @@ def after_route(state: ResearchState) -> Literal["clarify", "__end__"]:
     """
     if state.get("intent") == REMEMBER:
         return END
-    return "clarify"
-
-
-def needs_human(state: ResearchState) -> Literal["ask_human", "plan"]:
-    """Ask the user only when `clarify` actually produced a question.
-
-    A cheap dict read, deliberately: the judgement was made in the node and
-    written to state, and the router just reads the verdict. Routers stay pure
-    so control flow is testable without a model.
-    """
-    if state.get("pending_clarification"):
-        return "ask_human"
-    return gather_strategy(state)  # type: ignore[return-value]
-
-
-def after_human(state: ResearchState) -> Literal["react", "plan", "__end__"]:
-    """The user declined to answer, so nothing is searched.
-
-    Separate from `should_continue` because they answer different questions:
-    this one is "did the user stop us", that one is "is the answer good
-    enough".
-    """
-    if state.get("cancelled"):
-        return END
     return gather_strategy(state)
 
 
@@ -248,28 +135,16 @@ def build_graph(checkpointer=None):
     builder = StateGraph(ResearchState)
 
     builder.add_node("route", route)
-    builder.add_node("clarify", clarify_node)
-    builder.add_node("ask_human", ask_human)
     builder.add_node("plan", plan)
     builder.add_node("react", react)
     builder.add_node("retrieve", retrieve_node)
     builder.add_node("draft", draft)
-    builder.add_node("critique", critique)
-    builder.add_node("resolve", resolve)
 
     builder.add_conditional_edges(
-        START, entry, {"route": "route", "clarify": "clarify"}
+        START, entry, {"route": "route", "react": "react"}
     )
     builder.add_conditional_edges(
-        "route", after_route, {"clarify": "clarify", END: END}
-    )
-    builder.add_conditional_edges(
-        "clarify",
-        needs_human,
-        {"ask_human": "ask_human", "plan": "plan", "react": "react"},
-    )
-    builder.add_conditional_edges(
-        "ask_human", after_human, {"plan": "plan", "react": "react", END: END}
+        "route", after_route, {"plan": "plan", "react": "react", END: END}
     )
     builder.add_edge("plan", "retrieve")
     # ReAct does its own retrieval through tools, so it goes STRAIGHT to
@@ -279,17 +154,7 @@ def build_graph(checkpointer=None):
         "react", after_react, {"draft": "draft", END: END}
     )
     builder.add_edge("retrieve", "draft")
-    builder.add_edge("draft", "critique")
-    builder.add_conditional_edges(
-        "critique",
-        should_continue,
-        {"retrieve": "retrieve", "draft": "draft", "resolve": "resolve", END: END},
-    )
-    # `resolve` is terminal. It has already produced the final answer and set
-    # sufficient=True; routing it back to critique would re-review a draft that
-    # was written specifically to satisfy the objection, and a critic asked to
-    # review its own instructions being followed tends to find something new.
-    builder.add_edge("resolve", END)
+    builder.add_edge("draft", END)
 
     # checkpointer=None means no persistence -- fine for step 4, which is
     # single-turn. Step 6 passes AsyncPostgresSaver here and nothing else in
@@ -391,18 +256,6 @@ def initial_state(
     resumable: bool = True,
 ) -> ResearchState:
     settings = get_settings()
-    ask = settings.agent_clarify if clarify is None else clarify
-    # A pause is only meaningful if there is a thread to resume. Without one
-    # the checkpointer stores nothing, `interrupt()` has nowhere to record the
-    # pause, and the turn would simply stop with no way to continue it. Forcing
-    # clarification off is the honest degradation.
-    if ask and not resumable:
-        # Debug, not warning: a caller with no thread simply cannot pause. That
-        # is the evaluation harness on every question, and it is correct
-        # behaviour rather than a misconfiguration.
-        log.debug("clarify_skipped", reason="no thread_id")
-        ask = False
-
     return {
         "question": question,
         "top_k": top_k or settings.retrieval_top_k,
@@ -414,7 +267,9 @@ def initial_state(
         "preferences": preferences,
         "intent": "",
         "memory_saved": [],
-        "clarify": ask,
+        # Retained in the state schema for compatibility; this graph never
+        # pauses for clarification.
+        "clarify": False,
         "react": (
             settings.react_default if react is None else react
         ),

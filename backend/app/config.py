@@ -13,7 +13,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # One switch that moves every model AND every budget that depends on it.
 #
 # WHY THIS EXISTS. The richer retrieval/agent design costs 9-10 model calls per
-# turn (multi-query, rerank, several agent hops, draft, critique). The answer
+# turn (query expansion, rerank, retrieval hops and a draft). The answer
 # model allows FIVE REQUESTS PER MINUTE, so exercising that design on Gemini
 # means roughly one question every two minutes -- unusable for development.
 # Gemma allows 30 rpm and 14,400/day, which is the only budget on this key that
@@ -40,8 +40,8 @@ MODEL_PROFILES: dict[str, dict[str, object]] = {
         #
         # It was gemini-3.6-flash, which is the stronger model and allows FIVE
         # REQUESTS PER MINUTE. A turn spends 1-2 of them on the draft, so two
-        # questions in quick succession -- or one question plus a critique
-        # retry -- exhausted the budget and stalled in backoff. Measured
+        # questions in quick succession exhausted the budget and stalled in
+        # backoff. Measured
         # repeatedly during development, including three of four evaluation
         # questions failing with 429 in a single run.
         #
@@ -80,8 +80,8 @@ MODEL_PROFILES: dict[str, dict[str, object]] = {
             "models/gemini-3.1-flash-lite-preview,"
             "models/gemini-2.5-flash-lite"
         ),
-        # The workhorse makes the MOST calls per turn -- plan, clarify,
-        # critique, rerank -- so it pools the same set. They share limiters
+        # The workhorse handles routing, planning and reranking, so it pools
+        # the same set. The roles share limiters
         # with the answer role, which is correct: quota is per model, and a
         # bursty role borrowing from a quiet one is the point.
         "llm_model_pool": (
@@ -97,7 +97,6 @@ MODEL_PROFILES: dict[str, dict[str, object]] = {
         "react_default": True,
         "react_max_rounds": 6,
         "react_max_calls_per_round": 4,
-        "agent_max_iterations": 2,
     },
     # Development. ONE model for every role, because the quota is per model and
     # Gemma's is the only one large enough to run this loop on repeat.
@@ -143,9 +142,6 @@ MODEL_PROFILES: dict[str, dict[str, object]] = {
         "react_default": False,
         "react_max_rounds": 3,
         "react_max_calls_per_round": 2,
-        # One critique cycle, not two. Each costs ~2 calls and Gemma's token
-        # ceiling is the binding constraint, not its request count.
-        "agent_max_iterations": 1,
     },
 }
 
@@ -279,7 +275,7 @@ class Settings(BaseSettings):
     #
     #   model                   rpm  schema      availability   used for
     #   gemini-3.6-flash          5  strict      3/3            the ANSWER
-    #   gemini-3.5-flash-lite    15  strict      3/3            plan/clarify/critique
+    #   gemini-3.5-flash-lite    15  strict      3/3            route/plan
     #   gemma-4-26b              30  strict      ok             query rewriting only
     #   gemini-3.8-flash          5  strict      503 under load  --
     #   gemini-3.7-flash          5  --          503             --
@@ -298,10 +294,8 @@ class Settings(BaseSettings):
     #    is why it holds the one job a user actually reads.
     google_api_key: str = ""
 
-    # The workhorse: plan, clarify, critique, summarise. 15 rpm is what makes a
-    # 4-call agent turn possible -- at the full Flash models' 5 rpm, one turn
-    # would consume an entire minute of budget and a critique retry would stall
-    # in backoff.
+    # The workhorse handles routing, planning, retrieval and summarisation.
+    # Its 15 rpm limit keeps these support calls separate from answer generation.
     llm_model: str = "models/gemini-3.5-flash-lite"
     llm_tokens_per_minute: int = 250_000
     llm_requests_per_minute: int = 15
@@ -850,7 +844,7 @@ class Settings(BaseSettings):
     # work -- "find the competitors" then "look up each one" -- because the
     # second query cannot be written until the first returns.
     #
-    # Distinct from the plan/retrieve/draft/critique graph, which plans every
+    # Distinct from the plan/retrieve/draft graph, which plans every
     # lookup UP FRONT. Both are kept: the planned path is what every
     # recall/faithfulness number in the evaluation harness measures, and
     # replacing it would silently invalidate all of them.
@@ -881,11 +875,6 @@ class Settings(BaseSettings):
     react_max_calls_per_round: int = 4
 
     # --- agent (step 4) ---
-    # Hard cap on critique -> retrieve cycles. Each iteration costs ~2 Gemma
-    # calls; unbounded self-critique is the easiest way to burn a daily quota
-    # by accident, and in practice a third pass rarely finds anything a second
-    # one missed.
-    agent_max_iterations: int = 2
     agent_max_subquestions: int = 3
     # Classify each turn's INTENT before treating it as a search.
     #
@@ -898,16 +887,6 @@ class Settings(BaseSettings):
     # fails soft to 'ask', so a broken router never stops a question being
     # answered.
     agent_route: bool = True
-    # Draft rewrites after an `unsupported_claim` verdict. A SEPARATE budget
-    # from `agent_max_iterations`: a rewrite costs one call and no retrieval,
-    # so charging it to the retrieval cycle would let one over-claim consume the
-    # turn's ability to search.
-    #
-    # One, not two. A second pass over the same evidence rarely differs, and a
-    # critic that rejects the rewrite twice is usually disagreeing about tone
-    # rather than about support.
-    agent_max_regens: int = 1
-
     # Output ceiling for the drafted answer.
     #
     # Config rather than a literal in `draft`, because it is the setting most
@@ -920,28 +899,6 @@ class Settings(BaseSettings):
     # answers past their `sources_used` list, which is emitted last, producing
     # "no sources cited" on answers that cited in every sentence.
     draft_max_output_tokens: int = 2000
-
-    # --- human-in-the-loop ---
-    # Ask the user a clarifying question when their request is too vague to
-    # retrieve well, offering concrete options drawn from what their documents
-    # actually contain.
-    #
-    # This is the one interrupt worth having in a RAG system. The agent has no
-    # side effects to gate, so there is no "approve this action" moment -- but
-    # there is a very common failure where the question genuinely does not say
-    # enough to search on ("tell me about the pyramids"), and the model's only
-    # alternative is to guess. Guessing wastes the whole turn; asking costs one
-    # sentence.
-    #
-    # Default ON. It costs one extra Gemma call per turn to decide whether to
-    # ask, which is cheap next to the 3-5 calls a misunderstood question wastes
-    # -- and the node stays silent unless the request is genuinely too vague to
-    # search, so most turns never see the pause.
-    #
-    # Programmatic callers are unaffected: a pause needs a thread to resume, and
-    # `initial_state` forces this off when there is no thread_id. The evaluation
-    # harness therefore never pauses and never pays for the check.
-    agent_clarify: bool = True
 
     # --- observability (Langfuse) ---
     # Empty keys = tracing OFF, and the app behaves exactly as it did before
