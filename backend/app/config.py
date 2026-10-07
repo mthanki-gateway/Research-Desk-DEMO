@@ -96,7 +96,7 @@ MODEL_PROFILES: dict[str, dict[str, object]] = {
         "draft_max_output_tokens": 2000,
         "react_default": True,
         "react_max_rounds": 6,
-        "react_max_calls_per_round": 4,
+        "react_max_calls_per_round": 8,
     },
     # Development. ONE model for every role, because the quota is per model and
     # Gemma's is the only one large enough to run this loop on repeat.
@@ -870,9 +870,9 @@ class Settings(BaseSettings):
     # those would have quietly changed what the recorded numbers refer to.
     react_default: bool = True
     react_max_rounds: int = 6
-    # Cap on tools executed per round, so one greedy response cannot fan out
-    # into dozens of searches.
-    react_max_calls_per_round: int = 4
+    # Absolute cap on tools executed per round. The selected effort level may
+    # use a lower cap; high effort can use up to eight parallel searches.
+    react_max_calls_per_round: int = 8
 
     # --- agent (step 4) ---
     agent_max_subquestions: int = 3

@@ -97,6 +97,7 @@ function Conversation({ id }: { id: string }) {
   const [question, setQuestion] = useState("");
   const [pendingQuestion, setPendingQuestion] = useState<string | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
+  const [assistantUpdate, setAssistantUpdate] = useState<string | null>(null);
   /**
    * Searches happening right now, newest first.
    *
@@ -299,6 +300,7 @@ function Conversation({ id }: { id: string }) {
     setBusy(true);
     setProgress("Thinking");
     setActivity([]);
+    setAssistantUpdate(null);
     setError(null);
 
     try {
@@ -308,12 +310,16 @@ function Conversation({ id }: { id: string }) {
         {
           topK: settings.topK,
           multiQuery: settings.multiQuery,
+          effort: settings.effort,
           clarify: false,
           react: settings.react,
           modelProfile: settings.modelProfile,
         },
         (_node, detail) => setProgress(detail),
-        (a) => onActivity(a, setActivity),
+        (a) => {
+          if (a.kind === "assistant_update") setAssistantUpdate(a.text ?? null);
+          else onActivity(a, setActivity);
+        },
       );
       await settle(outcome, q);
     } catch (err) {
@@ -324,6 +330,7 @@ function Conversation({ id }: { id: string }) {
       setBusy(false);
       setProgress(null);
       setActivity([]);
+      setAssistantUpdate(null);
     }
   }
 
@@ -371,11 +378,15 @@ function Conversation({ id }: { id: string }) {
     setBusy(true);
     setError(null);
     setProgress(decision.action === "cancel" ? "Stopping" : "Searching");
+    setAssistantUpdate(null);
 
     try {
       const outcome = await resumeTurn(id, thread, q, decision, (_n, detail) =>
         setProgress(detail),
-        (a) => onActivity(a, setActivity),
+        (a) => {
+          if (a.kind === "assistant_update") setAssistantUpdate(a.text ?? null);
+          else onActivity(a, setActivity);
+        },
       );
       await settle(outcome, q);
     } catch (err) {
@@ -387,6 +398,7 @@ function Conversation({ id }: { id: string }) {
       setBusy(false);
       setProgress(null);
       setActivity([]);
+      setAssistantUpdate(null);
     }
   }
 
@@ -558,8 +570,23 @@ function Conversation({ id }: { id: string }) {
               Here it also reads correctly: the work shows up where its result
               will, and is replaced by the answer rather than vanishing from a
               different part of the screen. */}
+          {assistantUpdate && busy && (
+            <li className="space-y-2" aria-live="polite">
+              <div className="md-answer md-body-medium p-5">
+                <Answer
+                  content={assistantUpdate}
+                  sources={[]}
+                  activeChunkId={openChunk?.id ?? null}
+                  onCite={(chunkId) => void showChunk(chunkId)}
+                />
+              </div>
+            </li>
+          )}
+
+          {/* Tool activity remains progress; the model's own short update
+              above is rendered as an assistant answer message. */}
           {activity.length > 0 && (
-            <li className="md-body-small space-y-1 px-1">
+            <li className="md-body-small space-y-1 px-1" aria-live="polite">
               {activity.map((a) => (
                 <div
                   key={a.key}

@@ -680,6 +680,7 @@ export type Activity = {
    * "lookup" | "lookup_done" — collection metadata: names, counts, sizes.
    * "remember"               — storing a preference. The one tool that writes.
    * "rerank"                 — no query to show; not rendered.
+   * "assistant_update"       — a brief user-facing status from the research model.
    *
    * Lookups are a separate verb from searches because they are a different
    * claim. Counting documents is not reading them, and showing both as
@@ -704,6 +705,7 @@ export async function streamTurn(
   opts: {
     topK?: number;
     multiQuery?: boolean;
+    effort?: "low" | "medium" | "high";
     clarify?: boolean;
     react?: boolean;
     modelProfile?: string | null;
@@ -715,6 +717,16 @@ export async function streamTurn(
     question,
     top_k: opts.topK ?? null,
     multi_query: opts.multiQuery ?? null,
+    effort: opts.effort ?? "medium",
+    client_timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+    client_locale: navigator.language || "",
+    client_region: (() => {
+      try {
+        return new Intl.Locale(navigator.language || "en").region || "";
+      } catch {
+        return "";
+      }
+    })(),
     // null = use the server's AGENT_CLARIFY default rather than asserting a
     // value the UI has no opinion about.
     clarify: opts.clarify ?? null,

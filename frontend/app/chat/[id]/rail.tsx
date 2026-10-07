@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import type { Chunk, Document, SessionDetail } from "@/lib/api";
 import {
   Checkbox,
@@ -17,12 +17,18 @@ import {
   IconQuote,
   IconTrash,
 } from "../../icons";
-import type { TurnSettings } from "@/lib/prefs";
+import type { EffortLevel, TurnSettings } from "@/lib/prefs";
 
 // Defined in lib/prefs.ts, next to the defaults and the validation that reads
 // stored values back. Re-exported here so existing importers are unaffected --
 // the rail is where every consumer already looks for this type.
 export type { TurnSettings };
+
+const EFFORT_OPTIONS: { value: EffortLevel; label: string }[] = [
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+];
 
 /** Rail widths, shared so the page's padding animation matches exactly. */
 export const RAIL_WIDTH = "20rem";
@@ -91,6 +97,12 @@ function CollapsedRail({
       {settings.multiQuery && (
         <RailStat title="Multi-query is on" onClick={onExpand} active label="MQ" />
       )}
+
+      <RailStat
+        title={`Research effort: ${settings.effort}`}
+        onClick={onExpand}
+        label={settings.effort === "high" ? "High" : settings.effort === "low" ? "Low" : "Med"}
+      />
 
       {session.summary && (
         <RailStat
@@ -332,6 +344,13 @@ function Controls({
   onDeleteSession: () => Promise<void>;
 }) {
   const scoped = session.document_ids.length > 0;
+  const effortIndex = Math.max(
+    0,
+    EFFORT_OPTIONS.findIndex((option) => option.value === settings.effort),
+  );
+  const effortSliderStyle = {
+    "--effort-position": `${effortIndex * 50}%`,
+  } as CSSProperties;
 
   return (
     <div className="space-y-7 p-5">
@@ -437,60 +456,72 @@ function Controls({
         <SectionHeading>Retrieval</SectionHeading>
 
         <div className="space-y-5">
-          <div className="flex items-center justify-between gap-3">
+          <div>
             <span className="md-body-medium">
-              Passages per query
+              Research effort
               <span
                 className="md-body-small mt-0.5 block"
                 style={{ color: "var(--md-on-surface-variant)" }}
               >
-                Lower is stricter
+                High branches findings into parallel searches; it can take longer and use more API calls
               </span>
             </span>
-            <span className="md-segmented shrink-0">
-              <Ripplable
-                as="button"
-                onClick={() =>
-                  onSettings({
-                    ...settings,
-                    topK: Math.max(1, settings.topK - 1),
-                  })
-                }
-                aria-label="Decrease"
+            <div className="effort-slider-card mt-3">
+              <div className="flex items-center justify-between">
+                <span className="effort-slider-current">
+                  {EFFORT_OPTIONS[effortIndex].label}
+                </span>
+                <span className="effort-slider-caption">Reasoning depth</span>
+              </div>
+              <div
+                className="effort-slider-control mt-2"
+                style={effortSliderStyle}
               >
-                &minus;
-              </Ripplable>
-              {/* A VALUE, not a selected segment.
-                  It was a `<button data-active="true">` with pointer events
-                  switched off, which gave it the filled "this segment is
-                  chosen" treatment -- a solid block running the full 40px
-                  height, so it met the pill's 1px outline from the inside and
-                  read as spilling over it. Nothing here is chosen; it is the
-                  number the two buttons change.
-
-                  Being a real button also meant it was still focusable and
-                  announced as one, so tabbing through the stepper stopped on
-                  a control that could not be activated. */}
-              <span
-                className="md-segmented-value"
-                aria-live="polite"
-                aria-label={`${settings.topK} passages per query`}
-              >
-                {settings.topK}
-              </span>
-              <Ripplable
-                as="button"
-                onClick={() =>
-                  onSettings({
-                    ...settings,
-                    topK: Math.min(20, settings.topK + 1),
-                  })
-                }
-                aria-label="Increase"
-              >
-                +
-              </Ripplable>
-            </span>
+                <div className="effort-slider-track" aria-hidden="true">
+                  <span className="effort-slider-fill" />
+                  {EFFORT_OPTIONS.map((option, index) => (
+                    <span
+                      key={option.value}
+                      className={`effort-slider-stop${index <= effortIndex ? " is-active" : ""}`}
+                      style={{ left: `${index * 50}%` }}
+                    />
+                  ))}
+                </div>
+                <span className="effort-slider-thumb" aria-hidden="true" />
+                <input
+                  className="effort-slider-input"
+                  type="range"
+                  min={0}
+                  max={2}
+                  step={1}
+                  value={effortIndex}
+                  onChange={(event) => {
+                    const option = EFFORT_OPTIONS[Number(event.target.value)];
+                    if (option) onSettings({ ...settings, effort: option.value });
+                  }}
+                  aria-label="Research effort"
+                  aria-valuetext={`${settings.effort} research effort`}
+                />
+              </div>
+              <div className="effort-slider-labels mt-1">
+                {EFFORT_OPTIONS.map((option, index) => (
+                  <span
+                    key={option.value}
+                    className={index === effortIndex ? "is-active" : ""}
+                  >
+                    <button
+                      type="button"
+                      aria-pressed={index === effortIndex}
+                      onClick={() =>
+                        onSettings({ ...settings, effort: option.value })
+                      }
+                    >
+                      {option.label}
+                    </button>
+                  </span>
+                ))}
+              </div>
+            </div>
           </div>
 
           <div className="flex items-center justify-between gap-3">

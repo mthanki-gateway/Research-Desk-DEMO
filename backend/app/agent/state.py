@@ -60,6 +60,11 @@ class ResearchState(TypedDict, total=False):
     # functions of state.
     owner_id: str | None
     multi_query: bool
+    effort: str
+    current_datetime: str
+    # Profile and browser locale/timezone context for every reasoning node.
+    # It is contextual metadata, never evidence or instruction.
+    user_context: str
     # Rolling summary + last few exchanges, pre-assembled by
     # services/history.py and given to the planning and answer prompts.
     chat_context: str

@@ -38,6 +38,11 @@ from app.services.retrieval import build_context, document_outline, retrieve
 log = structlog.get_logger()
 
 
+def _user_context_block(state: ResearchState) -> str:
+    context = (state.get("user_context") or "").strip()
+    return f"\n\n{context}" if context else ""
+
+
 def _dedupe(items: list[str]) -> list[str]:
     """Order-preserving, case-insensitive dedupe."""
     seen: set[str] = set()
@@ -105,7 +110,7 @@ WEB_QUERY_SCHEMA = {
             "type": "array",
             "items": {"type": "string"},
             "description": (
-                "Up to six concise public web searches that help answer "
+                "Up to eight concise public web searches that help answer "
                 "the user's question, including one per distinct entity "
                 "when a comparison needs it."
             ),
@@ -131,6 +136,21 @@ question here."""
 async def plan(state: ResearchState) -> dict:
     question = state["question"]
     settings = get_settings()
+    effort = state.get("effort", "medium")
+    subquestion_limit = {"low": 2, "medium": 3, "high": 8}.get(effort, 3)
+    plan_system = PLAN_SYSTEM
+    if effort == "high":
+        plan_system = plan_system.replace(
+            "At most 3 sub-questions.",
+            "For broad or current questions, split the distinct findings or "
+            "entities into separate self-contained lookups, up to 8. Each "
+            "branch should target one factual finding.",
+        )
+    elif effort == "low":
+        plan_system = plan_system.replace(
+            "At most 3 sub-questions.",
+            "At most 2 sub-questions; use one when it can answer the request.",
+        )
     chat_context = state.get("chat_context") or ""
 
     # History goes to `plan` above all: this is where a follow-up like "and the
@@ -140,6 +160,8 @@ async def plan(state: ResearchState) -> dict:
         f"Conversation so far:\n{chat_context}\n\n" if chat_context else ""
     )
     prompt = (
+        f"Current date and time: {state.get('current_datetime', 'unknown')}\n"
+        "Use this value to resolve relative time words such as today or yesterday.\n\n"
         f"{history_block}"
         f"Break this question into the lookups needed to answer it.\n\n"
         f"Question: {question}"
@@ -151,16 +173,18 @@ async def plan(state: ResearchState) -> dict:
         raw = await get_llm().generate(
             prompt,
             schema=PLAN_SCHEMA,
-            system=PLAN_SYSTEM,
+            system=plan_system + _user_context_block(state),
             temperature=0.0,
-            max_output_tokens=600,
+            max_output_tokens=1200 if effort == "high" else 600,
         )
         # Dedupe: the planner sometimes emits the same lookup twice (seen when
         # resolving a follow-up, where the resolved and original phrasings
         # collide). Each duplicate is a wasted embedding call and a wasted
         # retrieval slot.
         subs = _dedupe(extract_string_list(raw, "sub_questions"))[
-            : settings.agent_max_subquestions
+            : min(subquestion_limit, max(1, settings.agent_max_subquestions))
+            if effort != "high"
+            else subquestion_limit
         ]
     except LLMError as exc:
         # Planning is an optimisation over asking the question as-is. Degrade to
@@ -417,7 +441,7 @@ async def clarify(state: ResearchState) -> dict:
         raw = await get_llm().generate(
             f"{history_block}{outline_block}{coverage}Latest request: {question}",
             schema=CLARIFY_SCHEMA,
-            system=CLARIFY_SYSTEM,
+            system=CLARIFY_SYSTEM + _user_context_block(state),
             temperature=0.0,
             # 700 truncated mid-options on a five-document corpus. The
             # descriptions are the bulk of the response and the model is
@@ -605,23 +629,46 @@ async def retrieve_node(state: ResearchState) -> dict:
     gathered = []
     per_query = []
     routes = state.get("query_routes") or {}
-    for raw_query in queries:
-        query = as_query(raw_query)
+    prepared = [
+        (raw_query, as_query(raw_query), routes.get(raw_query, ""))
+        for raw_query in queries
+    ]
+    parallel_doc_hits: dict[int, list] = {}
+    if state.get("effort") == "high" and document_ids:
+        doc_indices = [i for i, (_, _, route) in enumerate(prepared) if route != "web"]
+        doc_results = await asyncio.gather(
+            *(
+                retrieve(
+                    prepared[i][1],
+                    top_k=top_k,
+                    document_ids=document_ids,
+                    owner_id=state.get("owner_id"),
+                    multi_query=state.get("multi_query"),
+                    exclude_chunk_ids=seen,
+                )
+                for i in doc_indices
+            )
+        )
+        parallel_doc_hits = dict(zip(doc_indices, doc_results, strict=True))
+
+    for query_index, (raw_query, query, route) in enumerate(prepared):
         # Routed by the critic, which knows what kind of fact each gap is.
         # A query about the world is not searched in the documents, and one
         # about the documents is not searched on the web.
-        route = routes.get(raw_query, "")
         hits = []
         # No documents selected means documents are not a source at all.
         if route != "web" and document_ids:
-            hits = await retrieve(
-                query,
-                top_k=top_k,
-                document_ids=document_ids,
-                owner_id=state.get("owner_id"),
-                multi_query=state.get("multi_query"),
-                exclude_chunk_ids=seen,
-            )
+            if query_index in parallel_doc_hits:
+                hits = parallel_doc_hits[query_index]
+            else:
+                hits = await retrieve(
+                    query,
+                    top_k=top_k,
+                    document_ids=document_ids,
+                    owner_id=state.get("owner_id"),
+                    multi_query=state.get("multi_query"),
+                    exclude_chunk_ids=seen,
+                )
         gathered.extend(hits)
         entry = {"query": query, "n": len(hits), "route": route or "both"}
 
@@ -671,19 +718,35 @@ async def retrieve_node(state: ResearchState) -> dict:
     # superlative over items named in a report) without making every chat turn
     # search the web indiscriminately.
     if websearch.enabled():
+        effort = state.get("effort", "medium")
+        web_query_system = WEB_QUERY_SYSTEM
+        web_query_limit = 8 if effort == "high" else 6
+        if effort == "high":
+            web_query_system = web_query_system.replace(
+                "up to six concise queries",
+                "up to eight concise queries",
+            ).replace(
+                "up to six concise queries.",
+                "up to eight concise queries.",
+            )
+            web_query_system += (
+                " For broad, current questions, search each distinct finding "
+                "or event separately so results can be cited independently."
+            )
         try:
             evidence_text = "\n\n".join(
                 hit.text[:1200] for hit in gathered[:8]
             ) or "No relevant passages were retrieved from the selected documents."
             raw = await get_llm().generate(
+                f"Current date and time: {state.get('current_datetime', 'unknown')}\n"
                 f"Question: {state['question']}\n\n"
                 f"Relevant document passages, if any:\n{evidence_text}",
                 schema=WEB_QUERY_SCHEMA,
-                system=WEB_QUERY_SYSTEM,
+                system=web_query_system + _user_context_block(state),
                 temperature=0.0,
                 max_output_tokens=700,
             )
-            web_queries = _dedupe(extract_string_list(raw, "queries"))[:6]
+            web_queries = _dedupe(extract_string_list(raw, "queries"))[:web_query_limit]
         except LLMError as exc:
             log.warning("web_query_plan_failed", error=str(exc))
             web_queries = []
@@ -906,6 +969,29 @@ opening anything.
 _CITE_MARKER = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
 
 
+def _answer_effort_instruction(effort: str) -> str:
+    if effort == "high":
+        return (
+            "High effort answer: write a substantial, comprehensive response, "
+            "not an executive summary. Cover every distinct finding supported "
+            "by the research in its own clearly labeled section or paragraph. "
+            "For each finding, explain what happened, who or what was involved, "
+            "when, the concrete evidence and figures, relevant background, why "
+            "it matters, and any important implications or comparisons. Preserve "
+            "useful specifics from the sources instead of collapsing them into "
+            "broad themes. Add context that helps the user understand the facts, "
+            "cite sourced claims, and distinguish confirmed information from "
+            "uncertainty. Be thorough without repeating yourself or inventing "
+            "unsupported details.\n\n"
+        )
+    if effort == "low":
+        return (
+            "Low effort: focus on the central question and its key supporting "
+            "facts; do not branch into adjacent topics unless they are needed.\n\n"
+        )
+    return ""
+
+
 def _cited_in_text(answer: str, n_sources: int) -> list[int]:
     """Citation numbers appearing inline, in order, deduped.
 
@@ -1096,6 +1182,12 @@ Do not ask a clarifying question. answer as much as possible.
 async def draft(state: ResearchState) -> dict:
     settings = get_settings()
     evidence = state.get("evidence") or []
+    effort = state.get("effort", "medium")
+    effort_instruction = _answer_effort_instruction(effort)
+    time_instruction = (
+        f"Current date and time for this user: {state.get('current_datetime', 'unknown')}. "
+        "Use it to resolve relative dates; use retrieved evidence to verify current events.\n\n"
+    )
     # NO PASSAGES IS NOT THE SAME AS NOTHING TO SAY.
     #
     # A metadata tool answers without retrieving anything -- "you have 5
@@ -1114,8 +1206,10 @@ async def draft(state: ResearchState) -> dict:
                     if state.get("chat_context")
                     else ""
                 )
+                + effort_instruction
+                + time_instruction
                 + f"{state['question']}",
-                system=GENERAL_SYSTEM + (state.get("preferences") or ""),
+                system=GENERAL_SYSTEM + (state.get("preferences") or "") + _user_context_block(state),
                 temperature=0.4,
                 max_output_tokens=4096,
             )
@@ -1143,8 +1237,10 @@ async def draft(state: ResearchState) -> dict:
                 )
                 + "No relevant passages were retrieved from the selected documents. "
                 + "Answer the question as helpfully as possible anyway.\n\n"
+                + effort_instruction
+                + time_instruction
                 + f"Question: {state['question']}",
-                system=NO_EVIDENCE_SYSTEM + (state.get("preferences") or ""),
+                system=NO_EVIDENCE_SYSTEM + (state.get("preferences") or "") + _user_context_block(state),
                 temperature=0.3,
                 max_output_tokens=settings.draft_max_output_tokens,
             )
@@ -1198,6 +1294,8 @@ async def draft(state: ResearchState) -> dict:
         f"{_memory_block(state)}"
         f"{_facts_block(state)}"
         f"{redo_block}"
+        f"{effort_instruction}"
+        f"{time_instruction}"
         f"Question: {state['question']}\n\n"
         "Answer the question directly. Use the sources above where they help, "
         "and answer other parts with reliable knowledge or clearly stated "
@@ -1224,7 +1322,7 @@ async def draft(state: ResearchState) -> dict:
         raw = await get_pool("answer").generate(
             prompt,
             schema=DRAFT_SCHEMA,
-            system=DRAFT_SYSTEM + (state.get("preferences") or ""),
+            system=DRAFT_SYSTEM + (state.get("preferences") or "") + _user_context_block(state),
             temperature=0.1,
             # Profile-dependent, because the right ceiling differs by model.
             #
@@ -1394,6 +1492,7 @@ async def resolve(state: ResearchState) -> dict:
     """Answer partially, or abstain if there is genuinely nothing."""
     settings = get_settings()
     evidence = state.get("evidence") or []
+    effort_instruction = _answer_effort_instruction(state.get("effort", "medium"))
     draft_text = state.get("draft") or ""
     missing = state.get("missing") or state.get("unanswered") or []
     overclaims = state.get("unsupported_claims") or []
@@ -1429,6 +1528,7 @@ async def resolve(state: ResearchState) -> dict:
         # it.
         f"{_memory_block(state)}"
         f"{_facts_block(state)}"
+        f"{effort_instruction}"
         # The OTHER half of the same bug. `resolve` shares ANSWER_RULES, which
         # says to report the work from the "Search coverage" line -- and
         # `resolve` was never given one. So on every turn the critique loop
@@ -1441,7 +1541,7 @@ async def resolve(state: ResearchState) -> dict:
         raw = await get_pool("answer").generate(
             prompt,
             schema=RESOLVE_SCHEMA,
-            system=RESOLVE_SYSTEM + (state.get("preferences") or ""),
+            system=RESOLVE_SYSTEM + (state.get("preferences") or "") + _user_context_block(state),
             temperature=0.1,
             max_output_tokens=settings.draft_max_output_tokens,
         )
@@ -1621,7 +1721,7 @@ async def critique(state: ResearchState) -> dict:
         result = await get_llm().generate_json(
             prompt,
             schema=CRITIQUE_SCHEMA,
-            system=CRITIQUE_SYSTEM,
+            system=CRITIQUE_SYSTEM + _user_context_block(state),
             temperature=0.0,
             max_output_tokens=600,
         )
@@ -1871,7 +1971,7 @@ async def route(state: ResearchState) -> dict:
         raw = await get_llm().generate(
             f"{history}{already}Message: {question}",
             schema=ROUTE_SCHEMA,
-            system=ROUTE_SYSTEM,
+            system=ROUTE_SYSTEM + _user_context_block(state),
             temperature=0.0,
             max_output_tokens=300,
         )

@@ -14,6 +14,7 @@ draft when no search is needed.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 import uuid
 from typing import Any, Literal
 
@@ -248,6 +249,9 @@ def initial_state(
     document_ids: list[uuid.UUID] | None = None,
     owner_id: str | None = None,
     multi_query: bool | None = None,
+    effort: str = "medium",
+    current_datetime: str | None = None,
+    user_context: str = "",
     chat_context: str = "",
     session_id: str | None = None,
     preferences: str = "",
@@ -262,6 +266,10 @@ def initial_state(
         "document_ids": [str(d) for d in document_ids] if document_ids else None,
         "owner_id": owner_id,
         "multi_query": multi_query,
+        "effort": effort,
+        "current_datetime": current_datetime
+        or datetime.now(UTC).strftime("%A, %B %d, %Y %I:%M %p UTC"),
+        "user_context": user_context,
         "chat_context": chat_context,
         "session_id": session_id,
         "preferences": preferences,
@@ -326,6 +334,9 @@ async def run_agent(
     document_ids: list[uuid.UUID] | None = None,
     owner_id: str | None = None,
     multi_query: bool | None = None,
+    effort: str = "medium",
+    current_datetime: str | None = None,
+    user_context: str = "",
     chat_context: str = "",
     session_id: str | None = None,
     preferences: str = "",
@@ -339,6 +350,9 @@ async def run_agent(
         document_ids=document_ids,
         owner_id=owner_id,
         multi_query=multi_query,
+        effort=effort,
+        current_datetime=current_datetime,
+        user_context=user_context,
         chat_context=chat_context,
         session_id=session_id,
         preferences=preferences,
@@ -399,6 +413,9 @@ async def stream_agent(
     document_ids: list[uuid.UUID] | None = None,
     owner_id: str | None = None,
     multi_query: bool | None = None,
+    effort: str = "medium",
+    current_datetime: str | None = None,
+    user_context: str = "",
     chat_context: str = "",
     session_id: str | None = None,
     preferences: str = "",
@@ -422,6 +439,9 @@ async def stream_agent(
         document_ids=document_ids,
         owner_id=owner_id,
         multi_query=multi_query,
+        effort=effort,
+        current_datetime=current_datetime,
+        user_context=user_context,
         chat_context=chat_context,
         session_id=session_id,
         preferences=preferences,

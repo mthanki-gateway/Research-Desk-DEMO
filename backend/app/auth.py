@@ -56,6 +56,7 @@ class User:
     id: str
     email: str | None
     anonymous: bool = False
+    name: str | None = None
 
     @property
     def owner_id(self) -> str | None:
@@ -146,7 +147,22 @@ async def _verify(token: str) -> User:
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Token has no subject."
         )
 
-    user = User(id=str(subject), email=claims.get("email"))
+    metadata = claims.get("user_metadata") or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    raw_name = (
+        claims.get("name")
+        or claims.get("full_name")
+        or metadata.get("full_name")
+        or metadata.get("name")
+    )
+    # Profile names are user supplied. Keep them as plain, single-line context
+    # so they cannot inject extra prompt instructions.
+    clean_name = "".join(
+        character for character in str(raw_name) if character.isprintable()
+    )
+    display_name = " ".join(clean_name.split())[:120] or None
+    user = User(id=str(subject), email=claims.get("email"), name=display_name)
 
     # Bind the identity into the logging context so EVERY log line emitted
     # while serving this request carries it, without threading a user object

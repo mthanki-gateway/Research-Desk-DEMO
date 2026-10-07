@@ -1,6 +1,13 @@
 @import "tailwindcss";
 @import "./theme.css";
 
+/* Mask API tokens without exposing a password field to browser credential
+   managers. The input remains `type="text"` so browsers do not offer to save
+   provider keys as account passwords. */
+.api-key-entry {
+  -webkit-text-security: disc;
+}
+
 /* Roboto is imported from layout.tsx, not here: Tailwind v4's PostCSS plugin
    handles @import itself and cannot resolve a bare package specifier like
    "@fontsource/roboto/400.css". A JS import lets webpack resolve it. */
@@ -18,6 +25,9 @@
    =========================================================================== */
 
 :root {
+  /* Allows smooth transitions between explicit dimensions and intrinsic
+     sizes (for example, a panel opening to its content height). */
+  interpolate-size: allow-keywords;
   /* --- shape scale ------------------------------------------------------- */
   --md-shape-none: 0;
   --md-shape-xs: 4px;
@@ -86,6 +96,136 @@
 @layer base {
   * {
     border-color: var(--md-outline-variant);
+  }
+
+  .effort-slider-card {
+    padding: 12px 12px 7px;
+    border: 1px solid var(--md-outline-variant);
+    border-radius: var(--md-shape-md);
+    background: var(--md-surface);
+  }
+
+  .effort-slider-current {
+    color: var(--md-primary);
+    font-size: 0.875rem;
+    font-weight: 600;
+    text-transform: capitalize;
+  }
+
+  .effort-slider-caption {
+    color: var(--md-on-surface-variant);
+    font-size: 0.75rem;
+  }
+
+  .effort-slider-control {
+    position: relative;
+    height: 44px;
+    margin-inline: 8px;
+    touch-action: pan-y;
+  }
+
+  .effort-slider-track {
+    position: absolute;
+    top: 50%;
+    right: 0;
+    left: 0;
+    height: 14px;
+    overflow: hidden;
+    border-radius: var(--md-shape-full);
+    background: var(--md-surface-container-high);
+    transform: translateY(-50%);
+  }
+
+  .effort-slider-fill {
+    display: block;
+    width: var(--effort-position);
+    height: 100%;
+    border-radius: inherit;
+    background: color-mix(
+      in srgb,
+      var(--md-primary) 38%,
+      var(--md-surface-container-high)
+    );
+  }
+
+  .effort-slider-stop {
+    position: absolute;
+    top: 50%;
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: var(--md-outline);
+    opacity: 0.7;
+    transform: translate(-50%, -50%);
+  }
+
+  .effort-slider-stop.is-active {
+    background: var(--md-primary);
+    opacity: 0.95;
+  }
+
+  .effort-slider-thumb {
+    position: absolute;
+    z-index: 2;
+    top: 50%;
+    left: var(--effort-position);
+    width: 20px;
+    height: 20px;
+    border: 2px solid var(--md-primary);
+    border-radius: 50%;
+    background: var(--md-surface);
+    box-shadow: var(--md-elev-1);
+    pointer-events: none;
+    transform: translate(-50%, -50%);
+  }
+
+  .effort-slider-input {
+    position: absolute;
+    z-index: 3;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    opacity: 0;
+    cursor: pointer;
+  }
+
+  .effort-slider-control:has(.effort-slider-input:focus-visible)
+    .effort-slider-thumb {
+    box-shadow:
+      0 0 0 4px color-mix(in srgb, var(--md-primary) 18%, transparent),
+      var(--md-elev-1);
+  }
+
+  .effort-slider-labels {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    min-height: 28px;
+    color: var(--md-on-surface-variant);
+    font-size: 0.75rem;
+  }
+
+  .effort-slider-labels button {
+    min-width: 42px;
+    padding: 3px 6px;
+    border: 0;
+    border-radius: var(--md-shape-full);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+  }
+
+  .effort-slider-labels .is-active button {
+    min-width: 48px;
+    padding: 4px 8px;
+    background: color-mix(in srgb, var(--md-primary) 12%, transparent);
+    color: var(--md-primary);
+    font-weight: 600;
+  }
+
+  .effort-slider-labels button:hover {
+    background: color-mix(in srgb, var(--md-primary) 8%, transparent);
   }
 
   /* IF IT CAN BE CLICKED, IT SHOWS A POINTER.
@@ -169,6 +309,24 @@ body {
   --md-surface-container: #ededf1;
   --md-surface-container-high: #e8e8eb;
   --md-surface-container-highest: #e2e2e5;
+}
+
+/* Keep layout and visual state changes smooth across every app surface,
+   including elements with their own earlier transition declarations. */
+*,
+*::before,
+*::after {
+  transition-property: all;
+  transition-duration: var(--md-dur-medium);
+  transition-timing-function: var(--md-ease-standard);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+  }
 }
 
 @media (prefers-color-scheme: dark) {

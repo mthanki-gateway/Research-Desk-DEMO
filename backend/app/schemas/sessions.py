@@ -54,6 +54,10 @@ class TurnRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=2000)
     top_k: int | None = Field(None, ge=1, le=20)
     multi_query: bool | None = None
+    effort: Literal["low", "medium", "high"] = "medium"
+    client_timezone: str | None = Field(None, max_length=80)
+    client_locale: str | None = Field(None, max_length=40)
+    client_region: str | None = Field(None, max_length=8)
     # Overrides the session's scope for this one turn only.
     document_ids: list[uuid.UUID] | None = None
     # None = use AGENT_CLARIFY from config. Explicit true lets this turn pause

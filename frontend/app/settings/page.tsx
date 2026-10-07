@@ -231,20 +231,31 @@ function ProviderCard({
 
       <form
         className="flex flex-wrap items-center gap-2"
+        autoComplete="off"
         onSubmit={(e) => {
           e.preventDefault();
           if (value.trim()) void run(() => saveKey(p.id, value));
         }}
       >
         <input
-          type="password"
+          // This is an API token, not a website password. Some browsers ignore
+          // autocomplete="off" on password inputs and offer to save it. Keep
+          // the value masked with CSS while avoiding the password-field signal.
+          type="text"
           autoComplete="off"
+          autoCapitalize="none"
+          autoCorrect="off"
+          data-1p-ignore="true"
+          data-lpignore="true"
+          data-bwignore="true"
+          data-protonpass-ignore="true"
+          data-form-type="other"
           spellCheck={false}
           value={value}
           onChange={(e) => setValue(e.target.value)}
           placeholder={p.yours ? "Paste a new key to replace it" : "Paste your key"}
           aria-label={`${p.label} API key`}
-          className="md-body-medium min-w-0 flex-1 rounded-[var(--md-shape-sm)] px-3 py-2 outline-none"
+          className="api-key-entry md-body-medium min-w-0 flex-1 rounded-[var(--md-shape-sm)] px-3 py-2 outline-none"
           style={{
             background: "var(--md-surface)",
             color: "var(--md-on-surface)",

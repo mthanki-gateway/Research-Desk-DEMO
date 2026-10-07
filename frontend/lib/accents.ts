@@ -4,13 +4,13 @@
 export type Accent = (typeof ACCENTS)[number]["id"];
 
 export const ACCENTS = [
-  { id: "purple", label: "Purple", seed: "#6750a4" },
-  { id: "teal", label: "Teal", seed: "#0f766e" },
-  { id: "violet", label: "Violet", seed: "#7c4dff" },
-  { id: "amber", label: "Amber", seed: "#b45309" },
-  { id: "olive", label: "Olive", seed: "#3f6212" },
-  { id: "blue", label: "Blue", seed: "#0284c7" },
-  { id: "brown", label: "Brown", seed: "#795548" },
+  { id: "purple", label: "Purple", seed: "#69559f" },
+  { id: "teal", label: "Teal", seed: "#157069" },
+  { id: "violet", label: "Violet", seed: "#8158f4" },
+  { id: "amber", label: "Amber", seed: "#aa5413" },
+  { id: "olive", label: "Olive", seed: "#3e5d17" },
+  { id: "blue", label: "Blue", seed: "#0e80bb" },
+  { id: "brown", label: "Brown", seed: "#76564B" },
 ] as const;
 
 /** The one on bare `:root`, i.e. what renders with no data-accent set. */

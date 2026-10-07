@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import json
 import re
 import time
@@ -44,6 +45,23 @@ from app.services.limiter import RateLimiter, estimate_tokens
 log = structlog.get_logger()
 
 GENAI_BASE = "https://generativelanguage.googleapis.com/v1beta"
+
+_thinking_level: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "genai_thinking_level", default=None
+)
+
+
+@contextlib.contextmanager
+def use_thinking_level(level: str | None):
+    """Apply a per-turn thinking preference to all nested Gemini calls."""
+    normalized = level.lower() if level else None
+    if normalized not in (None, "low", "medium", "high"):
+        raise ValueError(f"Unsupported Gemini thinking level: {level}")
+    token = _thinking_level.set(normalized)
+    try:
+        yield
+    finally:
+        _thinking_level.reset(token)
 
 
 class LLMError(RuntimeError):
@@ -128,6 +146,19 @@ class GenAIClient:
         """
         return self._limiter.peek(tokens)
 
+    def _thinking_config(self) -> dict[str, Any] | None:
+        """Translate the turn effort to this model's supported Gemini API."""
+        level = _thinking_level.get()
+        if not level or not self._model.startswith("gemini-"):
+            return None
+        if self._model.startswith("gemini-2.5-"):
+            # Gemini 2.5 has no effort levels; -1 asks it to choose a dynamic
+            # thinking budget, avoiding a fixed reasoning-token ceiling.
+            return {"thinkingBudget": -1}
+        if self._model.startswith(("gemini-3",)):
+            return {"thinkingLevel": level.upper()}
+        return None
+
     async def aclose(self) -> None:
         await self._client.aclose()
 
@@ -147,7 +178,6 @@ class GenAIClient:
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": {
                 "temperature": temperature,
-                "maxOutputTokens": max_output_tokens,
                 # Repetition loops are the characteristic failure of the
                 # smaller models here -- Gemma once emitted "way's actually" a
                 # dozen times until it hit the token cap, producing truncated
@@ -158,14 +188,18 @@ class GenAIClient:
                 "topP": top_p,
             },
         }
+        thinking = self._thinking_config()
+        if thinking:
+            body["generationConfig"]["thinkingConfig"] = thinking
         if system:
             body["systemInstruction"] = {"parts": [{"text": system}]}
         if schema:
             body["generationConfig"]["responseMimeType"] = "application/json"
             body["generationConfig"]["responseSchema"] = schema
 
-        # Budget both directions: the prompt we send and the tokens we allow
-        # back, since TPM counts both.
+        # Reserve estimated input and output tokens with the local rate
+        # limiter. `max_output_tokens` is a reservation estimate only; it is
+        # deliberately not sent as Gemini's maxOutputTokens generation cap.
         cost = estimate_tokens(prompt) + estimate_tokens(system or "") + max_output_tokens
 
         # Traced as a GENERATION, not a plain span: that observation type is
@@ -181,10 +215,11 @@ class GenAIClient:
             model_parameters={
                 "temperature": temperature,
                 "top_p": top_p,
-                "max_output_tokens": max_output_tokens,
+                "rate_limit_output_reservation": max_output_tokens,
                 # Whether the call was schema-constrained. Worth a dimension:
                 # the unstructured calls are the ones that degenerate.
                 "structured": bool(schema),
+                "thinking_level": _thinking_level.get(),
             },
         ) as span:
             last_error: Exception | None = None
@@ -314,9 +349,11 @@ class GenAIClient:
             "tools": tools,
             "generationConfig": {
                 "temperature": temperature,
-                "maxOutputTokens": max_output_tokens,
             },
         }
+        thinking = self._thinking_config()
+        if thinking:
+            body["generationConfig"]["thinkingConfig"] = thinking
         if system:
             body["systemInstruction"] = {"parts": [{"text": system}]}
 
@@ -335,8 +372,9 @@ class GenAIClient:
             model=self._model,
             model_parameters={
                 "temperature": temperature,
-                "max_output_tokens": max_output_tokens,
+                "rate_limit_output_reservation": max_output_tokens,
                 "n_tools": sum(len(t.get("functionDeclarations", [])) for t in tools),
+                "thinking_level": _thinking_level.get(),
             },
         ) as span:
             await self._limiter.acquire(cost)
@@ -400,8 +438,8 @@ class GenAIClient:
         try:
             return json.loads(raw)
         except json.JSONDecodeError as exc:
-            # Even with a schema, a truncated response (hit maxOutputTokens
-            # mid-object) is invalid JSON. Surface it clearly rather than
+            # Even with a schema, a response truncated at the provider's
+            # model output limit is invalid JSON. Surface it clearly rather than
             # letting a caller crash on a missing key.
             raise LLMError(f"model returned invalid JSON: {raw[:400]}") from exc
 
@@ -677,8 +715,8 @@ def extract_int_list(raw: str, key: str) -> list[int]:
 # cannot help.
 _EMPTY_REASONS = {
     "MAX_TOKENS": (
-        "the model hit its output limit before emitting anything usable. "
-        "Raise max_output_tokens for this call."
+        "the model reached Google's output limit before emitting anything usable. "
+        "The app does not set a per-request output-token cap."
     ),
     # Google stops generation when output starts reproducing memorised training
     # data. In this app it means the question was NOT answerable from the
@@ -689,7 +727,7 @@ _EMPTY_REASONS = {
         "the model began reproducing memorised training text and Google "
         "stopped it. This usually means the question is not answerable from "
         "the retrieved passages, so the model fell back on world knowledge. "
-        "Raising max_output_tokens will not help."
+        "A larger output allowance will not help."
     ),
     "SAFETY": "the response was blocked by a safety filter.",
     "PROHIBITED_CONTENT": "the response was blocked as prohibited content.",

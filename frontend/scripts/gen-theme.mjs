@@ -18,6 +18,7 @@ import { writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
+  Hct,
   argbFromHex,
   hexFromArgb,
   themeFromSourceColor,
@@ -40,16 +41,16 @@ const ACCENTS = [
   // Material 3's own baseline seed, and the app's default. Note this is the
   // one seed where the generated primary equals the seed exactly -- M3's
   // reference palette is built around it.
-  { id: "purple", label: "Purple", seed: "#6750a4" },
-  { id: "teal", label: "Teal", seed: "#0f766e" },
-  { id: "violet", label: "Violet", seed: "#7c4dff" },
-  { id: "amber", label: "Amber", seed: "#b45309" },
-  { id: "olive", label: "Olive", seed: "#3f6212" },
-  { id: "blue", label: "Blue", seed: "#0284c7" }, // what the app shipped with
+  { id: "purple", label: "Purple", seed: "#69559f" },
+  { id: "teal", label: "Teal", seed: "#157069" },
+  { id: "violet", label: "Violet", seed: "#8158f4" },
+  { id: "amber", label: "Amber", seed: "#aa5413" },
+  { id: "olive", label: "Olive", seed: "#3e5d17" },
+  { id: "blue", label: "Blue", seed: "#0e80bb" }, // what the app shipped with
   // Material's own Brown 500. Parley wears this: the three apps share one
   // shell, and a warm neutral reads as a different PLACE at a glance without
   // competing with Research Desk's purple the way another saturated hue would.
-  { id: "brown", label: "Brown", seed: "#795548" },
+  { id: "brown", label: "Brown", seed: "#76564B" },
 ];
 
 // The navigation drawer is a LIGHT surface, which is what stock M3 specifies.
@@ -136,8 +137,16 @@ function surfaceContainers(palettes, dark) {
 function block(scheme, palettes, dark) {
   const lines = [];
   for (const role of ROLES) {
-    const argb = scheme[role];
+    let argb = scheme[role];
     if (argb === undefined) continue;
+    if (dark) {
+      const hct = Hct.fromInt(argb);
+      argb = Hct.from(
+        hct.hue,
+        hct.chroma * 0.65,
+        hct.tone,
+      ).toInt();
+    }
     lines.push(`  --md-${kebab(role)}: ${hexFromArgb(argb)};`);
   }
   for (const [name, value] of Object.entries(surfaceContainers(palettes, dark))) {
@@ -150,6 +159,9 @@ function block(scheme, palettes, dark) {
 function accentBlocks({ id, seed }, isDefault) {
   const theme = themeFromSourceColor(argbFromHex(seed));
   const light = block(theme.schemes.light.toJSON(), theme.palettes, false);
+  // Dark-scheme colors can feel vivid against dark surfaces, so reduce each
+  // role's chroma while preserving its hue and tone. Light colors retain their
+  // full saturation.
   const dark = block(theme.schemes.dark.toJSON(), theme.palettes, true);
   // The default lands on bare `:root` so the app has colours before any
   // attribute is set -- no flash of unstyled palette, and it still works with

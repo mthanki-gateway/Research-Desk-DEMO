@@ -31,10 +31,13 @@
  * minutes once the agent loop is doing real work — unusable for development.
  */
 export type ModelProfile = "gemini" | "gemma";
+export type EffortLevel = "low" | "medium" | "high";
 
 export type TurnSettings = {
   topK: number;
   multiQuery: boolean;
+  /** How broadly the research agent decomposes and follows up on findings. */
+  effort: EffortLevel;
   /** Gather evidence with the tool-calling loop instead of a fixed plan. */
   react: boolean;
   /** Dev-only model override. null = use whatever the server is configured for. */
@@ -50,6 +53,7 @@ export type TurnSettings = {
 export const DEFAULT_TURN_SETTINGS: TurnSettings = {
   topK: 5,
   multiQuery: false,
+  effort: "medium",
   react: true,
   // null, not "gemini": the UI should not assert which model the server runs.
   // Sending an explicit profile on every turn would override a deployment's own
@@ -74,6 +78,10 @@ function readProfile(value: unknown): ModelProfile | null {
   // older build (or a hand-edited one) would otherwise be sent to the server
   // and rejected on every turn.
   return value === "gemini" || value === "gemma" ? value : null;
+}
+
+function readEffort(value: unknown): EffortLevel {
+  return value === "low" || value === "high" ? value : "medium";
 }
 
 function readTopK(value: unknown, fallback: number): number {
@@ -109,6 +117,7 @@ export function loadTurnSettings(): TurnSettings {
     return {
       topK: readTopK(s.topK, DEFAULT_TURN_SETTINGS.topK),
       multiQuery: readBool(s.multiQuery, DEFAULT_TURN_SETTINGS.multiQuery),
+      effort: readEffort(s.effort),
       react: readBool(s.react, DEFAULT_TURN_SETTINGS.react),
       modelProfile: readProfile(s.modelProfile),
     };
