@@ -79,6 +79,10 @@ services:
       # One-time migration switch; see config.py. The pre-auth corpus has
       # already been adopted, so this stays off.
       ALLOW_CLAIM_UNOWNED: ${ALLOW_CLAIM_UNOWNED:-false}
+      # This local stack uses its configured provider keys as fallbacks.
+      # REQUIRE_USER_KEYS=true would hide the configured Serper key from every
+      # user who has not added their own key, silently disabling web search.
+      REQUIRE_USER_KEYS: ${REQUIRE_USER_KEYS:-false}
       # Observability. Empty = tracing off, and the app behaves exactly as it
       # did before Langfuse existed. Get these from the project settings page
       # at http://localhost:3001 after `docker compose --profile obs up -d`.
