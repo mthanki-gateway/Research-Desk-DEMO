@@ -4,6 +4,14 @@ let worker: Worker | null = null;
 let ready = false;
 let enabled = false;
 let listener: ((event: TurnEvent) => void) | null = null;
+/** Optional: told Silero's speech probability on every 32 ms frame. Used by
+ *  Duplex, which needs to know when speech STARTS and when a pause begins --
+ *  the endpoint alone arrives too late for an early answer. */
+let speechListener: ((probability: number) => void) | null = null;
+
+export function onSpeechProbability(cb: ((probability: number) => void) | null): void {
+  speechListener = cb;
+}
 /** Held here because `attach` runs after an await and needs the value the
  *  caller asked for, not whatever the default happens to be. */
 let chosen: Patience = "balanced";
@@ -190,7 +198,10 @@ function attach(onEvent: (event: TurnEvent) => void): void {
     // `speech` is deliberately dropped. The button's ring already shows input
     // level, and a second, differently-behaved liveness indicator beside it
     // explains nothing.
-    if (message.type === "speech") return;
+    if (message.type === "speech") {
+      speechListener?.(message.probability);
+      return;
+    }
     if (!enabled) return;
     listener?.(message);
   };

@@ -33,7 +33,7 @@ PROVIDERS: dict[str, dict[str, Any]] = {
     "gemini": {
         "label": "Google Gemini",
         "setting": "google_api_key",
-        "features": ["chat", "library", "atlas", "parley", "lab"],
+        "features": ["chat", "library", "atlas", "parley", "lab", "duplex"],
         "powers": "Chat answers, document embeddings, Atlas, the knowledge graph, and Parley's live voice.",
         "url": "https://aistudio.google.com/app/apikey",
         "steps": [

@@ -361,6 +361,58 @@ class Settings(BaseSettings):
     # backstop for when it does not comply.
     voice_answer_max_chars: int = 1_200
 
+    # ---- Parley > Duplex: speculative streaming, LiveKit-style ----------------
+    #
+    # Tried in order, first with a key and not cooling down. Groq leads because
+    # it is the only free tier fast enough (qwen3.8-27b: ~0.7s to first token,
+    # measured) and the Gemini free tier is slow today (3.1-flash-lite ~7s,
+    # gemma-4-26b ~4s because it thinks first). gemma-4-31b-it is NOT in the
+    # default chain: it answers HTTP 500 on every call on this key (measured
+    # again when this was written). Put `gemini:gemma-4-31b-it` anywhere in the
+    # chain via DUPLEX_LLM_CHAIN and it will be skipped for a while after each
+    # failure rather than costing a turn.
+    duplex_llm_chain: str = (
+        "groq:qwen/qwen3.8-27b,"
+        "groq:openai/gpt-oss-120b,"
+        "gemini:gemini-3.1-flash-lite,"
+        "gemini:gemma-4-26b-a4b-it"
+    )
+    # SPEECH TO TEXT. "auto" picks Groq Whisper when there is a Groq key and
+    # Gemini's live transcriber otherwise. Measured: Gemini's transcribe-live
+    # sends the text only AFTER the speech ends (~2s later), so nothing can be
+    # answered early from it; Whisper takes ~0.25s per pass on a short clip,
+    # which is what makes the early answer possible. Whisper's free limit is
+    # 20 requests/minute and 2000/day, so passes are paced (see the class).
+    duplex_stt: Literal["auto", "groq", "gemini"] = "auto"
+    duplex_stt_model: str = "models/gemini-3.5-transcribe-live"
+    duplex_whisper_interval_s: float = 2.6
+    duplex_whisper_per_minute: int = 18
+    # THE VOICE. Gemini's batch TTS models took 4.5s for a single word on this
+    # key; the Live model streams its first audio in ~0.8s (measured). It is a
+    # chat model told to read a script, which it does -- checked against its
+    # own transcript -- and a pool of two lets the next sentence be generated
+    # while the previous one plays. Falls back to the batch TTS if it cannot
+    # connect.
+    duplex_tts: Literal["live", "batch"] = "live"
+    duplex_tts_model: str = "models/gemini-3.8-live"
+    duplex_tts_sessions: int = 2
+    # Silence before the browser asks for an early answer, ahead of the turn
+    # detector's own (longer) wait.
+    duplex_pause_ms: int = 250
+    duplex_max_tokens: int = 220
+    # The SPECULATIVE budget. Groq's free tier is 1000 requests/day and 8000
+    # tokens/minute per model; an answer rewritten at every pause would spend
+    # it in minutes. Speculation is skipped when the bucket is thin; the final
+    # answer at the end of a turn is never skipped.
+    duplex_requests_per_minute: int = 20
+    duplex_tokens_per_minute: int = 6_000
+    duplex_max_speculations: int = 3
+    # How long the transcript must hold still before it is worth an answer.
+    duplex_debounce_ms: int = 350
+    # After the speaker finishes, how long to wait for the transcript's last
+    # words before answering what we have.
+    duplex_settle_ms: int = 1_600
+
     # Query rewriting stays on Gemma, deliberately. It is the one call where
     # throughput beats quality: multi-query fires N rewrites per turn, the
     # output is short phrases rather than prose, and Gemma's 30 rpm is the

@@ -243,3 +243,63 @@ dependency. The guest page (`/howl/<token>`) renders outside the app shell.
   to a text pass over the transcript afterwards, because that transcript is a
   separate and lossier recognition of the same sound -- asking it to describe
   how somebody sounded would be inventing from a bad reading.
+
+## Duplex
+
+A fourth door that is **not** the native-audio model: speech-to-text, a fast
+language model and a streaming voice, wired the way LiveKit wires them. It
+lives at `/parley/duplex` (`api/duplex.py`, `services/duplex.py`,
+`parley/duplexSession.ts`) and shares nothing with `live.MODES` — different
+pipeline, no tools, no stored conversation yet.
+
+```
+mic ──16 kHz──▶ server ──▶ Groq Whisper (passes while you talk)
+ │                              │ transcript
+ │ Silero VAD, in the browser   ▼
+ ├─ speech_start ──▶ new turn / "you weren't done" / barge-in
+ ├─ pause (250 ms) ─▶ transcript up to date NOW, start an answer for it
+ └─ endpoint ──────▶ same words? adopt the answer already under way
+                     different?  discard it, write the right one
+                                │ sentences, as they stream
+                                ▼
+                   Gemini Live as a streaming voice ──24 kHz──▶ speaker
+```
+
+**The early answer is the pause, not the partials.** Measured on this key:
+Gemini's `transcribe-live` returns its text only after the speech ends (~2 s
+later), so nothing can be answered early from it. Groq Whisper takes ~0.25 s a
+pass, so at the 250 ms pause the transcript is complete and the answer is
+already being written when Smart Turn confirms the end 350 ms later. Mid-speech
+partials also start answers (capped, `DUPLEX_MAX_SPECULATIONS`) but are almost
+always discarded; they are there because "constantly generating" was the brief,
+and the cap is what keeps them inside Groq's free 1000 requests a day.
+
+**What was measured, and chosen because of it**
+
+| | |
+|---|---|
+| LLM first token | Groq `qwen3.8-27b` 0.1–0.7 s · `gpt-oss-120b` 1.1 s · Gemini 3.1 flash-lite ~7 s · `gemma-4-26b` ~4 s (it thinks first) |
+| `gemma-4-31b-it` | HTTP 500 on every call on this key. Not in the default chain |
+| Free limits | Groq: 1000 requests/day, 8000 tokens/min per model. Whisper: **20/min**, 2000/day |
+| TTS | Gemini batch TTS: **4.5 s for one word**. Gemini Live as a voice: **first audio ~0.8 s** |
+| Groq Orpheus TTS | Needs terms accepted in the Groq console first (400 until then) |
+| End to end | speech end → first sound ≈ **2 s** (was ≈ 6 s with batch TTS) |
+
+**Things that fail quietly**
+
+- *The voice is a chat model told to read a script.* It reads questions
+  aloud rather than answering them (checked against its own transcript), but
+  that is a prompt, not a guarantee. `DUPLEX_TTS=batch` switches to Gemini's TTS
+  models, slower and more literal.
+- *A cancelled script leaves audio in flight*, so a Live voice session that was
+  interrupted is closed and replaced, never reused.
+- *Whisper invents "Thank you." from silence*, so audio reaches it only while
+  the VAD says someone is speaking.
+- *The transcript can change before the first sound.* The TTS call is the
+  cushion: the answer's words are compared with the transcript once more just
+  before the first audio is sent, and restarted if they differ.
+- *Speaking again inside the settle window means you were not done*; the
+  transcript is kept and listening resumes, rather than starting a new turn.
+
+Tune with `DUPLEX_LLM_CHAIN`, `DUPLEX_STT`, `DUPLEX_TTS`, `DUPLEX_MAX_SPECULATIONS`
+and `DUPLEX_WHISPER_INTERVAL_S` (see `config.py`).

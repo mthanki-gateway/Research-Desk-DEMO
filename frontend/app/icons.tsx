@@ -90,6 +90,14 @@ export const IconHowler = (p: Props) => (
   </Svg>
 );
 
+/** Duplex: two waveforms passing in opposite directions. */
+export const IconDuplex = (p: Props) => (
+  <Svg {...p}>
+    <path d="M3 8h2l1.5-3 2 6 1.5-3H13" />
+    <path d="M21 16h-2l-1.5 3-2-6-1.5 3H11" />
+  </Svg>
+);
+
 /** Rename. */
 export const IconEdit = (p: Props) => (
   <Svg {...p}>

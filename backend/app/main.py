@@ -16,6 +16,7 @@ from app.api import (
     settings as settings_api,
     chat,
     documents,
+    duplex as duplex_api,
     evaluation,
     howler,
     live,
@@ -255,6 +256,7 @@ app.include_router(sessions.router)
 app.include_router(evaluation.router)
 app.include_router(profile.router)
 app.include_router(playground.router)
+app.include_router(duplex_api.router)
 app.include_router(atlas.router)
 
 

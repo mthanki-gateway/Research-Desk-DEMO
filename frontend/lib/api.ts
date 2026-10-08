@@ -1319,6 +1319,27 @@ export type LiveStatus = {
   output_rate: number;
 };
 
+export type DuplexStatus = {
+  enabled: boolean;
+  /** Which service transcribes: Groq Whisper answers early, Gemini's cannot. */
+  stt: "groq" | "gemini" | null;
+  tts: "live" | "batch" | null;
+  chain: string[];
+  usable: string[];
+  voices: VoiceOption[];
+  default_voice: string;
+  max_speculations: number;
+  pause_ms: number;
+  input_rate: number;
+  output_rate: number;
+};
+
+export async function getDuplexStatus(): Promise<DuplexStatus> {
+  const res = await authedFetch("/duplex/status", { cache: "no-store" });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
 export async function getLiveStatus(): Promise<LiveStatus> {
   const res = await authedFetch("/live/status", { cache: "no-store" });
   if (!res.ok) throw new Error(await detail(res));

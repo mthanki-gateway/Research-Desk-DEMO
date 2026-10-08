@@ -134,3 +134,12 @@ Deployed builds are unaffected: they build the image from the committed
   container still running yesterday's configuration is one request away from
   being obvious.
 - Never commit or push unless asked in that message.
+
+### Duplex is a fourth door, and NOT a fifth mode
+
+`/parley/duplex` is a different pipeline (speech-to-text → fast LLM → streaming
+voice, with the answer started before the speaker finishes), so it does not go
+through `live.MODES` and does not share the audio-to-audio socket. It shares the
+turn detector (`turnDetector.ts`) and the key store. Do not add it to `MODES`;
+and do not "simplify" its `pause` event away — the early answer is that event.
+See `docs/parley.md` → Duplex for what was measured.
