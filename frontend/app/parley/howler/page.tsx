@@ -1315,13 +1315,19 @@ function LinkRow({
   invite: HowlerInvite;
   onRevoke: (inviteId: string) => void;
 }) {
+  // WHICH DOOR. The same link, two interfaces, so one brief can be A/B tested:
+  // `/howl/<token>` is the audio-to-audio interviewer, `/howl/d/<token>` the
+  // Duplex one (speech to text, a fast model, a streaming voice). Both resolve
+  // to the same invite, so a link opened through either finds the same
+  // conversation; which one held the interview is stamped on the result.
+  const [door, setDoor] = useState<"standard" | "duplex">("standard");
   const [copied, setCopied] = useState(false);
   // Read at render, not at module scope: there is no `window` on the server,
   // and the origin is the one part of this link the page cannot be told.
   const url =
     typeof window === "undefined"
       ? ""
-      : `${window.location.origin}/howl/${invite.token}`;
+      : `${window.location.origin}/howl/${door === "duplex" ? "d/" : ""}${invite.token}`;
 
   async function copy() {
     try {
@@ -1360,7 +1366,48 @@ function LinkRow({
         >
           {STATUS[invite.status]}
         </span>
+        {invite.result?.profile?.interface === "duplex" && (
+          <span
+            className="md-label-medium shrink-0 rounded-[var(--md-shape-full)] px-2.5 py-1"
+            style={{ background: "var(--md-tertiary-container)", color: "var(--md-on-tertiary-container)" }}
+            title="This interview was held through the Duplex interface"
+          >
+            Duplex
+          </span>
+        )}
       </div>
+
+      {!dead && (
+        <div
+          role="radiogroup"
+          aria-label="Interface"
+          className="mt-3 flex w-fit gap-1 rounded-[var(--md-shape-full)] p-1"
+          style={{ background: "var(--md-surface-container-high)" }}
+        >
+          {(
+            [
+              ["standard", "Standard", "Audio-to-audio model"],
+              ["duplex", "Duplex", "Speech-to-text, fast model, streaming voice"],
+            ] as const
+          ).map(([id, label, hint]) => (
+            <button
+              key={id}
+              type="button"
+              role="radio"
+              aria-checked={door === id}
+              title={hint}
+              onClick={() => setDoor(id)}
+              className="md-label-medium md-state rounded-[var(--md-shape-full)] px-3 py-1"
+              style={{
+                background: door === id ? "var(--md-secondary-container)" : "transparent",
+                color: door === id ? "var(--md-on-secondary-container)" : "var(--md-on-surface-variant)",
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {!dead && (
         <div className="mt-3 flex items-center gap-2">

@@ -23,6 +23,8 @@ type Turn = {
   ms?: number;
   early?: boolean;
   model?: string;
+  tools?: string[];
+  sources?: { label: string; kind: string; url: string | null }[];
 };
 
 type DraftLog = { id: number; state: string; text: string; model?: string; reason?: string };
@@ -59,6 +61,7 @@ export default function DuplexSurface() {
   const [partial, setPartial] = useState("");
   const [turns, setTurns] = useState<Turn[]>([]);
   const [speaking, setSpeaking] = useState("");
+  const [searching, setSearching] = useState("");
   const [drafts, setDrafts] = useState<DraftLog[]>([]);
   const [stt, setStt] = useState("");
   const [tts, setTts] = useState("");
@@ -164,6 +167,19 @@ export default function DuplexSurface() {
             pending.current.model = e.model;
           }
           break;
+        case "tool":
+          setSearching(e.name === "search_web" ? `Searching the web: ${e.query}` : `Looking in your documents: ${e.query}`);
+          if (pending.current) pending.current.tools = [...(pending.current.tools ?? []), e.name];
+          break;
+        case "sources":
+          if (pending.current) {
+            const seen = new Set((pending.current.sources ?? []).map((s) => s.url ?? s.label));
+            pending.current.sources = [
+              ...(pending.current.sources ?? []),
+              ...e.sources.filter((s) => !seen.has(s.url ?? s.label)),
+            ];
+          }
+          break;
         case "resumed":
           setPhase("listening");
           pending.current = null;
@@ -176,6 +192,7 @@ export default function DuplexSurface() {
           }
           pending.current = null;
           setSpeaking("");
+          setSearching("");
           setPhase("listening");
           break;
         }
@@ -339,7 +356,7 @@ export default function DuplexSurface() {
               style={{ color: partial ? "var(--md-on-surface)" : "var(--md-on-surface-variant)" }}
               aria-live="polite"
             >
-              {partial || (speaking ? speaking : live ? "…" : "")}
+              {partial || (speaking ? speaking : searching || (live ? "…" : ""))}
             </div>
           </div>
 
@@ -366,6 +383,23 @@ export default function DuplexSurface() {
                     style={{ background: "var(--md-surface-container-high)" }}
                   >
                     {t.assistant}
+                    {t.sources && t.sources.length > 0 && (
+                      <span className="mt-1.5 flex flex-wrap gap-1.5">
+                        {t.sources.slice(0, 4).map((s) => (
+                          <a
+                            key={s.url ?? s.label}
+                            href={s.url ?? undefined}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="md-label-small max-w-[14rem] truncate rounded-[var(--md-shape-full)] px-2 py-0.5"
+                            style={{ background: "var(--md-surface-container-highest)", color: "var(--md-on-surface-variant)" }}
+                          >
+                            {s.kind === "web" ? "web · " : ""}
+                            {s.label}
+                          </a>
+                        ))}
+                      </span>
+                    )}
                     {t.ms != null && (
                       <span
                         className="md-label-small ml-2 whitespace-nowrap"

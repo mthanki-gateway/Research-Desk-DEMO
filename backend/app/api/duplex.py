@@ -25,13 +25,15 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import uuid
 
 import structlog
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 
+from app.agent import tools as agent_tools
 from app.auth import User, _verify, current_user
 from app.config import get_settings
-from app.services import duplex, keys, voice
+from app.services import duplex, invites, keys, live, profile, voice
 
 log = structlog.get_logger()
 
@@ -59,16 +61,72 @@ async def status(user: User = Depends(current_user)) -> dict:
         "default_voice": s.voice_default,
         "max_speculations": s.duplex_max_speculations,
         "pause_ms": s.duplex_pause_ms,
+        "tools": [d["name"] for d in available_tools()],
         "input_rate": duplex.INPUT_RATE,
         "output_rate": duplex.OUTPUT_RATE,
     }
 
 
+# Tools that make no sense without a stored chat session behind them.
+_NOT_HERE = {agent_tools.REMEMBER_PREFERENCE, agent_tools.CONVERSATION_STATS}
+MAX_TOOL_CALLS_PER_TURN = 4
+
+
+def available_tools() -> list[dict]:
+    """The typed agent's own tools (web, documents), as plain declarations."""
+    declared = agent_tools.tool_specs()[0]["functionDeclarations"]
+    return [d for d in declared if d["name"] not in _NOT_HERE]
+
+
+def interview_tools() -> list[dict]:
+    """What the interviewer may call: the web for placing a name, and the end."""
+    allowed = set(live.SPOKEN_TOOLS["howler"])
+    declared = [d for d in available_tools() if d["name"] in allowed]
+    return [*declared, live.END_ONLY]
+
+
+INTERVIEW_ADDENDUM = """
+
+<spoken_here>
+Everything the interviewer writes is spoken aloud the instant it is written. One question at a time, at most two short sentences, no lists or markdown. When something needs placing, say a few words first ("One second.") and then use search_web. When the interview is over, say goodbye in one sentence and call end_interview.
+</spoken_here>
+"""
+
+
 class Session:
     """One connected speaker, and every answer in flight for them."""
 
-    def __init__(self, ws: WebSocket, voice_name: str) -> None:
+    def __init__(
+        self,
+        ws: WebSocket,
+        voice_name: str,
+        owner_id: str | None = None,
+        interview: dict | None = None,
+    ) -> None:
         self.ws = ws
+        self.owner_id = owner_id
+        # A Howler interview: somebody holding a link, with a stored
+        # conversation, a schema and an interviewer prompt. None = plain Duplex.
+        self.interview = interview
+        self.chat_id: uuid.UUID | None = interview["chat_id"] if interview else None
+        self.turns = 0
+        self.finishing = False
+        self._question = ""
+        self._clip: bytes | None = None
+        self._pre = bytearray()
+        self._turn_pcm = bytearray()
+        if interview:
+            self.tools = interview_tools()
+            self.system = interview["system"]
+        else:
+            self.tools = available_tools()
+            self.system = duplex.SYSTEM + (
+                duplex.TOOLS_PROMPT if self.tools else duplex.NO_TOOLS_PROMPT
+            )
+        # What a tool returned for these exact arguments this turn. Speculative
+        # drafts repeat each other's searches, and each one is a metered call.
+        self._tool_cache: dict[str, str] = {}
+        self._tool_calls = 0
         s = get_settings()
         self.s = s
         self.voice = voice_name if voice_name in {v["id"] for v in voice.VOICES} else s.voice_default
@@ -92,6 +150,35 @@ class Session:
         self._pass: asyncio.Task | None = None
         self._changed = asyncio.Event()
         self._send_lock = asyncio.Lock()
+
+    # ---- the participant's own audio ------------------------------------------
+
+    def hear(self, chunk: bytes) -> None:
+        """Keep the turn's audio for the post-call pass (interviews only)."""
+        if not self.interview:
+            return
+        if self.state in ("listening", "settling"):
+            self._turn_pcm.extend(chunk)
+        else:
+            self._pre.extend(chunk)
+            del self._pre[: max(0, len(self._pre) - duplex.WhisperTranscriber.PRE_ROLL_BYTES)]
+
+    async def _save_turn(self, answer: str, tools: list[str] | None = None) -> None:
+        """Store one exchange: what they said, what was spoken, their audio.
+
+        The participant's words are the live transcript for now; the post-call
+        pass re-transcribes the clip properly and replaces them, keeping this
+        as `live_heard`. The interviewer's words are stored exactly as spoken.
+        """
+        if not self.chat_id:
+            return
+        clip, self._clip = self._clip, None
+        question, self._question = self._question, ""
+        if clip is not None and len(clip) < 12_800:  # under 0.4 s: not speech
+            clip = None
+        await live.save_turn(self.chat_id, question, answer, [], tools or [], clip=clip)
+        if question:
+            self.turns += 1
 
     # ---- outbound -----------------------------------------------------------
 
@@ -137,6 +224,116 @@ class Session:
         if self.state == "listening":
             await self.draft_for(self.transcript, final=False, urgent=urgent)
 
+    # ---- tools ---------------------------------------------------------------
+
+    async def run_tool(self, call: duplex.ToolCall) -> str:
+        """Execute one tool for a draft. Never raises; cached per turn."""
+        if call.name == profile.END_TOOL:
+            return await self._end_interview()
+        key = f"{call.name}:{json.dumps(call.args, sort_keys=True)}"
+        if key in self._tool_cache:
+            return self._tool_cache[key]
+        if self._tool_calls >= MAX_TOOL_CALLS_PER_TURN:
+            return "No more lookups are allowed this turn. Answer with what you have."
+        self._tool_calls += 1
+        await self.send(
+            type="tool", name=call.name, query=str(call.args.get("query") or call.args)[:120]
+        )
+        try:
+            hits, observation = await agent_tools.run_tool(
+                call.name,
+                dict(call.args),
+                top_k=5,
+                document_ids=None,
+                owner_id=self.owner_id,
+                session_id=None,
+            )
+        except Exception as exc:  # noqa: BLE001 - the model can read a failure
+            log.warning("duplex_tool_failed", tool=call.name, error=str(exc)[:160])
+            return f"The {call.name} tool failed ({type(exc).__name__}). Say so plainly."
+        sources = []
+        for h in hits[:5]:
+            sources.append(
+                {
+                    "label": getattr(h, "filename", ""),
+                    "kind": getattr(h, "source", "document"),
+                    "url": getattr(h, "url", None),
+                }
+            )
+        if sources:
+            await self.send(type="sources", sources=sources)
+        self._tool_cache[key] = observation
+        return observation
+
+    async def _end_interview(self) -> str:
+        if not self.chat_id:
+            return "There is no interview to end."
+        # The same guard the audio model has: not on the turn the profile
+        # completed, because the answer to "anything to add?" is the part the
+        # participant chose to say.
+        if not await live._may_end(self.chat_id, self.turns, self.interview["fields"]):
+            return (
+                "NOT YET. You have just asked whether they want to add anything "
+                "and they have not answered. Wait for their reply first."
+            )
+        await live.store_summary(self.chat_id, "", None)
+        self.finishing = True
+        return "The interview is closed. Say a brief goodbye in one sentence and stop asking questions."
+
+    async def greet(self) -> None:
+        """The interviewer speaks first, as it does in the audio-to-audio mode."""
+        if not self.interview or self.state != "idle" or (self._turn and not self._turn.done()):
+            return
+        cue = (
+            "(The participant has rejoined after a dropped connection. Welcome "
+            "them back in one sentence and carry on from where you left off.)"
+            if self.history
+            else "(The participant has just joined. Greet them and begin the interview.)"
+        )
+        self._turn = asyncio.create_task(self._greeting(cue))
+
+    async def _greeting(self, cue: str) -> None:
+        try:
+            self.t_endpoint = time.monotonic()
+            self.state = "speaking"
+            self.spoken = []
+            draft = duplex.Draft(for_text=cue)
+            # The cue is the model's instruction for THIS turn only; it is not
+            # kept in the history, which holds what was actually said.
+            draft.task = asyncio.create_task(
+                duplex.write_draft(
+                    draft,
+                    self.chain,
+                    self.history,
+                    tools=self.tools or None,
+                    run_tool=self.run_tool,
+                    system=self.system,
+                )
+            )
+            self.draft = draft
+            outcome = await self._speak(draft, ready_at_endpoint=False, synthetic=True)
+            if outcome == "done":
+                await self._save_turn(" ".join(self.spoken), draft.tools)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.exception("duplex_greeting_failed")
+            await self.send(type="error", detail=keys.explain(exc, "gemini"))
+        finally:
+            if self.state == "speaking":
+                self.state = "idle"
+            await self.send(type="turn_end")
+            if self.finishing:
+                await self.send(type="finished")
+
+    async def finish(self) -> None:
+        """The PARTICIPANT ended it: same bookkeeping as the audio mode."""
+        if not self.chat_id:
+            return
+        await self.interrupt(reason="finish")
+        await live.finish_interview(self.chat_id)
+        await self.send(type="finished")
+
     # ---- drafts --------------------------------------------------------------
 
     async def draft_for(self, text: str, *, final: bool, urgent: bool = False) -> bool:
@@ -169,7 +366,16 @@ class Session:
 
         self.discard_draft("newer words")
         draft = duplex.Draft(for_text=text)
-        draft.task = asyncio.create_task(duplex.write_draft(draft, self.chain, self.history))
+        draft.task = asyncio.create_task(
+            duplex.write_draft(
+                draft,
+                self.chain,
+                self.history,
+                tools=self.tools or None,
+                run_tool=self.run_tool if self.tools else None,
+                system=self.system,
+            )
+        )
         self.draft = draft
         await self.send(type="draft", state="started", text=text, final=final)
         return True
@@ -201,11 +407,15 @@ class Session:
             await self.interrupt(reason="barge-in")
         self.state = "listening"
         self.speculations = 0
+        self._tool_cache = {}
+        self._tool_calls = 0
         self.transcript = ""
         self.spoken = []
         self._urgent = False
         self._changed.clear()
         self.discard_draft("new turn")
+        self._turn_pcm = bytearray(self._pre)
+        self._pre.clear()
         if self.transcriber:
             await self.transcriber.speech_start()
 
@@ -224,6 +434,7 @@ class Session:
             return
         self.state = "settling"
         self.t_endpoint = time.monotonic()
+        self._clip = bytes(self._turn_pcm)
         if self._debounce and not self._debounce.done():
             self._debounce.cancel()
         self._turn = asyncio.create_task(self._answer())
@@ -234,6 +445,8 @@ class Session:
                 task.cancel()
         self.discard_draft(reason)
         if self.state == "speaking":
+            if self.interview and (self._question or self.spoken):
+                asyncio.create_task(self._save_turn(" ".join(self.spoken)))
             if self.spoken:
                 # Remember what was actually said, not what was planned.
                 self.history.append({"role": "assistant", "content": " ".join(self.spoken)})
@@ -281,6 +494,7 @@ class Session:
 
         await self.send(type="final", text=text)
         self.history.append({"role": "user", "content": text})
+        self._question = text
 
         for _attempt in range(3):
             had_draft = bool(self.draft and duplex.same_words(self.draft.for_text, text))
@@ -298,6 +512,8 @@ class Session:
             self.state = "speaking"
             outcome = await self._speak(draft, ready_at_endpoint=ready)
             if outcome != "restart":
+                if self.interview:
+                    await self._save_turn(" ".join(self.spoken), draft.tools)
                 break
             text = self.transcript.strip()
             self.history[-1] = {"role": "user", "content": text}
@@ -307,6 +523,8 @@ class Session:
         if self.state == "speaking":
             self.state = "idle"
         await self.send(type="turn_end")
+        if self.finishing:
+            await self.send(type="finished")
 
     async def _pump(self, piece: str, out: asyncio.Queue, sem: asyncio.Semaphore) -> None:
         """Synthesise one piece into `out`: audio chunks, then None (or an error)."""
@@ -333,7 +551,9 @@ class Session:
         except Exception as exc:  # noqa: BLE001
             out.put_nowait(exc)
 
-    async def _speak(self, draft: duplex.Draft, *, ready_at_endpoint: bool) -> str:
+    async def _speak(
+        self, draft: duplex.Draft, *, ready_at_endpoint: bool, synthetic: bool = False
+    ) -> str:
         """Speak a draft's pieces as they arrive. "done" | "restart" | "failed"."""
         sem = asyncio.Semaphore(2)
         queue: asyncio.Queue = asyncio.Queue()
@@ -367,7 +587,7 @@ class Session:
                         # By the time the first sound exists the transcript has
                         # had time to finish. If it changed, this answer is for
                         # the wrong question -- say nothing, write the right one.
-                        if not duplex.same_words(draft.for_text, self.transcript):
+                        if not synthetic and not duplex.same_words(draft.for_text, self.transcript):
                             producer.cancel()
                             return "restart"
                         await self.send(
@@ -407,17 +627,83 @@ class Session:
             await self.live_voice.close()
 
 
+async def live_history(chat_id: uuid.UUID) -> list[dict]:
+    """The last few exchanges of a conversation, so a rejoined call continues."""
+    from sqlalchemy import select
+
+    from app.db.models import Message
+    from app.db.session import SessionLocal
+
+    async with SessionLocal() as db:
+        rows = list(
+            (
+                await db.execute(
+                    select(Message)
+                    .where(Message.session_id == chat_id)
+                    .order_by(Message.created_at.desc())
+                    .limit(12)
+                )
+            ).scalars()
+        )
+    return [
+        {"role": "user" if m.role.value == "user" else "assistant", "content": m.content}
+        for m in reversed(rows)
+        if (m.content or "").strip() and m.content != "(nothing intelligible)"
+    ]
+
+
 @router.websocket("/duplex/ws")
 async def duplex_socket(
     ws: WebSocket,
     token: str = Query(default=""),
     voice_name: str = Query(default=""),
+    invite: str = Query(default=""),
 ) -> None:
     await ws.accept()
 
     settings = get_settings()
     user: User | None
-    if not settings.auth_enabled:
+    interview: dict | None = None
+    if invite:
+        # A guest on a Howler link: resolved by the invite, never as a person,
+        # exactly as in the audio-to-audio socket. The conversation, schema and
+        # keys all come from the project behind it.
+        try:
+            row, project = await invites.claim(invite)
+        except invites.InviteError as exc:
+            await ws.send_text(json.dumps({"type": "error", "detail": str(exc)}))
+            await ws.close(code=4403)
+            return
+        from app.api.live import _GuestUser
+
+        user = _GuestUser(project.owner_id)  # type: ignore[assignment]
+        await keys.bind(project.owner_id)
+        chat = await live.open_conversation(
+            project.owner_id, str(row.session_id) if row.session_id else None, "howler"
+        )
+        fields = list(project.fields or [])
+        vocabulary = list(project.vocabulary or [])
+        participant = row.participant or project.participant or ""
+        await live.adopt_project(
+            chat.id,
+            project.id,
+            project.brief or "",
+            participant,
+            fields,
+            row.id,
+            vocabulary,
+            (row.label or "").strip() or project.title or "",
+        )
+        await live.mark_interface(chat.id, "duplex")
+        interview = {
+            "chat_id": chat.id,
+            "fields": fields,
+            "system": live._system(
+                "howler", project.brief or "", participant, vocabulary, fields
+            )
+            + INTERVIEW_ADDENDUM,
+        }
+    elif not settings.auth_enabled:
         from app.auth import ANONYMOUS
 
         user = ANONYMOUS
@@ -431,7 +717,8 @@ async def duplex_socket(
         await ws.close(code=4401)
         return
 
-    await keys.bind(user.owner_id)
+    if not interview:
+        await keys.bind(user.owner_id)
 
     async def refuse(detail: str) -> None:
         await ws.send_text(json.dumps({"type": "error", "detail": detail}))
@@ -450,7 +737,9 @@ async def duplex_socket(
         )
         return
 
-    session = Session(ws, voice_name)
+    session = Session(ws, voice_name, user.owner_id, interview)
+    if interview:
+        session.history = await live_history(interview["chat_id"])
     # Both open together: each takes about a second to connect.
     session.transcriber, session.live_voice = await asyncio.gather(
         duplex.start_transcriber(session.on_text), duplex.start_voice(session.voice)
@@ -473,6 +762,7 @@ async def duplex_socket(
                 break
             chunk = message.get("bytes")
             if chunk:
+                session.hear(chunk)
                 t = session.transcriber
                 await t.feed(chunk)
                 # The live STT died mid-session: carry on with Whisper.
@@ -497,6 +787,10 @@ async def duplex_socket(
                 await session.endpoint()
             elif kind == "interrupt":
                 await session.interrupt()
+            elif kind == "greet":
+                await session.greet()
+            elif kind == "finish":
+                await session.finish()
     except WebSocketDisconnect:
         pass
     finally:

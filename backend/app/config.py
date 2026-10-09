@@ -361,6 +361,18 @@ class Settings(BaseSettings):
     # backstop for when it does not comply.
     voice_answer_max_chars: int = 1_200
 
+    # ---- Parley > Manks: a bot that sits in a meeting ---------------------------
+    #
+    # The bot is a separate container (bot/manks) that holds NO provider keys.
+    # It authenticates to this API with this secret and nothing else; unset, the
+    # whole feature reports itself unavailable and the bot endpoints refuse.
+    manks_bot_secret: str = ""
+    manks_bot_name: str = "Manks (notetaker)"
+    # Each recording segment is a complete file. Two minutes balances a crash
+    # losing little against one transcription request per segment (Groq's free
+    # Whisper is 20 a minute and 2000 a day).
+    manks_segment_seconds: int = 120
+
     # ---- Parley > Duplex: speculative streaming, LiveKit-style ----------------
     #
     # Tried in order, first with a key and not cooling down. Groq leads because

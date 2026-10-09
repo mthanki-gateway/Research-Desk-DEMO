@@ -48,7 +48,7 @@ SUBJECT = "conversation"
 
 # Profile keys that describe the SESSION rather than the person. They survive
 # a re-run; everything else is rewritten from the transcript.
-_KEEP = ("ended", "ended_by", "voice")
+_KEEP = ("ended", "ended_by", "voice", "interface")
 
 SYSTEM = """<role>
 The assistant reads the transcript of a spoken interview and writes the \

@@ -1642,3 +1642,113 @@ textarea:focus-visible {
     transform: scale(1.04);
   }
 }
+
+/* ---- Seek / volume bar ------------------------------------------------------
+   A thin line with the played part in the primary colour and a thumb that only
+   appears when the bar is touched, as in a music player. `--p` is the played
+   percentage, set by the component. */
+@layer components {
+  .md-seek {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 20px;
+    margin: 0;
+    background: transparent;
+    cursor: pointer;
+    --p: 0%;
+  }
+  .md-seek:focus-visible {
+    outline: 2px solid var(--md-primary);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  .md-seek::-webkit-slider-runnable-track {
+    height: 4px;
+    border-radius: 2px;
+    background: linear-gradient(
+      to right,
+      var(--md-primary) var(--p),
+      var(--md-surface-container-highest, var(--md-outline-variant)) var(--p)
+    );
+  }
+  .md-seek::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px;
+    height: 14px;
+    margin-top: -5px;
+    border-radius: 50%;
+    background: var(--md-primary);
+    transform: scale(0);
+    transition: transform 120ms var(--md-ease-standard, ease);
+  }
+  .md-seek:hover::-webkit-slider-thumb,
+  .md-seek:focus-visible::-webkit-slider-thumb,
+  .md-seek:active::-webkit-slider-thumb,
+  .md-seek[data-active="true"]::-webkit-slider-thumb {
+    transform: scale(1);
+  }
+  .md-seek:hover::-webkit-slider-runnable-track {
+    height: 6px;
+    margin-top: -1px;
+  }
+  .md-seek::-moz-range-track {
+    height: 4px;
+    border-radius: 2px;
+    background: var(--md-surface-container-highest, var(--md-outline-variant));
+  }
+  .md-seek::-moz-range-progress {
+    height: 4px;
+    border-radius: 2px;
+    background: var(--md-primary);
+  }
+  .md-seek::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border: 0;
+    border-radius: 50%;
+    background: var(--md-primary);
+    transform: scale(0);
+    transition: transform 120ms ease;
+  }
+  .md-seek:hover::-moz-range-thumb,
+  .md-seek:focus-visible::-moz-range-thumb,
+  .md-seek:active::-moz-range-thumb {
+    transform: scale(1);
+  }
+}
+
+/* The drawer folded to an icon rail (desktop). OUTSIDE every @layer and
+   !important, because it has to beat the Tailwind utilities (flex, px-3) on
+   the same elements, and utilities win over any layered rule. Labels are bare
+   text inside each item, so `font-size: 0` hides them without wrapping every
+   one; the icons are sized in rem and keep their size. */
+@media (min-width: 768px) {
+  .md-drawer[data-collapsed="true"] .md-collapse-hide {
+    display: none !important;
+  }
+  .md-drawer[data-collapsed="true"] .md-nav-item {
+    font-size: 0 !important;
+    gap: 0 !important;
+    padding: 0 !important;
+    justify-content: center !important;
+  }
+  .md-drawer[data-collapsed="true"] .md-drawer-head,
+  .md-drawer[data-collapsed="true"] .md-drawer-account {
+    justify-content: center !important;
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+  }
+  .md-drawer[data-collapsed="true"] nav {
+    scrollbar-width: none;
+    padding-right: 0 !important;
+  }
+  .md-drawer[data-collapsed="true"] nav::-webkit-scrollbar {
+    display: none;
+  }
+  .md-drawer[data-collapsed="true"] .md-drawer-action {
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+    justify-content: center !important;
+  }
+}

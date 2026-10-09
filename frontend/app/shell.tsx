@@ -69,6 +69,22 @@ export default function Shell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const features = useFeatures();
   const [open, setOpen] = useState(false);
+  // Desktop only: the drawer folded down to an icon rail. Remembered per
+  // browser, because it is a preference about this screen, not the account.
+  const [collapsed, setCollapsed] = useState(false);
+  useEffect(() => {
+    try {
+      setCollapsed(localStorage.getItem("nav-collapsed") === "1");
+    } catch {}
+  }, []);
+  function toggleCollapsed() {
+    setCollapsed((c) => {
+      try {
+        localStorage.setItem("nav-collapsed", c ? "0" : "1");
+      } catch {}
+      return !c;
+    });
+  }
   const [palette, setPalette] = useState(false);
   const [switcher, setSwitcher] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -204,9 +220,10 @@ export default function Shell({ children }: { children: React.ReactNode }) {
         // groups is the thing doing the separating, so it belongs to the
         // container that owns the relationship, not to whichever child
         // happens to be above.
-        className={`fixed inset-y-0 left-0 z-40 flex w-[20rem] flex-col gap-4 p-4 transition-transform md:translate-x-0 ${
+        data-collapsed={collapsed}
+        className={`md-drawer fixed inset-y-0 left-0 z-40 flex w-[20rem] flex-col gap-4 p-4 transition-[transform,width] md:translate-x-0 ${
           open ? "translate-x-0" : "-translate-x-full"
-        }`}
+        } ${collapsed ? "md:w-[5.5rem] md:px-3" : ""}`}
         style={{
           background: "var(--md-nav-surface)",
           // The drawer used to be a navy slab, so its edge was obvious. Now
@@ -217,7 +234,17 @@ export default function Shell({ children }: { children: React.ReactNode }) {
           transitionTimingFunction: "var(--md-ease-emphasized)",
         }}
       >
-        <div className="flex items-center gap-1 px-2 pt-2">
+        <div className="md-drawer-head flex items-center gap-1 px-2 pt-2">
+          <IconButton
+            onClick={toggleCollapsed}
+            aria-label={collapsed ? "Expand navigation" : "Collapse navigation"}
+            title={collapsed ? "Expand navigation" : "Collapse navigation"}
+            aria-expanded={!collapsed}
+            className="hidden shrink-0 md:inline-flex"
+            style={{ color: "var(--md-nav-on-surface-variant)" }}
+          >
+            <IconMenu />
+          </IconButton>
           {/* The app's own name, and the switch to another one, in a single
               control. A separate "switch project" item lower down was the
               obvious alternative and is worse: the thing you click to change
@@ -230,7 +257,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
             // the right edge. Sized to its content it floated mid-row with the
             // chevron hard against the text, which read as decoration rather
             // than as the affordance that opens the dialog.
-            className="md-state flex min-w-0 flex-1 items-center gap-3 rounded-[var(--md-shape-md)] px-2 py-2 text-left"
+            className="md-collapse-hide md-state flex min-w-0 flex-1 items-center gap-3 rounded-[var(--md-shape-md)] px-2 py-2 text-left"
             aria-haspopup="dialog"
             title="Switch app"
             // Colour set HERE rather than on the icon: icons are stroked with
@@ -292,10 +319,11 @@ export default function Shell({ children }: { children: React.ReactNode }) {
             // it could make without a Gemini key.
             disabled={creating || features?.chat === false}
             title={features?.chat === false ? "Add a Gemini API key in Settings to chat" : undefined}
-            className="w-full"
+            className="md-drawer-action w-full"
+            aria-label="New chat"
           >
             {creating ? <IconSpinner /> : <IconPlus />}
-            {creating ? "Creating" : "New chat"}
+            <span className="md-collapse-hide">{creating ? "Creating" : "New chat"}</span>
           </Button>
         )}
 
@@ -344,7 +372,8 @@ export default function Shell({ children }: { children: React.ReactNode }) {
                 className="md-nav-item"
                 data-active={active}
                 aria-disabled={locked || undefined}
-                title={locked ? `${label} needs an API key — add one in Settings` : undefined}
+                aria-label={label}
+                title={locked ? `${label} needs an API key — add one in Settings` : collapsed ? label : undefined}
                 style={locked ? { opacity: 0.45 } : undefined}
               >
                 {/* The icon gets its own container so it can carry the hover
@@ -365,7 +394,9 @@ export default function Shell({ children }: { children: React.ReactNode }) {
                   opts the subtree into client rendering, and the drawer lives
                   OUTSIDE the page's boundary -- without one here, prerendering
                   the route fails entirely. */}
-              {project.id === "parley" && (
+              {/* Duplex has no stored conversations of its own yet; it must not
+                  fall through to Speak's list. */}
+              {project.id === "parley" && !collapsed && href !== "/parley/duplex" && href !== "/parley/manks" && (
                 <Suspense fallback={null}>
                   <ParleyNav
                     pathname={pathname}
@@ -384,7 +415,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
           })}
         </nav>
 
-        {ingesting && (
+        {ingesting && !collapsed && (
           <div
             className="space-y-2 rounded-[var(--md-shape-md)] p-3"
             style={{ background: "var(--md-nav-surface-container)" }}
@@ -422,7 +453,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
             Research Desk only. The Model Lab has no sessions, and an empty
             "Sessions" panel there reads as a feature that is broken rather
             than one that does not apply. */}
-        {isResearchDesk ? (
+        {isResearchDesk && !collapsed ? (
           <div className="md-nav-group flex min-h-0 flex-1 flex-col">
             <p
               className="md-label-medium mb-1 px-3 pt-1"
@@ -524,7 +555,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
 
           {account && (
             <div
-              className="flex items-center gap-3 rounded-[var(--md-shape-full)] px-3 py-2"
+              className="md-drawer-account flex items-center gap-3 rounded-[var(--md-shape-full)] px-3 py-2"
               style={{ background: "var(--md-nav-surface)" }}
             >
               <span
@@ -537,7 +568,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
                 {(account.email ?? "?").charAt(0)}
               </span>
               <span
-                className="md-body-small min-w-0 flex-1 truncate"
+                className="md-collapse-hide md-body-small min-w-0 flex-1 truncate"
                 style={{ color: "var(--md-nav-on-surface)" }}
                 title={account.email ?? account.id}
               >
@@ -550,7 +581,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
                 }}
                 title="Sign out"
                 aria-label="Sign out"
-                className="md-icon-btn md-icon-btn-sm md-state shrink-0"
+                className="md-collapse-hide md-icon-btn md-icon-btn-sm md-state shrink-0"
                 style={{ color: "var(--md-nav-on-surface-variant)" }}
               >
                 <IconSignOut className="h-4 w-4" />
@@ -577,9 +608,9 @@ export default function Shell({ children }: { children: React.ReactNode }) {
           they had when the document scrolled. */}
       <main
         ref={scroller}
-        className={`md-scroll min-w-0 flex-1 overflow-y-auto pt-16 md:ml-[20rem] md:pt-0 lg:mr-[var(--rail-pad)] ${
-          railReady ? "transition-[margin]" : ""
-        }`}
+        className={`md-scroll min-w-0 flex-1 overflow-y-auto pt-16 md:pt-0 lg:mr-[var(--rail-pad)] ${
+          collapsed ? "md:ml-[5.5rem]" : "md:ml-[20rem]"
+        } ${railReady ? "transition-[margin]" : ""}`}
         style={
           {
             "--rail-pad": !railActive

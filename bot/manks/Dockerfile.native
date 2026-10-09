@@ -1,0 +1,17 @@
+# The Manks LIGHTWEIGHT bot: joins BigBlueButton rooms with no browser.
+#
+# A few hundred megabytes, against 3.4GB for the browser image, and each meeting
+# costs tens of megabytes of RAM instead of a gigabyte. It speaks BBB's own
+# protocols (the join API, the Meteor session, the WebRTC SFU) directly. See
+# bbb_native.py for what it reproduces and what it cannot do.
+#
+# Not here: Playwright, Chromium, Google Meet. Those need the browser image.
+FROM python:3.12-slim
+
+WORKDIR /bot
+# aiortc and PyAV ship wheels with their own codecs; nothing to install via apt.
+RUN pip install --no-cache-dir httpx aiortc==1.15.0 av==17.1.0 websockets numpy
+COPY bot.py bbb_native.py ./
+
+ENV MANKS_MODE=native
+CMD ["python", "-u", "bot.py"]

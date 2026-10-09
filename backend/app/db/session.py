@@ -131,6 +131,7 @@ _MIGRATIONS: tuple[str, ...] = (
     "NOT NULL DEFAULT '[]'::jsonb",
     # Spellings for the microphone. On both tables, because a conversation
     # snapshots the project's list when it starts.
+    "ALTER TABLE meetings ADD COLUMN IF NOT EXISTS talk BOOLEAN NOT NULL DEFAULT false",
     "ALTER TABLE howler_projects ADD COLUMN IF NOT EXISTS vocabulary JSONB "
     "NOT NULL DEFAULT '[]'::jsonb",
     "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS vocabulary JSONB "

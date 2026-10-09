@@ -61,6 +61,9 @@ export type DuplexEvent =
       model: string;
       ready_at_endpoint: boolean;
     }
+  | { type: "tool"; name: string; query: string }
+  | { type: "sources"; sources: { label: string; kind: string; url: string | null }[] }
+  | { type: "finished" }
   | { type: "resumed" }
   | { type: "stop"; reason: string }
   | { type: "stt"; name: string }
@@ -78,6 +81,10 @@ export type DuplexEvent =
   | { type: "closed" };
 
 export type DuplexSession = {
+  /** Interview links only: the interviewer speaks first. */
+  greet: () => void;
+  /** Interview links only: the participant ends it. */
+  finish: () => void;
   interrupt: () => void;
   close: () => void;
 };
@@ -90,9 +97,12 @@ export async function openDuplexSession(
   onEvent: (event: DuplexEvent) => void,
   /** Which microphone. Empty = the system default. */
   deviceId = "",
+  /** A Howler link. Mutually exclusive with signing in, as in liveSession. */
+  invite = "",
 ): Promise<DuplexSession> {
-  const token = await getAccessToken();
+  const token = invite ? null : await getAccessToken();
   const url = new URL(browserBase.replace(/^http/, "ws") + "/duplex/ws");
+  if (invite) url.searchParams.set("invite", invite);
   if (token) url.searchParams.set("token", token);
   url.searchParams.set("voice_name", voiceName);
 
@@ -376,6 +386,13 @@ export async function openDuplexSession(
   };
 
   return {
+    greet() {
+      send({ type: "greet" });
+    },
+    finish() {
+      stopPlayback();
+      send({ type: "finish" });
+    },
     interrupt() {
       stopPlayback();
       send({ type: "interrupt" });

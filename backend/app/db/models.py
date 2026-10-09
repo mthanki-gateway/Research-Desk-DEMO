@@ -573,3 +573,48 @@ class TopicEdge(Base):
     source_key: Mapped[str] = mapped_column(String(256), index=True)
     target_key: Mapped[str] = mapped_column(String(256), index=True)
     predicate: Mapped[str] = mapped_column(String(128))
+
+
+class Meeting(Base):
+    """A meeting the Manks bot was sent to, and everything it brought back.
+
+    One row from the moment somebody pastes a link to the finished insights, so
+    the page can show where it is -- waiting to be let in, listening,
+    transcribing -- from the status alone. The bot runs in its own container
+    and reports here through the API; the row is the only thing they share.
+
+    `segments` is the recording: a list of {key, index, start, seconds} for
+    short, independently playable audio files rather than one long one, so a
+    crash mid-meeting loses a couple of minutes instead of the whole call, and
+    each piece can be sent to a transcriber with an upload limit.
+    """
+
+    __tablename__ = "meetings"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+
+    url: Mapped[str] = mapped_column(Text)
+    # meet | bbb
+    platform: Mapped[str] = mapped_column(String(24), default="meet")
+    title: Mapped[str] = mapped_column(String(200), default="")
+    bot_name: Mapped[str] = mapped_column(String(80), default="Manks")
+
+    # queued | joining | waiting | in_meeting | transcribing | done | failed | cancelled
+    status: Mapped[str] = mapped_column(String(24), index=True, default="queued")
+    detail: Mapped[str] = mapped_column(Text, default="")
+    leave_requested: Mapped[bool] = mapped_column(default=False)
+    # The bot may speak: it hears the meeting live and answers when addressed.
+    talk: Mapped[bool] = mapped_column(default=False, server_default="false")
+
+    segments: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    transcript: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    insights: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -73,8 +73,16 @@ numbers and symbols as words.
 in a few words; do not ask them to repeat unless it is unintelligible.
 - You may be answering a question that is still being finished. Answer the \
 words you have; a newer answer replaces this one if they say more.
-- Do not claim to have looked anything up. You have no tools in this mode; say \
-so plainly if a question needs one.
+
+"""
+
+TOOLS_PROMPT = """- You can search the web and the person's own documents. Use a tool for anything current, specific or factual you are not sure of, and for anything about their files. Do not use one for chit-chat or things you know cold.
+- BEFORE calling a tool, say a few words first ("Let me look that up." / "One second, checking."). It is spoken while the search runs.
+- After the results, answer in a sentence or two, in words: say where it came from ("according to Reuters"), never read out a URL, never list sources.
+- If a tool finds nothing, say so plainly rather than guessing.
+"""
+
+NO_TOOLS_PROMPT = """- You have no tools in this conversation; say so plainly if a question needs one.
 """
 
 
@@ -249,16 +257,88 @@ def _groq_extras(model: str) -> dict[str, Any]:
     return {}
 
 
-async def _stream_groq(target: Target, system: str, turns: list[dict]) -> AsyncIterator[str]:
+@dataclass
+class ToolCall:
+    """The model asked for a tool. Same shape whichever provider asked."""
+
+    id: str
+    name: str
+    args: dict[str, Any]
+
+
+def _groq_messages(system: str, turns: list[dict]) -> list[dict]:
+    """Our neutral turns as OpenAI chat messages.
+
+    A turn is {"role": "user"|"assistant", "content"}; an assistant turn may
+    carry "tool_calls" (list of ToolCall) and is followed by {"role": "tool",
+    "id", "name", "content"} turns holding the results.
+    """
+    out: list[dict] = [{"role": "system", "content": system}]
+    for t in turns:
+        if t["role"] == "tool":
+            out.append({"role": "tool", "tool_call_id": t["id"], "content": t["content"]})
+        elif t.get("tool_calls"):
+            out.append(
+                {
+                    "role": "assistant",
+                    "content": t.get("content") or None,
+                    "tool_calls": [
+                        {
+                            "id": c.id,
+                            "type": "function",
+                            "function": {"name": c.name, "arguments": json.dumps(c.args)},
+                        }
+                        for c in t["tool_calls"]
+                    ],
+                }
+            )
+        else:
+            out.append({"role": t["role"], "content": t["content"]})
+    return out
+
+
+def _gemini_contents(turns: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for t in turns:
+        if t["role"] == "tool":
+            part = {"functionResponse": {"name": t["name"], "response": {"result": t["content"]}}}
+            # Consecutive results share one user turn, as the API expects.
+            if out and out[-1]["role"] == "user" and "functionResponse" in out[-1]["parts"][0]:
+                out[-1]["parts"].append(part)
+            else:
+                out.append({"role": "user", "parts": [part]})
+        elif t.get("tool_calls"):
+            parts: list[dict] = []
+            if t.get("content"):
+                parts.append({"text": t["content"]})
+            parts += [{"functionCall": {"name": c.name, "args": c.args}} for c in t["tool_calls"]]
+            out.append({"role": "model", "parts": parts})
+        else:
+            out.append(
+                {
+                    "role": "model" if t["role"] == "assistant" else "user",
+                    "parts": [{"text": t["content"]}],
+                }
+            )
+    return out
+
+
+async def _stream_groq(
+    target: Target, system: str, turns: list[dict], tools: list[dict] | None = None
+) -> AsyncIterator[str | ToolCall]:
     s = get_settings()
-    body = {
+    body: dict[str, Any] = {
         "model": target.model,
-        "messages": [{"role": "system", "content": system}, *turns],
+        "messages": _groq_messages(system, turns),
         "stream": True,
         "max_tokens": s.duplex_max_tokens,
         "temperature": 0.6,
         **_groq_extras(target.model),
     }
+    if tools:
+        body["tools"] = [{"type": "function", "function": t} for t in tools]
+        body["tool_choice"] = "auto"
+    pending: dict[int, dict[str, str]] = {}
     async with _client().stream(
         "POST",
         f"{s.groq_base_url}/chat/completions",
@@ -274,29 +354,52 @@ async def _stream_groq(target: Target, system: str, turns: list[dict]) -> AsyncI
             if not line.startswith("data:") or "[DONE]" in line:
                 continue
             try:
-                delta = json.loads(line[5:])["choices"][0]["delta"].get("content")
+                delta = json.loads(line[5:])["choices"][0]["delta"]
             except (ValueError, KeyError, IndexError):
                 continue
-            if delta:
-                yield delta
+            if delta.get("content"):
+                yield delta["content"]
+            # Tool calls arrive in pieces: a name once, the arguments as a
+            # JSON string spread over many chunks, keyed by `index`.
+            for tc in delta.get("tool_calls") or []:
+                slot = pending.setdefault(tc.get("index", 0), {"id": "", "name": "", "args": ""})
+                slot["id"] = tc.get("id") or slot["id"]
+                fn = tc.get("function") or {}
+                slot["name"] = fn.get("name") or slot["name"]
+                slot["args"] += fn.get("arguments") or ""
+    for slot in pending.values():
+        try:
+            args = json.loads(slot["args"] or "{}")
+        except ValueError:
+            args = {}
+        if slot["name"]:
+            yield ToolCall(slot["id"] or f"call_{slot['name']}", slot["name"], args)
 
 
-async def _stream_gemini(target: Target, system: str, turns: list[dict]) -> AsyncIterator[str]:
+async def _stream_gemini(
+    target: Target, system: str, turns: list[dict], tools: list[dict] | None = None
+) -> AsyncIterator[str | ToolCall]:
     s = get_settings()
-    contents = [
-        {"role": "model" if t["role"] == "assistant" else "user", "parts": [{"text": t["content"]}]}
-        for t in turns
-    ]
+    contents = _gemini_contents(turns)
     body: dict[str, Any] = {
         "contents": contents,
         "generationConfig": {"maxOutputTokens": s.duplex_max_tokens, "temperature": 0.6},
     }
     if target.model.startswith("gemma"):
-        # Gemma takes no system instruction; fold it into the first turn.
-        contents[0]["parts"][0]["text"] = f"{system}\n\n{contents[0]['parts'][0]['text']}"
+        # Gemma takes no system instruction and emits no function calls (it
+        # narrates them instead); fold the system text in and offer no tools.
+        contents[0]["parts"][0]["text"] = f"{system}\n\n{contents[0]['parts'][0].get('text', '')}"
     else:
         body["systemInstruction"] = {"parts": [{"text": system}]}
         body["generationConfig"]["thinkingConfig"] = {"thinkingLevel": "minimal"}
+        if tools:
+            # Gemini rejects an object schema with no properties, which is how
+            # a tool that takes no arguments (end_interview) is written.
+            decls = [
+                {k: v for k, v in t.items() if k != "parameters" or (v or {}).get("properties")}
+                for t in tools
+            ]
+            body["tools"] = [{"functionDeclarations": decls}]
     async with _client().stream(
         "POST",
         f"{GENAI_BASE}/models/{target.model}:streamGenerateContent?alt=sse",
@@ -317,10 +420,14 @@ async def _stream_gemini(target: Target, system: str, turns: list[dict]) -> Asyn
                 continue
             for cand in payload.get("candidates", []):
                 for part in (cand.get("content") or {}).get("parts", []):
-                    # Gemma and the thinking Gemini models send their reasoning
-                    # as parts flagged `thought`; it is not for speaking.
+                    # Reasoning arrives as parts flagged `thought`; not for speaking.
                     if part.get("text") and not part.get("thought"):
                         yield part["text"]
+                    call = part.get("functionCall")
+                    if call:
+                        yield ToolCall(
+                            f"call_{call['name']}_{id(call)}", call["name"], call.get("args") or {}
+                        )
 
 
 async def stream_answer(
@@ -328,7 +435,8 @@ async def stream_answer(
     system: str,
     turns: list[dict],
     on_model: Callable[[Target], None] | None = None,
-) -> AsyncIterator[str]:
+    tools: list[dict] | None = None,
+) -> AsyncIterator[str | ToolCall]:
     """Stream the answer from the first target that works.
 
     Failing over is only possible BEFORE the first token: after that the
@@ -340,7 +448,20 @@ async def stream_answer(
         started = False
         try:
             stream = _stream_groq if target.provider == "groq" else _stream_gemini
-            async for piece in stream(target, system, turns):
+            it = stream(target, system, turns, tools).__aiter__()
+            # A model that accepts the request and then says nothing for
+            # half a minute (seen once, on Groq) would stall the whole turn.
+            # Waiting for the FIRST token is bounded; the rest streams freely.
+            first_wait = 8.0 if target.provider == "groq" else 15.0
+            while True:
+                try:
+                    piece = await asyncio.wait_for(
+                        it.__anext__(), timeout=30.0 if started else first_wait
+                    )
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    raise LLMUnavailable(f"{target.name} timed out", status=504) from None
                 if not started:
                     started = True
                     if on_model:
@@ -754,14 +875,30 @@ class LiveVoice:
     async def speak(self, text: str) -> AsyncIterator[bytes]:
         from google.genai import types
 
-        session = await self._free.get()
+        # A pool can run dry: a session that died is replaced in the background
+        # and the replacement can fail. Waiting for one would hang the answer
+        # for ever, so after a moment connect a fresh one instead. (A long
+        # meeting finds this out: Live closes sessions that sit idle.)
+        try:
+            session = await asyncio.wait_for(self._free.get(), timeout=3)
+        except asyncio.TimeoutError:
+            session = await self._connect()
         clean = False
         try:
             await session.send_client_content(
                 turns=types.Content(role="user", parts=[types.Part(text=f'Script: "{text}"')]),
                 turn_complete=True,
             )
-            async for message in session.receive():
+            messages = session.receive().__aiter__()
+            first = True
+            while True:
+                # Silence from Live is a failure, not a long sentence: the
+                # caller falls back to the batch voice when nothing has played.
+                try:
+                    message = await asyncio.wait_for(messages.__anext__(), 8 if first else 15)
+                except StopAsyncIteration:
+                    break
+                first = False
                 if message.data:
                     yield message.data
                 content = message.server_content
@@ -820,6 +957,7 @@ class Draft:
     done: bool = False
     failed: str = ""
     task: asyncio.Task | None = None
+    tools: list[str] = field(default_factory=list)
 
     def cancel(self) -> None:
         if self.task and not self.task.done():
@@ -828,26 +966,73 @@ class Draft:
 
 _END = object()
 
+# A tool observation is a page of passages; Groq's free tier is 8000
+# tokens a minute, so what goes back to the model is trimmed.
+MAX_OBSERVATION_CHARS = 2_400
+MAX_TOOL_ROUNDS = 2
 
-async def write_draft(draft: Draft, chain: list[Target], history: list[dict]) -> None:
-    """Fill `draft.pieces` with speakable pieces; always ends with the sentinel."""
+ToolRunner = Callable[[ToolCall], Awaitable[str]]
+
+
+async def write_draft(
+    draft: Draft,
+    chain: list[Target],
+    history: list[dict],
+    tools: list[dict] | None = None,
+    run_tool: ToolRunner | None = None,
+    system: str | None = None,
+) -> None:
+    """Fill `draft.pieces` with speakable pieces; always ends with the sentinel.
+
+    With tools, a round may end in tool calls instead of an answer. The words
+    said BEFORE the call ("Let me check.") are flushed to the speaker at once,
+    so the person hears something while the search runs; then the results go
+    back and the model writes the answer.
+    """
     chunker = Chunker()
     turns = [*history, {"role": "user", "content": draft.for_text}]
+    prompt = system or SYSTEM
 
     def note(target: Target) -> None:
-        draft.model = target.name
-        draft.first_token_ms = round((time.monotonic() - draft.started) * 1000)
+        if not draft.model:
+            draft.model = target.name
+            draft.first_token_ms = round((time.monotonic() - draft.started) * 1000)
+
+    def say(piece: str | None) -> None:
+        piece = speakable(piece or "")
+        if piece:
+            draft.pieces.put_nowait(piece)
 
     try:
-        async for delta in stream_answer(chain, SYSTEM, turns, on_model=note):
-            draft.text += delta
-            for piece in chunker.feed(delta):
-                piece = speakable(piece)
-                if piece:
-                    draft.pieces.put_nowait(piece)
-        tail = chunker.flush()
-        if tail and speakable(tail):
-            draft.pieces.put_nowait(speakable(tail))
+        for round_no in range(MAX_TOOL_ROUNDS + 1):
+            calls: list[ToolCall] = []
+            said = ""
+            offer = tools if (run_tool and round_no < MAX_TOOL_ROUNDS) else None
+            async for item in stream_answer(chain, prompt, turns, on_model=note, tools=offer):
+                if isinstance(item, ToolCall):
+                    calls.append(item)
+                    continue
+                said += item
+                draft.text += item
+                for piece in chunker.feed(item):
+                    say(piece)
+            # Whatever came before a tool call is spoken NOW, not held for a
+            # sentence end that may never come.
+            say(chunker.flush())
+            if not calls or run_tool is None:
+                break
+            turns.append({"role": "assistant", "content": said, "tool_calls": calls})
+            results = await asyncio.gather(*[run_tool(c) for c in calls])
+            for call, observation in zip(calls, results, strict=True):
+                draft.tools.append(call.name)
+                turns.append(
+                    {
+                        "role": "tool",
+                        "id": call.id,
+                        "name": call.name,
+                        "content": observation[:MAX_OBSERVATION_CHARS],
+                    }
+                )
         draft.done = True
     except asyncio.CancelledError:
         raise

@@ -289,6 +289,12 @@ async def transcribe(
 
     return {
         "text": text,
+        # Whisper's own sentence-level timings, which a long recording needs to
+        # put a line at the right minute rather than somewhere in its segment.
+        "segments": [
+            {"start": float(x.get("start") or 0.0), "end": float(x.get("end") or 0.0), "text": str(x.get("text") or "")}
+            for x in segs
+        ],
         # What Whisper THOUGHT it heard, which is not always what was asked
         # for. Surfaced so a wrong-script transcript has a visible cause.
         "language": body.get("language"),

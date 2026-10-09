@@ -7,6 +7,7 @@ import {
   IconHowler,
   IconInterview,
   IconDuplex,
+  IconManks,
   IconParley,
   IconMic,
   IconLab,
@@ -94,6 +95,7 @@ export const PROJECTS: Project[] = [
       { href: "/parley/interview", label: "Interview", Icon: IconInterview, feature: "parley" },
       { href: "/parley/howler", label: "Howler", Icon: IconHowler, feature: "parley" },
       { href: "/parley/duplex", label: "Duplex", Icon: IconDuplex, feature: "duplex" },
+      { href: "/parley/manks", label: "Manks", Icon: IconManks, feature: "manks" },
     ],
   },
 ];

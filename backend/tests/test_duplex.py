@@ -87,11 +87,11 @@ class TestChain:
         monkeypatch.setattr(keys, "key_for", lambda provider: "k-1234")
         duplex._cool.clear()
 
-        async def broken(target, system, turns):
+        async def broken(target, system, turns, tools=None):
             raise duplex.LLMUnavailable("down", status=429)
             yield  # pragma: no cover
 
-        async def working(target, system, turns):
+        async def working(target, system, turns, tools=None):
             yield "hello "
             yield "there"
 
@@ -114,11 +114,11 @@ class TestChain:
         monkeypatch.setattr(keys, "key_for", lambda provider: "k-1234")
         duplex._cool.clear()
 
-        async def dies_midway(target, system, turns):
+        async def dies_midway(target, system, turns, tools=None):
             yield "partial "
             raise duplex.LLMUnavailable("cut", status=500)
 
-        async def other(target, system, turns):
+        async def other(target, system, turns, tools=None):
             yield "NEVER"
 
         monkeypatch.setattr(duplex, "_stream_groq", dies_midway)
@@ -139,7 +139,7 @@ class TestDraft:
         monkeypatch.setattr(keys, "key_for", lambda provider: "k-1234")
         duplex._cool.clear()
 
-        async def stream(target, system, turns):
+        async def stream(target, system, turns, tools=None):
             for part in ["It is a table that maps keys to values, ", "so lookups are fast. ", "Neat."]:
                 yield part
 
@@ -157,7 +157,7 @@ class TestDraft:
         monkeypatch.setattr(keys, "key_for", lambda provider: "k-1234")
         duplex._cool.clear()
 
-        async def broken(target, system, turns):
+        async def broken(target, system, turns, tools=None):
             raise duplex.LLMUnavailable("nope", status=500)
             yield  # pragma: no cover
 
@@ -201,7 +201,7 @@ class TestSession:
         s, _ = self._session(monkeypatch)
         started = []
 
-        async def fake_write(draft, chain, history):
+        async def fake_write(draft, chain, history, **kw):
             started.append(draft.for_text)
             await asyncio.sleep(10)
 
@@ -223,7 +223,7 @@ class TestSession:
         s, _ = self._session(monkeypatch)
         calls = []
 
-        async def fake_write(draft, chain, history):
+        async def fake_write(draft, chain, history, **kw):
             calls.append(1)
             await asyncio.sleep(10)
 
@@ -240,7 +240,7 @@ class TestSession:
         monkeypatch.setattr(keys, "key_for", lambda provider: "k-1234")
         s, _ = self._session(monkeypatch)
         s.s.duplex_max_speculations  # the real setting
-        monkeypatch.setattr(duplex, "write_draft", lambda d, c, h: asyncio.sleep(10))
+        monkeypatch.setattr(duplex, "write_draft", lambda d, c, h, **kw: asyncio.sleep(10))
         s.speculations = s.s.duplex_max_speculations
         assert not await s.draft_for("one two three", final=False)
         assert await s.draft_for("one two three", final=True)
@@ -257,7 +257,7 @@ class TestSession:
         monkeypatch.setattr(keys, "key_for", lambda provider: "k-1234")
         s, api = self._session(monkeypatch)
 
-        async def fake_write(draft, chain, history):
+        async def fake_write(draft, chain, history, **kw):
             for p in (f"Answer to {draft.for_text}.",):
                 draft.pieces.put_nowait(p)
             draft.model = "groq:m"
@@ -297,7 +297,7 @@ class TestSession:
         monkeypatch.setattr(keys, "key_for", lambda provider: "k-1234")
         s, api = self._session(monkeypatch)
 
-        async def fake_write(draft, chain, history):
+        async def fake_write(draft, chain, history, **kw):
             draft.pieces.put_nowait(f"Re: {draft.for_text}.")
             draft.pieces.put_nowait(duplex._END)
 
@@ -421,7 +421,7 @@ class TestEarlyAnswer:
 
         started = []
 
-        async def fake_write(draft, chain, history):
+        async def fake_write(draft, chain, history, **kw):
             started.append(draft.for_text)
             await asyncio.sleep(10)
 
@@ -477,3 +477,84 @@ class TestPreRoll:
         await w.feed(bytes(100_000))
         await w.speech_start()
         assert len(w._buf) == w.PRE_ROLL_BYTES
+
+
+class TestToolRounds:
+    async def test_words_before_a_call_are_spoken_then_the_results_are_used(self, monkeypatch):
+        from app.services import keys
+
+        monkeypatch.setattr(keys, "key_for", lambda provider: "k-1234")
+        duplex._cool.clear()
+        rounds = []
+
+        async def stream(target, system, turns, tools=None):
+            rounds.append((len(turns), bool(tools)))
+            if len(rounds) == 1:
+                yield "Let me look that up. "
+                yield duplex.ToolCall("c1", "search_web", {"query": "f1 winner"})
+            else:
+                assert turns[-1]["role"] == "tool" and "Verstappen" in turns[-1]["content"]
+                yield "Verstappen won, per Reuters."
+
+        monkeypatch.setattr(duplex, "_stream_groq", stream)
+
+        async def run_tool(call):
+            assert call.name == "search_web"
+            return "Verstappen won the race. " * 500
+
+        draft = duplex.Draft(for_text="who won the last race")
+        await duplex.write_draft(
+            draft, duplex.parse_chain("groq:m"), [], tools=[{"name": "search_web"}], run_tool=run_tool
+        )
+        pieces = [p async for p in duplex.pieces_of(draft)]
+        assert pieces == ["Let me look that up.", "Verstappen won, per Reuters."]
+        assert draft.tools == ["search_web"] and rounds == [(1, True), (3, True)]
+        duplex._cool.clear()
+
+    def test_turns_convert_for_both_providers(self):
+        call = duplex.ToolCall("c1", "search_web", {"query": "x"})
+        turns = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "ok", "tool_calls": [call]},
+            {"role": "tool", "id": "c1", "name": "search_web", "content": "result"},
+        ]
+        g = duplex._groq_messages("sys", turns)
+        assert g[2]["tool_calls"][0]["function"]["name"] == "search_web"
+        assert g[3] == {"role": "tool", "tool_call_id": "c1", "content": "result"}
+        m = duplex._gemini_contents(turns)
+        assert m[1]["parts"][1]["functionCall"]["name"] == "search_web"
+        assert m[2]["parts"][0]["functionResponse"]["response"] == {"result": "result"}
+
+    async def test_the_same_search_in_a_second_draft_is_not_run_again(self, monkeypatch):
+        from app.api import duplex as api
+
+        class WS:
+            async def send_text(self, t): ...
+
+        s = api.Session(WS(), "Kore")
+        calls = []
+
+        async def fake(name, args, **kw):
+            calls.append(name)
+            return [], "found it"
+
+        monkeypatch.setattr(api.agent_tools, "run_tool", fake)
+        c = duplex.ToolCall("1", "search_web", {"query": "same"})
+        assert await s.run_tool(c) == "found it"
+        assert await s.run_tool(duplex.ToolCall("2", "search_web", {"query": "same"})) == "found it"
+        assert calls == ["search_web"]
+
+    async def test_lookups_are_capped_per_turn(self, monkeypatch):
+        from app.api import duplex as api
+
+        class WS:
+            async def send_text(self, t): ...
+
+        s = api.Session(WS(), "Kore")
+
+        async def fake(name, args, **kw):
+            return [], "r"
+
+        monkeypatch.setattr(api.agent_tools, "run_tool", fake)
+        out = [await s.run_tool(duplex.ToolCall(str(i), "search_web", {"query": str(i)})) for i in range(6)]
+        assert out[:4] == ["r"] * 4 and "No more lookups" in out[5]

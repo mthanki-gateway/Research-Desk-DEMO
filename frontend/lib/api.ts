@@ -1319,6 +1319,130 @@ export type LiveStatus = {
   output_rate: number;
 };
 
+// ---------------------------------------------------------------------------
+// Manks: a bot that sits in a meeting
+// ---------------------------------------------------------------------------
+
+export type MeetingStatus =
+  | "queued"
+  | "joining"
+  | "waiting"
+  | "in_meeting"
+  | "transcribing"
+  | "done"
+  | "failed"
+  | "cancelled";
+
+export type Meeting = {
+  id: string;
+  url: string;
+  platform: string;
+  title: string;
+  bot_name: string;
+  status: MeetingStatus;
+  detail: string;
+  error: string | null;
+  leave_requested: boolean;
+  segments: number;
+  segment_ids: number[];
+  recorded_seconds: number;
+  created_at: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  has_insights: boolean;
+  segment_info: { index: number; start: number; seconds: number }[];
+  /** The bot may speak when addressed (browser join only). */
+  talk?: boolean;
+  transcript?: {
+    lines: { start: number; end?: number; text: string }[];
+    engine: string;
+    words: number;
+  } | null;
+  insights?: {
+    title: string;
+    /** Older meetings have this; newer ones have highlights and sections. */
+    summary?: string;
+    highlights?: string[];
+    key_points?: string[];
+    sections?: { title: string; start_line: number; gist: string; points: string[] }[];
+    decisions: string[];
+    action_items: { task: string; owner?: string; due?: string }[];
+    open_questions: string[];
+    topics: string[];
+  } | null;
+};
+
+export async function getManksStatus(): Promise<{ enabled: boolean; bot_name: string; segment_seconds: number }> {
+  const res = await authedFetch("/manks/status", { cache: "no-store" });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export type MeetingPage = {
+  items: Meeting[];
+  total: number;
+  offset: number;
+  limit: number;
+  /** Bots in a meeting right now, across every page. */
+  live: number;
+  /** Anything still moving (incl. transcribing), so the page knows to poll. */
+  busy: number;
+};
+
+export async function listMeetings(
+  opts: { q?: string; show?: "all" | "active" | "finished"; offset?: number; limit?: number } = {},
+): Promise<MeetingPage> {
+  const p = new URLSearchParams();
+  if (opts.q) p.set("q", opts.q);
+  if (opts.show) p.set("show", opts.show);
+  p.set("offset", String(opts.offset ?? 0));
+  p.set("limit", String(opts.limit ?? 20));
+  const res = await authedFetch(`/manks/meetings?${p}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function getMeeting(id: string): Promise<Meeting> {
+  const res = await authedFetch(`/manks/meetings/${id}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function createMeeting(
+  url: string,
+  title = "",
+  method: "browser" | "native" = "browser",
+  talk = false,
+): Promise<Meeting> {
+  const res = await authedJson("/manks/meetings", "POST", { url, title, method, talk });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function leaveMeeting(id: string): Promise<Meeting> {
+  const res = await authedFetch(`/manks/meetings/${id}/leave`, { method: "POST" });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function analyzeMeeting(id: string): Promise<Meeting> {
+  const res = await authedFetch(`/manks/meetings/${id}/analyze`, { method: "POST" });
+  if (!res.ok) throw new Error(await detail(res));
+  return res.json();
+}
+
+export async function deleteMeeting(id: string): Promise<void> {
+  const res = await authedFetch(`/manks/meetings/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await detail(res));
+}
+
+/** One recorded segment as an object URL the <audio> element can play. */
+export async function meetingAudioUrl(id: string, index: number): Promise<string> {
+  const res = await authedFetch(`/manks/meetings/${id}/audio/${index}`);
+  if (!res.ok) throw new Error(await detail(res));
+  return URL.createObjectURL(await res.blob());
+}
+
 export type DuplexStatus = {
   enabled: boolean;
   /** Which service transcribes: Groq Whisper answers early, Gemini's cannot. */
@@ -1330,6 +1454,7 @@ export type DuplexStatus = {
   default_voice: string;
   max_speculations: number;
   pause_ms: number;
+  tools: string[];
   input_rate: number;
   output_rate: number;
 };

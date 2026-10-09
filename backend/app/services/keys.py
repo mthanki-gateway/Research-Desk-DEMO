@@ -86,7 +86,12 @@ PROVIDERS: dict[str, dict[str, Any]] = {
 
 # Features whose need is "any of these" rather than one provider. Interview
 # transcription runs on Groq Whisper when available and Gemini otherwise.
-ANY_OF: dict[str, list[str]] = {"interview_transcription": ["groq", "gemini"]}
+ANY_OF: dict[str, list[str]] = {
+    "interview_transcription": ["groq", "gemini"],
+    # Manks transcribes with Groq Whisper or Gemini, and writes its notes with
+    # whichever the answer model uses; Gemini is the one that must exist.
+    "manks": ["gemini"],
+}
 
 
 class KeysUnavailable(RuntimeError):

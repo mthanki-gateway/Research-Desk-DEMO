@@ -143,3 +143,16 @@ through `live.MODES` and does not share the audio-to-audio socket. It shares the
 turn detector (`turnDetector.ts`) and the key store. Do not add it to `MODES`;
 and do not "simplify" its `pause` event away — the early answer is that event.
 See `docs/parley.md` → Duplex for what was measured.
+
+### Manks is a separate container
+
+`/parley/manks` sends a Playwright/Chromium bot (`bot/manks`) into a meeting.
+The bot is its own image on purpose and holds NO provider keys: it authenticates
+with `MANKS_BOT_SECRET` and can claim work, report status and upload audio, and
+nothing else. Do not give it keys, and do not add an endpoint it can read notes
+from (`test_manks.py` pins both the secret check and the shape of its routes).
+Transcription and insights run in the API's job queue on the owner's keys.
+
+A Howler link has two doors onto one invite (`/howl/<token>` audio-to-audio,
+`/howl/d/<token>` Duplex). They share the invite, the conversation and the
+post-call pass; the interface is stamped on the profile for A/B comparison.

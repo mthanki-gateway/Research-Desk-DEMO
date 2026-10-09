@@ -17,6 +17,7 @@ from app.api import (
     chat,
     documents,
     duplex as duplex_api,
+    manks as manks_api,
     evaluation,
     howler,
     live,
@@ -174,6 +175,12 @@ async def lifespan(app: FastAPI):
         # Always: an interview's profile is written by this pass, so an
         # unregistered handler would mean no profile at all.
         jobs.register(INTERVIEW_JOB, run_interview_job)
+        # Transcribing and summarising a recorded meeting. Always registered,
+        # like the interview pass: it is the only thing that turns audio the
+        # bot already uploaded into anything readable.
+        from app.services import manks as manks_service
+
+        jobs.register(manks_service.KIND, manks_service.run_analyze_job)
         if settings.graph_extraction:
             jobs.register(GRAPH_JOB, run_graph_job)
         worker = asyncio.create_task(jobs.work())
@@ -257,6 +264,7 @@ app.include_router(evaluation.router)
 app.include_router(profile.router)
 app.include_router(playground.router)
 app.include_router(duplex_api.router)
+app.include_router(manks_api.router)
 app.include_router(atlas.router)
 
 

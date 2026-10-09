@@ -830,6 +830,25 @@ async def adopt_project(
         log.warning("adopt_project_failed", error=str(exc)[:200])
 
 
+async def mark_interface(session_id: uuid.UUID, interface: str) -> None:
+    """Record which interface held the interview, for A/B comparison. Never raises.
+
+    On the profile, because that is what the results card already reads, and
+    in the post-call pass's keep-list so a re-run does not erase it.
+    """
+    from app.db.models import ChatSession
+    from app.db.session import SessionLocal
+
+    try:
+        async with SessionLocal() as db:
+            chat = await db.get(ChatSession, session_id)
+            if chat is not None and (chat.profile or {}).get("interface") != interface:
+                chat.profile = {**(chat.profile or {}), "interface": interface}
+                await db.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("mark_interface_failed", error=str(exc)[:200])
+
+
 async def store_summary(
     session_id: uuid.UUID, summary: str, affect: dict | None = None
 ) -> None:

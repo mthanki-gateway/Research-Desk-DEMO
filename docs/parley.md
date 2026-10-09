@@ -303,3 +303,102 @@ and the cap is what keeps them inside Groq's free 1000 requests a day.
 
 Tune with `DUPLEX_LLM_CHAIN`, `DUPLEX_STT`, `DUPLEX_TTS`, `DUPLEX_MAX_SPECULATIONS`
 and `DUPLEX_WHISPER_INTERVAL_S` (see `config.py`).
+
+### Duplex: tools
+
+Duplex calls the typed agent's own tools (`search_web`, `search_documents`,
+`list_documents`, `corpus_stats`) through the same `agent_tools.run_tool`. The
+words said before a call ("Let me look that up.") are flushed to the voice at
+once so the search runs under speech, not silence. Because answers are written
+speculatively, results are cached per turn (a discarded draft's search is not
+repeated) and capped at four lookups a turn; observations are trimmed to 2,400
+characters for Groq's 8,000 tokens a minute. Gemma never receives tools: it
+narrates calls instead of making them.
+
+### Howler, two doors (A/B)
+
+Every Howler link has two entrances onto the SAME invite:
+
+| | |
+|---|---|
+| `/howl/<token>` | the audio-to-audio interviewer (as before) |
+| `/howl/d/<token>` | the Duplex interviewer: Whisper, a fast model, a streaming voice |
+
+Same project, same schema, same stored conversation shape. The conversation is
+stamped `profile.interface = "duplex"` (kept across the post-call pass), and the
+results card shows a Duplex badge, so two people can be interviewed against one
+brief through different doors and compared. Hands-free: no button per answer,
+the participant can talk over the interviewer, and they are never shown a
+transcript of themselves.
+
+The post-call analysis is the SAME job for both. For each participant turn the
+bot stores the raw audio; afterwards Groq Whisper re-transcribes each clip
+(`transcribed`, with the live transcript kept as `live_heard`), the profile is
+written from that transcript, and the emotion pass reads the same audio. The
+interviewer's words are stored exactly as spoken. Verified end to end on
+Duplex: clip stored, re-transcribed, profile and summary written, emotion queued.
+
+### Manks
+
+`/parley/manks`. Paste a Google Meet link; a bot joins as a guest ("Ask to
+join", the host admits it), records, and afterwards the API transcribes and
+writes notes (summary, key points, decisions, action items, open questions).
+Listening only: it never turns on a microphone or camera.
+
+```
+page ──▶ API (meetings row: queued)
+bot container ──claim──▶ joining ▶ waiting ▶ in_meeting  (reports status)
+bot ──audio segments (2 min, each a complete webm)──▶ API ──▶ storage
+bot ──ended──▶ API enqueues manks_analyze ──▶ Whisper per segment ──▶ insights
+```
+
+The bot is its own container (`bot/manks`, Playwright + Chromium), opt-in:
+`docker compose --profile manks up -d manks`, with `MANKS_BOT_SECRET` set on
+both sides. It holds no model keys and can only claim work, report status and
+upload audio. Transcription and notes run on the job queue on the OWNER's keys.
+
+How it listens: an init script wraps `RTCPeerConnection` so every remote audio
+track is also routed into one WebAudio mix, and a `MediaRecorder` records the
+mix. No virtual sound card. Segments rather than one file, because a crash then
+loses minutes not the meeting, and there is no ffmpeg in the API image to split
+a long recording.
+
+**Verified:** the recorder against a loopback WebRTC call in real Chromium
+(track hooked, speech captured, segments uploaded), then the whole path after
+it: status `ended` → job → Whisper → notes.
+
+**Not verified, because it needs a live meeting and somebody to admit the bot:**
+Meet's join screen. The selectors are written from how it looks today and
+Google changes it without notice; when a step cannot find its button the bot
+reports what the page said and saves a screenshot to `/tmp`. Hosts can switch
+guests off, in which case Meet demands a sign-in and the bot says exactly that
+(`MANKS_GOOGLE_STATE` takes a saved login for a bot account).
+
+Not built yet: speaker names (Meet's captions carry them), speaking, and a
+Render deployment for the bot (it needs a service that can run a browser).
+
+### Manks, talking
+
+A BigBlueButton meeting joined with the **browser** bot can be sent with "Let it
+talk" (`Meeting.talk`). The bot then opens a second line to the API,
+`/manks/bot/{id}/talk` (same shared secret, still no provider keys in the bot):
+the page's mixed meeting audio goes up as 16 kHz PCM, and 24 kHz speech comes
+back and is played into a **virtual microphone** (`getUserMedia` is answered
+with a `MediaStreamDestination` the bot feeds).
+
+On the API (`services/manks_talk.py`) an energy detector cuts the mix into
+utterances, Whisper writes each one down, and only an utterance that says the
+bot's name (or follows its last answer within 25 s) is handed to the same
+`duplex.Session` the browser uses: speculative LLM with tools, streaming Gemini
+Live voice, barge-in. Everything else is kept as context ("meeting so far") and
+nothing is said. Cost of that gate: the answer starts about a second later than
+in the Duplex page, because the utterance is transcribed once before the
+Session sees it.
+
+Verified: the utterance gate (silent when not addressed, answers when addressed,
+answers a name-less follow-up) against the live API, and the virtual microphone
+and PCM tap in real Chromium. NOT verified: the BigBlueButton audio dialog flow
+(Microphone, echo test, unmute) against a live room; it is written from the
+2.7 client's selectors and reports a screenshot to `/tmp/manks-<id>-mic.png` if
+it cannot open the microphone. The lightweight (no browser) client cannot talk:
+BBB 2.x carries the microphone over FreeSWITCH/SIP, not the SFU it listens on.

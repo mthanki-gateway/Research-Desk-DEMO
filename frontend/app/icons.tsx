@@ -90,6 +90,15 @@ export const IconHowler = (p: Props) => (
   </Svg>
 );
 
+/** Manks: a figure in a meeting window, listening. */
+export const IconManks = (p: Props) => (
+  <Svg {...p}>
+    <rect x="3" y="4" width="18" height="13" rx="2.5" />
+    <circle cx="12" cy="9.5" r="2" />
+    <path d="M8 14.5a4 4 0 0 1 8 0M8 21h8M12 17v4" />
+  </Svg>
+);
+
 /** Duplex: two waveforms passing in opposite directions. */
 export const IconDuplex = (p: Props) => (
   <Svg {...p}>
