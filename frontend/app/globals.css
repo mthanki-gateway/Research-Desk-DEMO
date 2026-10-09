@@ -1727,11 +1727,25 @@ textarea:focus-visible {
   .md-drawer[data-collapsed="true"] .md-collapse-hide {
     display: none !important;
   }
+  /* Rail geometry: 88px wide, 12px side padding, 8px group padding, which
+     leaves exactly a 48px column for every item, centred. */
+  .md-drawer[data-collapsed="true"] .md-nav-group {
+    padding: 0.5rem !important;
+  }
   .md-drawer[data-collapsed="true"] .md-nav-item {
     font-size: 0 !important;
     gap: 0 !important;
     padding: 0 !important;
     justify-content: center !important;
+    width: 48px;
+    height: 48px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+  .md-drawer[data-collapsed="true"] .md-drawer-account {
+    padding-top: 0.25rem !important;
+    padding-bottom: 0.25rem !important;
+    background: transparent !important;
   }
   .md-drawer[data-collapsed="true"] .md-drawer-head,
   .md-drawer[data-collapsed="true"] .md-drawer-account {

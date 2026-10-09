@@ -273,7 +273,25 @@ async def delete_meeting(meeting_id: uuid.UUID, user: User = Depends(current_use
     control check reads "leave" (see `bot_control`), and anything it uploads
     after that is turned away as a meeting that does not exist.
     """
-    m = await _load(meeting_id, user)
+    await _purge(await _load(meeting_id, user))
+    return Response(status_code=204)
+
+
+@router.post("/meetings/delete")
+async def delete_meetings(body: dict, user: User = Depends(current_user)) -> dict:
+    """Delete several meetings at once. Ids that are not this owner's are skipped."""
+    try:
+        ids = [uuid.UUID(str(i)) for i in (body.get("ids") or [])][:500]
+    except ValueError as exc:
+        raise HTTPException(400, "Bad meeting id.") from exc
+    async with SessionLocal() as db:
+        rows = (await db.execute(_owned(select(Meeting).where(Meeting.id.in_(ids)), user))).scalars().all()
+    for m in rows:
+        await _purge(m)
+    return {"deleted": len(rows)}
+
+
+async def _purge(m: Meeting) -> None:
     storage = get_storage()
     for seg in m.segments or []:
         try:
@@ -294,7 +312,6 @@ async def delete_meeting(meeting_id: uuid.UUID, user: User = Depends(current_use
             await db.delete(row)
         await db.commit()
     log.info("manks_meeting_deleted", meeting=str(m.id), segments=len(m.segments or []))
-    return Response(status_code=204)
 
 
 @router.get("/meetings/{meeting_id}/audio/{index}", response_model=None)

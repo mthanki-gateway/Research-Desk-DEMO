@@ -1402,6 +1402,13 @@ export async function listMeetings(
   return res.json();
 }
 
+/** Delete several meetings: recordings, transcripts, notes, everything. */
+export async function deleteMeetings(ids: string[]): Promise<number> {
+  const res = await authedJson("/manks/meetings/delete", "POST", { ids });
+  if (!res.ok) throw new Error(await detail(res));
+  return (await res.json()).deleted;
+}
+
 export async function getMeeting(id: string): Promise<Meeting> {
   const res = await authedFetch(`/manks/meetings/${id}`, { cache: "no-store" });
   if (!res.ok) throw new Error(await detail(res));

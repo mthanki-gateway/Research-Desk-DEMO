@@ -7,12 +7,13 @@ import {
   analyzeMeeting,
   createMeeting,
   deleteMeeting,
+  deleteMeetings,
   getManksStatus,
   getMeeting,
   leaveMeeting,
   listMeetings,
 } from "@/lib/api";
-import { Button, ConfirmButton, Switch } from "../../md";
+import { Button, Checkbox, ConfirmButton, Switch } from "../../md";
 import { IconManks, IconSpinner } from "../../icons";
 import { Player, type PlayerHandle } from "./player";
 
@@ -283,25 +284,39 @@ function Tag({ children }: { children: React.ReactNode }) {
 
 function BotRow({
   m,
+  picked,
+  onPick,
   onOpen,
   onLeave,
   onDelete,
 }: {
   m: Meeting;
+  picked: boolean;
+  onPick: () => void;
   onOpen: () => void;
   onLeave: () => void;
   onDelete: () => void;
 }) {
   const live = LIVE.includes(m.status);
   return (
-    <li>
+    <li className="flex items-center gap-2">
+      <button
+        type="button"
+        role="checkbox"
+        aria-checked={picked}
+        aria-label={`Select ${m.title || "meeting"}`}
+        onClick={onPick}
+        className="md-state grid h-10 w-10 shrink-0 place-items-center rounded-[var(--md-shape-full)]"
+      >
+        <Checkbox on={picked} />
+      </button>
       <div
         role="button"
         tabIndex={0}
         onClick={onOpen}
         onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && onOpen()}
-        className="md-state flex flex-col gap-2 rounded-[var(--md-shape-md)] px-4 py-3 sm:flex-row sm:items-center sm:gap-4"
-        style={{ background: "var(--md-surface-container)" }}
+        className="md-state flex min-w-0 flex-1 flex-col gap-2 rounded-[var(--md-shape-md)] px-4 py-3 sm:flex-row sm:items-center sm:gap-4"
+        style={{ background: picked ? "var(--md-secondary-container)" : "var(--md-surface-container)" }}
       >
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
@@ -377,12 +392,22 @@ export default function ManksSurface() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<"all" | "active" | "finished">("all");
+  // Ticked rows, for the bulk delete. Kept across pages; cleared on a new search.
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const toggle = (id: string) =>
+    setPicked((p) => {
+      const n = new Set(p);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
 
   // Typing settles for a moment before it becomes a query.
   useEffect(() => {
     const t = window.setTimeout(() => {
       setQ(search.trim());
       setPage(0);
+      setPicked(new Set());
     }, 300);
     return () => window.clearTimeout(t);
   }, [search]);
@@ -471,6 +496,18 @@ export default function ManksSurface() {
   }
 
   const pages = Math.max(1, Math.ceil(total / PAGE));
+  const allOnPage = meetings.length > 0 && meetings.every((m) => picked.has(m.id));
+  const pickedLive = meetings.some((m) => picked.has(m.id) && LIVE.includes(m.status));
+  function pickPage() {
+    setPicked((p) => {
+      const n = new Set(p);
+      for (const m of meetings) {
+        if (allOnPage) n.delete(m.id);
+        else n.add(m.id);
+      }
+      return n;
+    });
+  }
 
   if (selected) {
     return (
@@ -576,6 +613,45 @@ export default function ManksSurface() {
             />
           </div>
         </div>
+        {meetings.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              role="checkbox"
+              aria-checked={allOnPage}
+              aria-label="Select every meeting on this page"
+              onClick={pickPage}
+              className="md-state grid h-10 w-10 shrink-0 place-items-center rounded-[var(--md-shape-full)]"
+            >
+              <Checkbox on={allOnPage} />
+            </button>
+            <span className="md-label-large" style={{ color: "var(--md-on-surface-variant)" }}>
+              {picked.size ? `${picked.size} selected` : "Select all"}
+            </span>
+            {picked.size > 0 && (
+              <>
+                <Button variant="text" size="sm" onClick={() => setPicked(new Set())}>
+                  Clear
+                </Button>
+                <ConfirmButton
+                  label={`Delete ${picked.size}`}
+                  title={`Delete ${picked.size} meeting${picked.size === 1 ? "" : "s"}?`}
+                  body={
+                    (pickedLive ? "Bots still in a meeting leave it. " : "") +
+                    "Every recording, transcript and set of notes for them is removed. This cannot be undone."
+                  }
+                  confirmLabel="Delete"
+                  onConfirm={() =>
+                    void act(async () => {
+                      await deleteMeetings([...picked]);
+                      setPicked(new Set());
+                    })
+                  }
+                />
+              </>
+            )}
+          </div>
+        )}
         {meetings.length === 0 ? (
           <p className="md-body-small" style={{ color: "var(--md-on-surface-variant)" }}>
             {q || filter !== "all" ? "No meetings match." : "No bots yet. Configure one above and send it."}
@@ -586,9 +662,20 @@ export default function ManksSurface() {
               <BotRow
                 key={m.id}
                 m={m}
+                picked={picked.has(m.id)}
+                onPick={() => toggle(m.id)}
                 onOpen={() => setSelected(m.id)}
                 onLeave={() => void act(() => leaveMeeting(m.id))}
-                onDelete={() => void act(() => deleteMeeting(m.id))}
+                onDelete={() =>
+                  void act(async () => {
+                    await deleteMeeting(m.id);
+                    setPicked((p) => {
+                      const n = new Set(p);
+                      n.delete(m.id);
+                      return n;
+                    });
+                  })
+                }
               />
             ))}
           </ul>
